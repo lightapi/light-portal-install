@@ -1,0 +1,36 @@
+startup.host: ${LIGHT_AGENT_STARTUP_HOST:dev.lightapi.net}
+startup.timeout: 3000
+startup.connectTimeout: 3000
+startup.bootstrapCaCertPath: /keystore/ca.pem
+startup.externalConfigDir: /app/config-cache
+
+light-config-server-uri: https://config-server:8435
+
+server.serviceId: ${LIGHT_AGENT_SERVICE_ID:com.networknt.agent.account-1.0.0}
+server.environment: ${LIGHT_AGENT_ENVIRONMENT:}
+server.ip: 0.0.0.0
+server.advertisedAddress: ${LIGHT_AGENT_ADVERTISED_ADDRESS:light-agent}
+server.httpPort: ${LIGHT_AGENT_HTTP_PORT:8083}
+server.enableHttp: true
+server.enableHttps: false
+server.enableRegistry: true
+server.startOnRegistryFailure: true
+
+portalRegistry.portalUrl: https://controller:8438
+portalQuery.url: https://hybrid-query:8440
+
+mcp-client.gatewayUrl: https://light-gateway:8443
+mcp-client.path: /mcp
+mcp-client.timeoutMs: 10000
+
+client.verifyHostname: false
+client.caCertPath: /keystore/ca.pem
+
+model-provider.provider: codex
+model-provider.model: ${LIGHT_AGENT_MODEL:gpt-5.5}
+model-provider.temperature: ${LIGHT_AGENT_TEMPERATURE:0.7}
+
+codex.apiKey: ${CODEX_API_KEY:}
+codex.accountId: ${CODEX_ACCOUNT_ID:}
+codex.reasoningEffort: ${CODEX_REASONING_EFFORT:low}
+codex.model: ${LIGHT_AGENT_MODEL:gpt-5.5}

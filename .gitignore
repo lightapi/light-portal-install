@@ -1,0 +1,16 @@
+.env
+docker-images.env
+events.json
+data/
+
+hybrid-command/service/*
+!hybrid-command/service/.gitkeep
+
+hybrid-query/service/*
+!hybrid-query/service/.gitkeep
+
+light-gateway-rust/lightapi/dist/*
+!light-gateway-rust/lightapi/dist/.gitkeep
+
+light-gateway-rust/signin/dist/*
+!light-gateway-rust/signin/dist/.gitkeep
