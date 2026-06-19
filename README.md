@@ -3,7 +3,7 @@
 Local Light Portal deployment with Docker Compose as the only host dependency.
 
 ```bash
-curl -sL https://raw.githubusercontent.com/networknt/light-portal-install/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/lightapi/light-portal-install/master/install.sh | bash
 ```
 
 For a checked-out repo:

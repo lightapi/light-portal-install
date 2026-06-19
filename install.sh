@@ -25,7 +25,7 @@ Environment:
   LIGHT_PORTAL_INSTALL_DIR   Optional target directory. If set, the script
                              copies repo files there before running.
   LIGHT_PORTAL_REPO_ARCHIVE  Default:
-                             https://github.com/networknt/light-portal-install/archive/refs/heads/main.tar.gz
+                             https://github.com/lightapi/light-portal-install/archive/refs/heads/master.tar.gz
 USAGE
 }
 
@@ -50,7 +50,7 @@ if [[ "$command_name" == "-h" || "$command_name" == "--help" ]]; then
   exit 0
 fi
 
-repo_archive="${LIGHT_PORTAL_REPO_ARCHIVE:-https://github.com/networknt/light-portal-install/archive/refs/heads/main.tar.gz}"
+repo_archive="${LIGHT_PORTAL_REPO_ARCHIVE:-https://github.com/lightapi/light-portal-install/archive/refs/heads/master.tar.gz}"
 
 if [[ -f "$script_dir/docker-compose.yml" ]]; then
   source_dir="$script_dir"
