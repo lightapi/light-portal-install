@@ -21,7 +21,6 @@ Environment:
                              Default: https://cdn.networknt.com
   LIGHT_PORTAL_RELEASE_BASE_URL
                              Default: $LIGHT_PORTAL_ASSET_BASE_URL/light-portal/releases
-  LIGHT_PORTAL_MANIFEST      Default: ./asset-manifest.txt
   LIGHT_PORTAL_INSTALL_DIR   Optional target directory. If set, the script
                              copies repo files there before running.
   LIGHT_PORTAL_REPO_ARCHIVE  Default:
@@ -89,8 +88,6 @@ asset_base_url="${LIGHT_PORTAL_ASSET_BASE_URL:-https://cdn.networknt.com}"
 asset_base_url="${asset_base_url%/}"
 release_base_url="${LIGHT_PORTAL_RELEASE_BASE_URL:-$asset_base_url/light-portal/releases}"
 release_base_url="${release_base_url%/}"
-manifest_file="${LIGHT_PORTAL_MANIFEST:-asset-manifest.txt}"
-
 compose() {
   if [[ -f docker-images.env ]]; then
     docker compose --env-file docker-images.env --env-file .env "$@"
@@ -111,36 +108,35 @@ download_file() {
   mv "$tmp" "$dest"
 }
 
-local_path_for_asset() {
-  local asset_path="$1"
+download_archive() {
+  local archive_name="$1"
+  local target_dir="$2"
+  local archive_file="data/$archive_name"
 
-  case "$asset_path" in
-    hybrid-command/*)
-      printf 'hybrid-command/service/%s\n' "${asset_path#hybrid-command/}"
-      ;;
-    hybrid-query/*)
-      printf 'hybrid-query/service/%s\n' "${asset_path#hybrid-query/}"
-      ;;
-    lightapi/dist/*)
-      printf 'light-gateway-rust/lightapi/dist/%s\n' "${asset_path#lightapi/dist/}"
-      ;;
-    signin/dist/*)
-      printf 'light-gateway-rust/signin/dist/%s\n' "${asset_path#signin/dist/}"
-      ;;
-    *)
-      printf '%s\n' "$asset_path"
-      ;;
-  esac
+  download_file "$asset_base_url/$archive_name" "$archive_file"
+  rm -rf "$target_dir"
+  mkdir -p "$target_dir"
+  log "extracting $archive_file to $target_dir"
+  unzip -q "$archive_file" -d "$target_dir"
+}
+
+download_archive_file() {
+  local archive_name="$1"
+  local member_name="$2"
+  local dest="$3"
+  local archive_file="data/$archive_name"
+
+  download_file "$asset_base_url/$archive_name" "$archive_file"
+  log "extracting $member_name from $archive_file to $dest"
+  unzip -p "$archive_file" "$member_name" > "$dest.tmp"
+  mv "$dest.tmp" "$dest"
 }
 
 download_assets() {
-  local asset_path
-  local target_path
   local docker_env_url
 
   require_command curl
-
-  [[ -f "$manifest_file" ]] || die "asset manifest not found: $manifest_file"
+  require_command unzip
 
   mkdir -p hybrid-command/service hybrid-query/service \
     light-gateway-rust/lightapi/dist light-gateway-rust/signin/dist data
@@ -152,18 +148,11 @@ download_assets() {
     cp .env.example .env
   fi
 
-  while IFS= read -r asset_path || [[ -n "$asset_path" ]]; do
-    [[ -n "$asset_path" && "$asset_path" != \#* ]] || continue
-    target_path="$(local_path_for_asset "$asset_path")"
-    download_file "$asset_base_url/$asset_path" "$target_path"
-  done < "$manifest_file"
-
-  if curl -fsSL "$asset_base_url/events.json" -o events.json.tmp; then
-    mv events.json.tmp events.json
-  else
-    rm -f events.json.tmp
-    log "events.json was not downloaded; continuing without import data"
-  fi
+  download_archive hybrid-command.zip hybrid-command/service
+  download_archive hybrid-query.zip hybrid-query/service
+  download_archive lightapi.zip light-gateway-rust/lightapi
+  download_archive signin.zip light-gateway-rust/signin
+  download_archive_file events.zip events.json events.json
 }
 
 start_stack() {
