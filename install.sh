@@ -42,7 +42,6 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || die "$1 is required but was not found in PATH"
 }
 
-script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 command_name="${1:-install}"
 
 if [[ "$command_name" == "-h" || "$command_name" == "--help" ]]; then
@@ -51,8 +50,14 @@ if [[ "$command_name" == "-h" || "$command_name" == "--help" ]]; then
 fi
 
 repo_archive="${LIGHT_PORTAL_REPO_ARCHIVE:-https://github.com/lightapi/light-portal-install/archive/refs/heads/master.tar.gz}"
+script_path="${BASH_SOURCE[0]:-}"
+script_dir=""
 
-if [[ -f "$script_dir/docker-compose.yml" ]]; then
+if [[ -n "$script_path" && -f "$script_path" ]]; then
+  script_dir="$(cd -- "$(dirname -- "$script_path")" && pwd)"
+fi
+
+if [[ -n "$script_dir" && -f "$script_dir/docker-compose.yml" ]]; then
   source_dir="$script_dir"
 else
   require_command curl
