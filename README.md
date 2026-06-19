@@ -21,6 +21,12 @@ The installer downloads refreshed service assets from compressed Cloudflare R2
 archives in the `lightapi` bucket and starts the Rust `all-in-lt` stack with
 `light-agent` and the local demo APIs.
 
+On install, update, and start, the script first starts Postgres plus
+`hybrid-command` and `hybrid-query`, imports `events.json` when `event_store_t`
+is empty, and then starts the full Compose stack. This avoids the first-run
+dependency loop where `light-oauth` cannot serve JWKS until the OAuth key data
+has been imported.
+
 When run through `curl | bash`, the script bootstraps this repo into
 `$HOME/.light-portal` before downloading and extracting R2 assets and starting
 Compose.
@@ -48,3 +54,6 @@ Override these if the public R2 custom domain changes:
 LIGHT_PORTAL_ASSET_BASE_URL=https://example.com ./install.sh assets
 LIGHT_PORTAL_RELEASE_BASE_URL=https://example.com/light-portal/releases ./install.sh assets
 ```
+
+Set `IMPORT_EVENTS=false` only when you intentionally want to skip the
+bootstrap import.

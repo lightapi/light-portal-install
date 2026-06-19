@@ -25,6 +25,8 @@ Environment:
                              copies repo files there before running.
   LIGHT_PORTAL_REPO_ARCHIVE  Default:
                              https://github.com/lightapi/light-portal-install/archive/refs/heads/master.tar.gz
+  IMPORT_EVENTS              Default: auto. Use false to skip event import.
+  EVENT_IMPORTER_IMAGE       Default: networknt/event-importer:latest
 USAGE
 }
 
@@ -96,6 +98,20 @@ compose() {
   fi
 }
 
+load_env_file_var() {
+  local name="$1"
+  local value
+
+  if [[ -n "${!name:-}" || ! -f docker-images.env ]]; then
+    return 0
+  fi
+
+  value="$(awk -F= -v key="$name" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' docker-images.env)"
+  if [[ -n "$value" ]]; then
+    export "$name=$value"
+  fi
+}
+
 download_file() {
   local url="$1"
   local dest="$2"
@@ -161,20 +177,138 @@ start_stack() {
   compose up -d
 }
 
+wait_for_postgres() {
+  local max_attempts="${POSTGRES_READY_ATTEMPTS:-60}"
+  local interval="${POSTGRES_READY_INTERVAL:-2}"
+  local attempt=1
+  local status
+
+  while [[ "$attempt" -le "$max_attempts" ]]; do
+    status="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' postgres 2>/dev/null || true)"
+    if [[ "$status" == "healthy" ]]; then
+      return 0
+    fi
+    sleep "$interval"
+    attempt=$((attempt + 1))
+  done
+
+  return 1
+}
+
+wait_for_running_container() {
+  local container_name="$1"
+  local max_attempts="${BOOTSTRAP_SERVICE_READY_ATTEMPTS:-30}"
+  local interval="${BOOTSTRAP_SERVICE_READY_INTERVAL:-2}"
+  local attempt=1
+  local status
+
+  while [[ "$attempt" -le "$max_attempts" ]]; do
+    status="$(docker inspect -f '{{.State.Status}}' "$container_name" 2>/dev/null || true)"
+    if [[ "$status" == "running" ]]; then
+      return 0
+    fi
+    sleep "$interval"
+    attempt=$((attempt + 1))
+  done
+
+  return 1
+}
+
+start_event_processors() {
+  log "starting event bootstrap services"
+  compose up -d postgres
+  wait_for_postgres || die "postgres did not become healthy"
+
+  compose up -d --no-deps hybrid-command hybrid-query
+  wait_for_running_container hybrid-command || die "hybrid-command did not start"
+  wait_for_running_container hybrid-query || die "hybrid-query did not start"
+}
+
+event_store_count() {
+  docker exec postgres psql -U postgres -d configserver -tAc "select count(*) from event_store_t;" 2>/dev/null | tr -d '[:space:]'
+}
+
+default_event_import_network() {
+  local network
+
+  network="$(docker inspect -f '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' postgres 2>/dev/null | head -n 1 || true)"
+  if [[ -n "$network" ]]; then
+    printf '%s\n' "$network"
+  else
+    printf '%s_default\n' "$(basename "$PWD")"
+  fi
+}
+
+import_events() {
+  local import_mode="${IMPORT_EVENTS:-auto}"
+  local import_mode_lower="${import_mode,,}"
+  local event_count=""
+  local importer_image
+  local import_network
+
+  case "$import_mode_lower" in
+    false|no|0|"")
+      log "event import skipped"
+      return 0
+      ;;
+    auto|true|yes|1|force)
+      ;;
+    *)
+      die "invalid IMPORT_EVENTS value: $import_mode"
+      ;;
+  esac
+
+  [[ -f events.json ]] || die "events.json is missing; run ./install.sh assets first"
+
+  event_count="$(event_store_count || true)"
+  if [[ "$event_count" =~ ^[0-9]+$ && "$import_mode_lower" == "auto" && "$event_count" -gt 0 ]]; then
+    log "event_store_t already has $event_count rows; skipping event import"
+    return 0
+  fi
+  if [[ ! "$event_count" =~ ^[0-9]+$ ]]; then
+    die "cannot read event_store_t before event import"
+  fi
+
+  load_env_file_var EVENT_IMPORTER_IMAGE
+  importer_image="${EVENT_IMPORTER_IMAGE:-networknt/event-importer:latest}"
+  import_network="${EVENT_IMPORT_NETWORK:-$(default_event_import_network)}"
+
+  log "importing events.json with $importer_image"
+  docker run --rm \
+    --network "$import_network" \
+    -v "$PWD/events.json:/events/events.json:ro" \
+    -e DB_JDBC_URL="${EVENT_IMPORT_DB_JDBC_URL:-jdbc:postgresql://postgres:5432/configserver}" \
+    -e DB_USERNAME="${EVENT_IMPORT_DB_USERNAME:-postgres}" \
+    -e DB_PASSWORD="${EVENT_IMPORT_DB_PASSWORD:-secret}" \
+    -e DB_MAXIMUM_POOL_SIZE="${EVENT_IMPORT_DB_MAXIMUM_POOL_SIZE:-3}" \
+    "$importer_image" \
+    --filename /events/events.json
+}
+
+bootstrap_events() {
+  require_command docker
+  [[ -f .env ]] || cp .env.example .env
+  start_event_processors
+  import_events
+}
+
 case "$command_name" in
   install)
     download_assets
+    bootstrap_events
     start_stack
     log "portal should be available at https://localhost:${LIGHT_GATEWAY_HOST_PORT:-443}"
     ;;
   update)
     download_assets
+    bootstrap_events
     start_stack
     ;;
   assets)
     download_assets
     ;;
   start)
+    bootstrap_events
     start_stack
     ;;
   stop)
