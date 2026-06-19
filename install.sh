@@ -230,11 +230,9 @@ wait_for_postgres() {
   local max_attempts="${POSTGRES_READY_ATTEMPTS:-60}"
   local interval="${POSTGRES_READY_INTERVAL:-2}"
   local attempt=1
-  local status
 
   while [[ "$attempt" -le "$max_attempts" ]]; do
-    status="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' postgres 2>/dev/null || true)"
-    if [[ "$status" == "healthy" ]]; then
+    if docker exec postgres psql -h localhost -p 5432 -U postgres -d configserver -tAc "select 1;" >/dev/null 2>&1; then
       return 0
     fi
     sleep "$interval"
@@ -273,15 +271,16 @@ wait_for_running_container() {
 start_event_processors() {
   log "starting event bootstrap services"
   compose up -d postgres
-  wait_for_postgres || die "postgres did not become healthy"
+  wait_for_postgres || die "postgres did not become ready for TCP connections"
 
   compose up -d --no-deps hybrid-command hybrid-query
   wait_for_running_container hybrid-command || die "hybrid-command did not start"
   wait_for_running_container hybrid-query || die "hybrid-query did not start"
+  wait_for_postgres || die "postgres stopped accepting TCP connections"
 }
 
 event_store_count() {
-  docker exec postgres psql -U postgres -d configserver -tAc "select count(*) from event_store_t;" 2>/dev/null | tr -d '[:space:]'
+  docker exec postgres psql -h localhost -p 5432 -U postgres -d configserver -tAc "select count(*) from event_store_t;" 2>/dev/null | tr -d '[:space:]'
 }
 
 default_event_import_network() {

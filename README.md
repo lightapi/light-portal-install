@@ -58,7 +58,7 @@ option to delete the Docker volumes for a fresh reinstall.
 To force a fresh database and re-import `events.json`, run with
 `CLEAN_VOLUMES=true`. This stops the stack, deletes the Compose volumes, starts
 Postgres and the event processors again, and imports the downloaded events into
-the recreated database:
+the recreated database after Postgres accepts TCP connections:
 
 ```bash
 cd "$HOME/.light-portal"
