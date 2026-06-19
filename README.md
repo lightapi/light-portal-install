@@ -27,6 +27,10 @@ is empty, and then starts the full Compose stack. This avoids the first-run
 dependency loop where `light-oauth` cannot serve JWKS until the OAuth key data
 has been imported.
 
+On Silverblue/Podman, the event import streams `events.json` over stdin instead
+of bind-mounting it into the importer container. This avoids SELinux mount
+label issues that can make `/events/events.json` unreadable inside Java.
+
 When run through `curl | bash`, the script bootstraps this repo into
 `$HOME/.light-portal` before downloading and extracting R2 assets and starting
 Compose.

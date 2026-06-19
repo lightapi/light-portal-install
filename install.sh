@@ -195,6 +195,13 @@ wait_for_postgres() {
   return 1
 }
 
+docker_runtime_is_podman() {
+  local version_output
+
+  version_output="$(docker --version 2>&1 || true)"
+  [[ "$version_output" == *podman* || "$version_output" == *Podman* ]]
+}
+
 wait_for_running_container() {
   local container_name="$1"
   local max_attempts="${BOOTSTRAP_SERVICE_READY_ATTEMPTS:-30}"
@@ -273,16 +280,28 @@ import_events() {
   importer_image="${EVENT_IMPORTER_IMAGE:-networknt/event-importer:latest}"
   import_network="${EVENT_IMPORT_NETWORK:-$(default_event_import_network)}"
 
-  log "importing events.json with $importer_image"
-  docker run --rm \
-    --network "$import_network" \
-    -v "$PWD/events.json:/events/events.json:ro" \
-    -e DB_JDBC_URL="${EVENT_IMPORT_DB_JDBC_URL:-jdbc:postgresql://postgres:5432/configserver}" \
-    -e DB_USERNAME="${EVENT_IMPORT_DB_USERNAME:-postgres}" \
-    -e DB_PASSWORD="${EVENT_IMPORT_DB_PASSWORD:-secret}" \
-    -e DB_MAXIMUM_POOL_SIZE="${EVENT_IMPORT_DB_MAXIMUM_POOL_SIZE:-3}" \
-    "$importer_image" \
-    --filename /events/events.json
+  if docker_runtime_is_podman; then
+    log "streaming events.json to $importer_image over stdin"
+    docker run --rm -i \
+      --network "$import_network" \
+      -e DB_JDBC_URL="${EVENT_IMPORT_DB_JDBC_URL:-jdbc:postgresql://postgres:5432/configserver}" \
+      -e DB_USERNAME="${EVENT_IMPORT_DB_USERNAME:-postgres}" \
+      -e DB_PASSWORD="${EVENT_IMPORT_DB_PASSWORD:-secret}" \
+      -e DB_MAXIMUM_POOL_SIZE="${EVENT_IMPORT_DB_MAXIMUM_POOL_SIZE:-3}" \
+      "$importer_image" \
+      --filename /dev/stdin < events.json
+  else
+    log "importing events.json with $importer_image"
+    docker run --rm \
+      --network "$import_network" \
+      -v "$PWD/events.json:/events/events.json:ro,z" \
+      -e DB_JDBC_URL="${EVENT_IMPORT_DB_JDBC_URL:-jdbc:postgresql://postgres:5432/configserver}" \
+      -e DB_USERNAME="${EVENT_IMPORT_DB_USERNAME:-postgres}" \
+      -e DB_PASSWORD="${EVENT_IMPORT_DB_PASSWORD:-secret}" \
+      -e DB_MAXIMUM_POOL_SIZE="${EVENT_IMPORT_DB_MAXIMUM_POOL_SIZE:-3}" \
+      "$importer_image" \
+      --filename /events/events.json
+  fi
 }
 
 bootstrap_events() {
