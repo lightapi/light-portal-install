@@ -29,6 +29,8 @@ Environment:
   EVENT_IMPORTER_IMAGE       Default: networknt/event-importer:latest
   LIGHT_PORTAL_CLIENT_REDIRECT_URI
                              Default: https://local.localhost/authorization
+  CLEAN_VOLUMES=true         Stop the stack and delete Docker volumes before
+                             install, update, or start.
 USAGE
 }
 
@@ -213,6 +215,17 @@ start_stack() {
   compose up -d
 }
 
+clean_volumes_if_requested() {
+  case "${CLEAN_VOLUMES:-false}" in
+    true|TRUE|1|yes|YES|y|Y)
+      require_command docker
+      [[ -f .env ]] || cp .env.example .env
+      log "CLEAN_VOLUMES=true; stopping stack and deleting Docker volumes"
+      compose down -v
+      ;;
+  esac
+}
+
 wait_for_postgres() {
   local max_attempts="${POSTGRES_READY_ATTEMPTS:-60}"
   local interval="${POSTGRES_READY_INTERVAL:-2}"
@@ -351,12 +364,14 @@ bootstrap_events() {
 case "$command_name" in
   install)
     download_assets
+    clean_volumes_if_requested
     bootstrap_events
     start_stack
     log "portal should be available at https://localhost:${LIGHT_GATEWAY_HOST_PORT:-443}"
     ;;
   update)
     download_assets
+    clean_volumes_if_requested
     bootstrap_events
     start_stack
     ;;
@@ -364,6 +379,7 @@ case "$command_name" in
     download_assets
     ;;
   start)
+    clean_volumes_if_requested
     bootstrap_events
     start_stack
     ;;

@@ -44,6 +44,30 @@ When run through `curl | bash`, the script bootstraps this repo into
 `$HOME/.light-portal` before downloading and extracting R2 assets and starting
 Compose.
 
+To stop the Compose stack after installing with `curl | bash`, run the stop
+command from the bootstrapped install directory:
+
+```bash
+cd "$HOME/.light-portal"
+./install.sh stop
+```
+
+Use `./install.sh uninstall` from the same directory when you also want the
+option to delete the Docker volumes for a fresh reinstall.
+
+To force a fresh database and re-import `events.json`, run with
+`CLEAN_VOLUMES=true`. This stops the stack, deletes the Compose volumes, starts
+Postgres and the event processors again, and imports the downloaded events into
+the recreated database:
+
+```bash
+cd "$HOME/.light-portal"
+CLEAN_VOLUMES=true ./install.sh start
+```
+
+Use the same flag with `install` or `update` when you also want to refresh the
+downloaded assets first.
+
 By default the script expects public R2 assets under:
 
 ```text
