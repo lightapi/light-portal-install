@@ -35,7 +35,6 @@ db-provider.maximumPoolSize: 3
 # cors.yml
 cors.enabled: true
 cors.allowedOrigins:
-  - https://localhost:3000
   - https://local.localhost
   - https://signin.localhost
   - https://oauth.localhost

@@ -185,6 +185,20 @@ normalize_events_json() {
   fi
 }
 
+normalize_portal_assets() {
+  local asset_dir="${1:-light-gateway-rust/lightapi}"
+  local file
+
+  [[ -d "$asset_dir" ]] || return 0
+
+  while IFS= read -r file; do
+    if grep -Fq "user_type=C" "$file"; then
+      log "normalizing portal signin user_type in $file"
+      replace_literal_in_file "$file" "user_type=C" "user_type=E"
+    fi
+  done < <(find "$asset_dir" -type f \( -name '*.js' -o -name '*.html' \))
+}
+
 download_assets() {
   local docker_env_url
 
@@ -204,6 +218,7 @@ download_assets() {
   download_archive hybrid-command.zip hybrid-command/service
   download_archive hybrid-query.zip hybrid-query/service
   download_archive lightapi.zip light-gateway-rust/lightapi
+  normalize_portal_assets light-gateway-rust/lightapi
   download_archive signin.zip light-gateway-rust/signin
   download_archive_file events.zip events.json events.json
   normalize_events_json events.json

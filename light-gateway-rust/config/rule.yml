@@ -1,2 +1,0 @@
-ruleBodies: ${rule.ruleBodies:{}}
-endpointRules: ${rule.endpointRules:{}}

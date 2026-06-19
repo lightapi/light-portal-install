@@ -40,6 +40,9 @@ when needed:
 LIGHT_PORTAL_CLIENT_REDIRECT_URI=https://example.local/authorization ./install.sh install
 ```
 
+The installer also normalizes downloaded portal UI assets so the local signin
+link uses employee login (`user_type=E`) instead of the customer login default.
+
 When run through `curl | bash`, the script bootstraps this repo into
 `$HOME/.light-portal` before downloading and extracting R2 assets and starting
 Compose.

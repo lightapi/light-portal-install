@@ -27,7 +27,7 @@ client.tokenServerUrl: https://light-oauth:6881
 client.tokenAcUri: /oauth2/AZZRJE52eXu3t1hseacnGQ/token
 client.tokenAcClientId: f7d42348-c647-4efb-a52d-4c5787421e72
 client.tokenAcClientSecret: f6h1FTI8Q3-7UScPZDzfXA
-client.tokenAcRedirectUri: https://localhost:3000/authorization
+client.tokenAcRedirectUri: https://local.localhost/authorization
 client.tokenAcScope:
   - portal.r
   - portal.w
@@ -520,14 +520,9 @@ cache.caches:
 # cors.yml
 cors.enabled: true
 cors.allowedOrigins:
-  - https://localhost:3000
   - https://local.localhost
   - https://signin.localhost
   - https://oauth.localhost
-  - http://localhost:5173
-  - http://0.0.0.0:6274
-  - https://localhost:8443
-  - https://0.0.0.0:8443
 
 cors.allowedMethods:
   - GET
@@ -540,6 +535,9 @@ cors.allowedMethods:
 statelessAuth.googleClientId: 654131058807-15p8l5r4ddlusbeavvhiin9rt2cuglh6.apps.googleusercontent.com
 statelessAuth.facebookClientId: "603230757035427"
 statelessAuth.githubClientId: f13cddcfe475920deca7
+statelessAuth.redirectUri: https://local.localhost/#/app/dashboard
+statelessAuth.denyUri: https://local.localhost/#/app/dashboard
+statelessAuth.cookieDomain: local.localhost
 
 # security.yml
 security.skipPathPrefixes: ["/adm/server/info"]

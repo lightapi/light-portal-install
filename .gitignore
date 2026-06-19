@@ -14,3 +14,7 @@ light-gateway-rust/lightapi/dist/*
 
 light-gateway-rust/signin/dist/*
 !light-gateway-rust/signin/dist/.gitkeep
+.gitnexus
+.claude/
+AGENTS.md
+CLAUDE.md

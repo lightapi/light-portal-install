@@ -1,3 +1,0 @@
-enabled: ${mcp-router.enabled:true}
-path: ${mcp-router.path:/mcp}
-tools: ${mcp-router.tools:[]}
