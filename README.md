@@ -8,6 +8,12 @@ bootstrap the repo and extract downloaded asset archives.
 curl -fsSL https://raw.githubusercontent.com/lightapi/light-portal-install/master/install.sh | bash
 ```
 
+Once the installation is complete, open your web browser and navigate to `https://local.localhost` to access the dashboard. To sign in, click the user icon in the bottom-left corner of the page. The default username and password are:
+
+```
+steve.hu@lightapi.net/123456
+```
+
 For a checked-out repo:
 
 ```bash
