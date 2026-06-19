@@ -18,7 +18,7 @@ Commands:
 Environment:
   LIGHT_PORTAL_VERSION       Default: VERSION file, usually latest.
   LIGHT_PORTAL_ASSET_BASE_URL
-                             Default: https://assets.lightapi.net
+                             Default: https://cdn.networknt.com
   LIGHT_PORTAL_RELEASE_BASE_URL
                              Default: $LIGHT_PORTAL_ASSET_BASE_URL/light-portal/releases
   LIGHT_PORTAL_MANIFEST      Default: ./asset-manifest.txt
@@ -85,7 +85,7 @@ if [[ -z "$version" && -f VERSION ]]; then
 fi
 version="${version:-latest}"
 
-asset_base_url="${LIGHT_PORTAL_ASSET_BASE_URL:-https://assets.lightapi.net}"
+asset_base_url="${LIGHT_PORTAL_ASSET_BASE_URL:-https://cdn.networknt.com}"
 asset_base_url="${asset_base_url%/}"
 release_base_url="${LIGHT_PORTAL_RELEASE_BASE_URL:-$asset_base_url/light-portal/releases}"
 release_base_url="${release_base_url%/}"

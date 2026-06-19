@@ -25,8 +25,8 @@ When run through `curl | bash`, the script bootstraps this repo into
 By default the script expects public R2 assets under:
 
 ```text
-https://assets.lightapi.net
-https://assets.lightapi.net/light-portal/releases/latest/docker-images.env
+https://cdn.networknt.com
+https://cdn.networknt.com/light-portal/releases/latest/docker-images.env
 ```
 
 Override these if the public R2 custom domain changes:
