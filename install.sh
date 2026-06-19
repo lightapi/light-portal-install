@@ -27,6 +27,8 @@ Environment:
                              https://github.com/lightapi/light-portal-install/archive/refs/heads/master.tar.gz
   IMPORT_EVENTS              Default: auto. Use false to skip event import.
   EVENT_IMPORTER_IMAGE       Default: networknt/event-importer:latest
+  LIGHT_PORTAL_CLIENT_REDIRECT_URI
+                             Default: https://local.localhost/authorization
 USAGE
 }
 
@@ -148,6 +150,39 @@ download_archive_file() {
   mv "$dest.tmp" "$dest"
 }
 
+replace_literal_in_file() {
+  local file="$1"
+  local source="$2"
+  local target="$3"
+
+  awk -v src="$source" -v dst="$target" '
+    {
+      out = ""
+      line = $0
+      while ((pos = index(line, src)) > 0) {
+        out = out substr(line, 1, pos - 1) dst
+        line = substr(line, pos + length(src))
+      }
+      print out line
+    }
+  ' "$file" > "$file.tmp"
+  mv "$file.tmp" "$file"
+}
+
+normalize_events_json() {
+  local events_file="${1:-events.json}"
+  local source_redirect_uri="${LIGHT_PORTAL_SOURCE_CLIENT_REDIRECT_URI:-https://localhost:3000/authorization}"
+  local target_redirect_uri="${LIGHT_PORTAL_CLIENT_REDIRECT_URI:-https://local.localhost/authorization}"
+
+  [[ -f "$events_file" ]] || return 0
+  [[ "$source_redirect_uri" != "$target_redirect_uri" ]] || return 0
+
+  if grep -Fq "$source_redirect_uri" "$events_file"; then
+    log "normalizing OAuth client redirectUri to $target_redirect_uri"
+    replace_literal_in_file "$events_file" "$source_redirect_uri" "$target_redirect_uri"
+  fi
+}
+
 download_assets() {
   local docker_env_url
 
@@ -169,6 +204,7 @@ download_assets() {
   download_archive lightapi.zip light-gateway-rust/lightapi
   download_archive signin.zip light-gateway-rust/signin
   download_archive_file events.zip events.json events.json
+  normalize_events_json events.json
 }
 
 start_stack() {
@@ -266,6 +302,7 @@ import_events() {
   esac
 
   [[ -f events.json ]] || die "events.json is missing; run ./install.sh assets first"
+  normalize_events_json events.json
 
   event_count="$(event_store_count || true)"
   if [[ "$event_count" =~ ^[0-9]+$ && "$import_mode_lower" == "auto" && "$event_count" -gt 0 ]]; then

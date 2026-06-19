@@ -31,6 +31,15 @@ On Silverblue/Podman, the event import streams `events.json` over stdin instead
 of bind-mounting it into the importer container. This avoids SELinux mount
 label issues that can make `/events/events.json` unreadable inside Java.
 
+Before import, the installer normalizes the exported portal OAuth client
+redirect URI from `https://localhost:3000/authorization` to
+`https://local.localhost/authorization`. Override the installed redirect URI
+when needed:
+
+```bash
+LIGHT_PORTAL_CLIENT_REDIRECT_URI=https://example.local/authorization ./install.sh install
+```
+
 When run through `curl | bash`, the script bootstraps this repo into
 `$HOME/.light-portal` before downloading and extracting R2 assets and starting
 Compose.
