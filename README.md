@@ -94,6 +94,21 @@ signin.zip
 events.zip
 ```
 
+For existing installs, `./install.sh update` also downloads the release
+artifacts from `light-portal/releases/<version>/`:
+
+```text
+manifest.json
+db-patches.zip
+event-deltas.zip
+```
+
+It applies SQL patches and imports event delta files once, tracking checksums
+in `portal_schema_patch_t` and `portal_event_delta_t`. This is the normal
+upgrade path when you want to keep the existing database. Use
+`CLEAN_VOLUMES=true` only when you intentionally want to recreate the database
+and re-import the full baseline `events.json`.
+
 Override these if the public R2 custom domain changes:
 
 ```bash

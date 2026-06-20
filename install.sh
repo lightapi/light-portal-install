@@ -31,6 +31,7 @@ Environment:
                              Default: https://local.localhost/authorization
   CLEAN_VOLUMES=true         Stop the stack and delete Docker volumes before
                              install, update, or start.
+  APPLY_RELEASE_DELTAS       Default: true for update, false for install/start.
 USAGE
 }
 
@@ -150,6 +151,24 @@ download_archive_file() {
   log "extracting $member_name from $archive_file to $dest"
   unzip -p "$archive_file" "$member_name" > "$dest.tmp"
   mv "$dest.tmp" "$dest"
+}
+
+download_release_artifacts() {
+  local release_url="$release_base_url/$version"
+
+  require_command curl
+  require_command unzip
+
+  mkdir -p data db/patches events/deltas
+  download_file "$release_url/manifest.json" data/manifest.json
+  download_file "$release_url/db-patches.zip" data/db-patches.zip
+  download_file "$release_url/event-deltas.zip" data/event-deltas.zip
+
+  rm -rf db/patches events/deltas
+  mkdir -p db events
+  unzip -q data/db-patches.zip -d .
+  unzip -q data/event-deltas.zip -d .
+  mkdir -p db/patches events/deltas
 }
 
 replace_literal_in_file() {
@@ -298,6 +317,10 @@ event_store_count() {
   docker exec postgres psql -h localhost -p 5432 -U postgres -d configserver -tAc "select count(*) from event_store_t;" 2>/dev/null | tr -d '[:space:]'
 }
 
+psql_exec() {
+  docker exec -i postgres psql -h localhost -p 5432 -U postgres -d configserver -v ON_ERROR_STOP=1 "$@"
+}
+
 default_event_import_network() {
   local network
 
@@ -368,6 +391,145 @@ import_events() {
   fi
 }
 
+apply_db_patches() {
+  local patch_dir="${DB_PATCH_DIR:-db/patches}"
+  local patches=()
+  local patch
+  local patch_id
+  local checksum
+  local existing_checksum
+  local tmp_sql
+
+  wait_for_postgres || die "postgres did not become ready before database patches"
+
+  psql_exec <<'SQL'
+CREATE TABLE IF NOT EXISTS portal_schema_patch_t (
+  patch_id VARCHAR(128) PRIMARY KEY,
+  checksum VARCHAR(128) NOT NULL,
+  applied_ts TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+SQL
+
+  shopt -s nullglob
+  patches=("$patch_dir"/*.sql)
+  shopt -u nullglob
+
+  if ((${#patches[@]} == 0)); then
+    log "no database patches found in $patch_dir"
+    return 0
+  fi
+
+  IFS=$'\n' patches=($(printf '%s\n' "${patches[@]}" | sort))
+  unset IFS
+
+  for patch in "${patches[@]}"; do
+    patch_id="$(basename -- "$patch" .sql)"
+    checksum="$(sha256sum "$patch" | awk '{print $1}')"
+    existing_checksum="$(docker exec postgres psql -h localhost -p 5432 -U postgres -d configserver -tAc "select checksum from portal_schema_patch_t where patch_id = '$patch_id';" | tr -d '[:space:]' || true)"
+
+    if [[ -n "$existing_checksum" ]]; then
+      [[ "$existing_checksum" == "$checksum" ]] ||
+        die "checksum drift for applied patch $patch_id: database=$existing_checksum file=$checksum"
+      log "database patch already applied: $patch_id"
+      continue
+    fi
+
+    log "applying database patch $patch_id"
+    tmp_sql="$(mktemp "${TMPDIR:-/tmp}/light-portal-db-patch.XXXXXX.sql")"
+    {
+      printf 'BEGIN;\n'
+      cat "$patch"
+      printf '\n'
+      printf "INSERT INTO portal_schema_patch_t (patch_id, checksum) VALUES ('%s', '%s');\n" "$patch_id" "$checksum"
+      printf 'COMMIT;\n'
+    } > "$tmp_sql"
+
+    if ! psql_exec < "$tmp_sql"; then
+      rm -f "$tmp_sql"
+      die "failed to apply database patch $patch_id"
+    fi
+    rm -f "$tmp_sql"
+  done
+}
+
+import_event_deltas() {
+  local delta_dir="${EVENT_DELTA_DIR:-events/deltas}"
+  local deltas=()
+  local delta
+  local delta_id
+  local checksum
+  local existing_checksum
+  local importer_image
+  local import_network
+
+  wait_for_postgres || die "postgres did not become ready before event deltas"
+
+  psql_exec <<'SQL'
+CREATE TABLE IF NOT EXISTS portal_event_delta_t (
+  delta_id VARCHAR(128) PRIMARY KEY,
+  checksum VARCHAR(128) NOT NULL,
+  imported_ts TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+SQL
+
+  shopt -s nullglob
+  deltas=("$delta_dir"/*.json)
+  shopt -u nullglob
+
+  if ((${#deltas[@]} == 0)); then
+    log "no event deltas found in $delta_dir"
+    return 0
+  fi
+
+  IFS=$'\n' deltas=($(printf '%s\n' "${deltas[@]}" | sort))
+  unset IFS
+
+  load_env_file_var EVENT_IMPORTER_IMAGE
+  importer_image="${EVENT_IMPORTER_IMAGE:-networknt/event-importer:latest}"
+  import_network="${EVENT_IMPORT_NETWORK:-$(default_event_import_network)}"
+
+  for delta in "${deltas[@]}"; do
+    delta_id="$(basename -- "$delta" .json)"
+    checksum="$(sha256sum "$delta" | awk '{print $1}')"
+    existing_checksum="$(docker exec postgres psql -h localhost -p 5432 -U postgres -d configserver -tAc "select checksum from portal_event_delta_t where delta_id = '$delta_id';" | tr -d '[:space:]' || true)"
+
+    if [[ -n "$existing_checksum" ]]; then
+      [[ "$existing_checksum" == "$checksum" ]] ||
+        die "checksum drift for imported delta $delta_id: database=$existing_checksum file=$checksum"
+      log "event delta already imported: $delta_id"
+      continue
+    fi
+
+    log "importing event delta $delta_id with $importer_image"
+    if ! docker run --rm -i \
+      --network "$import_network" \
+      -e DB_JDBC_URL="${EVENT_IMPORT_DB_JDBC_URL:-jdbc:postgresql://postgres:5432/configserver}" \
+      -e DB_USERNAME="${EVENT_IMPORT_DB_USERNAME:-postgres}" \
+      -e DB_PASSWORD="${EVENT_IMPORT_DB_PASSWORD:-secret}" \
+      -e DB_MAXIMUM_POOL_SIZE="${EVENT_IMPORT_DB_MAXIMUM_POOL_SIZE:-3}" \
+      "$importer_image" \
+      --filename /dev/stdin < "$delta"; then
+      die "failed to import event delta $delta_id"
+    fi
+
+    psql_exec -c "INSERT INTO portal_event_delta_t (delta_id, checksum) VALUES ('$delta_id', '$checksum');"
+  done
+}
+
+apply_release_deltas() {
+  case "${APPLY_RELEASE_DELTAS:-true}" in
+    false|FALSE|0|no|NO|n|N)
+      log "release delta application skipped"
+      return 0
+      ;;
+  esac
+
+  [[ -f data/manifest.json ]] || die "release manifest is missing; run ./install.sh update or assets first"
+  apply_db_patches
+  compose up -d --no-deps hybrid-command hybrid-query
+  import_event_deltas
+}
+
 bootstrap_events() {
   require_command docker
   [[ -f .env ]] || cp .env.example .env
@@ -385,8 +547,10 @@ case "$command_name" in
     ;;
   update)
     download_assets
+    download_release_artifacts
     clean_volumes_if_requested
     bootstrap_events
+    apply_release_deltas
     start_stack
     ;;
   assets)
