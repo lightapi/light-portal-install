@@ -788,7 +788,7 @@ CREATE TABLE api_endpoint_t (
     semantic_weight      REAL DEFAULT 1.0,
     source_protocol      VARCHAR(50),
     target_personas      TEXT,
-    endpoint_desc        VARCHAR(1024),
+    endpoint_desc        TEXT,
     active               BOOLEAN NOT NULL DEFAULT TRUE,
     delete_user          VARCHAR (255),
     delete_ts            TIMESTAMP WITH TIME ZONE,
