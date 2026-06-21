@@ -600,7 +600,7 @@ CREATE TABLE rule_t (
     version              VARCHAR(32),           -- version that follows major.minor.patch pattern.
     author               VARCHAR(128),
     rule_desc            VARCHAR(1024),
-    condition_language   VARCHAR(16) DEFAULT 'native' NOT NULL,
+    condition_language   VARCHAR(16) DEFAULT 'cel' NOT NULL,
     condition_security_profile VARCHAR(32),
     rule_body            VARCHAR(65535) NOT NULL,
     aggregate_version    BIGINT DEFAULT 1 NOT NULL,
@@ -616,7 +616,7 @@ ALTER TABLE rule_t
     ADD CHECK ( common IN ('Y', 'N'));
 
 ALTER TABLE rule_t
-    ADD CHECK ( condition_language IN ('native', 'cel'));
+    ADD CHECK ( condition_language IN ('cel'));
 
 ALTER TABLE rule_t
     ADD CHECK ( condition_security_profile IS NULL OR condition_security_profile IN ('strict', 'standard', 'internal-admin'));
