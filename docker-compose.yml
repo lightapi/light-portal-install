@@ -252,6 +252,33 @@ services:
       retries: 10
       start_period: 10s
 
+  demo-insurance-claim-mcp-server:
+    image: ${DEMO_INSURANCE_CLAIM_MCP_SERVER_IMAGE:-networknt/demo-insurance-claim-mcp-server:latest}
+    ports:
+      - "8087:8087"
+    volumes:
+      - ./demo-insurance-claim-mcp-server-rust/config:/app/config:ro,Z
+      - ./light-controller-rust/ca.pem:/keystore/ca.pem:ro,z
+    environment:
+      INSURANCE_CLAIM_MCP_CONFIG_DIR: /app/config
+      INSURANCE_CLAIM_MCP_EXTERNAL_CONFIG_DIR: /app/config-cache
+      LIGHT_PORTAL_AUTHORIZATION: "${DEMO_INSURANCE_CLAIM_MCP_LIGHT_PORTAL_AUTHORIZATION:-Bearer eyJhbGciOiJSUzI1NiIsImtpZCI6IkFacDAyTUN1Y3J1WmZGSmJ5eUZ3dWcifQ.eyJpc3MiOiJ1cm46Y29tOm5ldHdvcmtudDpvYXV0aDI6djEiLCJhdWQiOiJ1cm46Y29tLm5ldHdvcmtudCIsInN1YiI6IjAxOWVmMDc0LWQyNTgtNzVhNS04MjczLTEzODRkZmZhNmFjNiIsImV4cCI6MjA5NzUxMDcyOSwianRpIjoibS03R3U0LUVSdDJaQjM1QXU2Tk0wUSIsImlhdCI6MTc4MjE1MDcyOSwibmJmIjoxNzgyMTUwNjA5LCJ2ZXIiOiIxLjAiLCJjaWQiOiIwMTllZjA3NC1kMjU4LTc1YTUtODI3My0xMzg0ZGZmYTZhYzYiLCJzY3AiOlsicG9ydGFsLnIiLCJwb3J0YWwudyJdLCJjbGllbnRfaWQiOiIwMTllZjA3NC1kMjU4LTc1YTUtODI3My0xMzg0ZGZmYTZhYzYiLCJzY29wZSI6InBvcnRhbC5yIHBvcnRhbC53IiwiZW52IjoiZGV2IiwiaG9zdCI6IjAxOTY0YjA1LTU1MmEtN2M0Yi05MTg0LTY4NTdlN2YzZGM1ZiIsInNpZCI6ImNvbS5uZXR3b3JrbnQuZGVtby5pbnN1cmFuY2UtY2xhaW0tbWNwLTEuMC4wIn0.U2QrwSdmBe4seetd5e3LE9J1NiesOACkYAS-Qa4bqJDhvbS1WkaM4Na3yGL0mkdghGQlwWW2jK26HZKk3TmjVdeyGFpM6eAWKfOCIkqYxYoimRfb4TkHyZdz4DihhGmy6_PZpPuAUBrWbsHmQOeliXeh6VhMG3jQT5VG0jNykFA2hYFHl3yHiWKJmuIY5lKqdr0b3oMY42g9NvcDA1Y889EDF1f8r6kocdE0c4c_GWMIbnFzTBEf5JmjJ4pKswCrS9CmIMEOyL8pTrdOy3R2zn_TX_R-Hw2xoeSwpt6Q9_Vy_SE1qNvm2ZKAX1prn-PcYm4Q5oEfCjBqpbPvwObNeA}"
+      RUST_LOG: ${RUST_LOG:-debug}
+      INSURANCE_CLAIM_MCP_LOG_ANSI: "false"
+    hostname: demo-insurance-claim-mcp-server
+    container_name: demo-insurance-claim-mcp-server
+    depends_on:
+      controller:
+        condition: service_healthy
+      config-server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8087/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
   light-gateway:
     image: ${LIGHT_GATEWAY_IMAGE:-networknt/light-gateway:latest}
     ports:

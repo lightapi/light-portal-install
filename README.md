@@ -25,7 +25,7 @@ For a checked-out repo:
 
 The installer downloads refreshed service assets from compressed Cloudflare R2
 archives in the `lightapi` bucket and starts the Rust `all-in-lt` stack with
-`light-agent` and the local demo APIs.
+`light-agent`, the local demo REST APIs, and the insurance claim MCP server.
 
 On install, update, and start, the script first starts Postgres plus
 `hybrid-command` and `hybrid-query`, imports `events.json` when `event_store_t`
@@ -83,6 +83,10 @@ By default the script expects public R2 assets under:
 https://cdn.networknt.com
 https://cdn.networknt.com/light-portal/releases/latest/docker-images.env
 ```
+
+The demo service images can be overridden with `DEMO_CUSTOMER_PROFILE_API_IMAGE`,
+`DEMO_OFFER_DECISION_API_IMAGE`, and
+`DEMO_INSURANCE_CLAIM_MCP_SERVER_IMAGE`.
 
 The asset archive names are:
 

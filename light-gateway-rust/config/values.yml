@@ -773,6 +773,123 @@ mcp-router.tools:
     toolMetadata:
       read_only: false
       destructive: false
+  - name: evaluateCoverage
+    path: /mcp
+    method: call
+    apiType: mcp
+    endpoint: evaluateCoverage@call
+    protocol: http
+    targetHost: http://demo-insurance-claim-mcp-server:8087
+    description: Evaluate policy and vehicle coverage for an insurance claim.
+    inputSchema:
+      type: object
+      required:
+        - claim
+        - policies
+        - vehicle
+      properties:
+        claim:
+          type: object
+        policies:
+          type: object
+        vehicle:
+          type: object
+    toolMetadata:
+      read_only: true
+      destructive: false
+  - name: classifyLiability
+    path: /mcp
+    method: call
+    apiType: mcp
+    endpoint: classifyLiability@call
+    protocol: http
+    targetHost: http://demo-insurance-claim-mcp-server:8087
+    description: Classify liability from first-notice-of-loss claim facts.
+    inputSchema:
+      type: object
+      required:
+        - claim
+      properties:
+        claim:
+          type: object
+        customer:
+          type: object
+        vehicle:
+          type: object
+    toolMetadata:
+      read_only: true
+      destructive: false
+  - name: scoreClaimRisk
+    path: /mcp
+    method: call
+    apiType: mcp
+    endpoint: scoreClaimRisk@call
+    protocol: http
+    targetHost: http://demo-insurance-claim-mcp-server:8087
+    description: Score claim risk and determine adjuster or SIU review needs.
+    inputSchema:
+      type: object
+      required:
+        - claim
+        - priorClaims
+      properties:
+        claim:
+          type: object
+        priorClaims:
+          type: object
+        coverage:
+          type: object
+        liability:
+          type: object
+    toolMetadata:
+      read_only: true
+      destructive: false
+  - name: listRequiredDocuments
+    path: /mcp
+    method: call
+    apiType: mcp
+    endpoint: listRequiredDocuments@call
+    protocol: http
+    targetHost: http://demo-insurance-claim-mcp-server:8087
+    description: List documents needed for the recommended claim path.
+    inputSchema:
+      type: object
+      properties:
+        claim:
+          type: object
+        recommendedPath:
+          type: string
+        triage:
+          type: object
+    toolMetadata:
+      read_only: true
+      destructive: false
+  - name: generateCustomerSummary
+    path: /mcp
+    method: call
+    apiType: mcp
+    endpoint: generateCustomerSummary@call
+    protocol: http
+    targetHost: http://demo-insurance-claim-mcp-server:8087
+    description: Generate a deterministic customer-facing claim summary.
+    inputSchema:
+      type: object
+      required:
+        - claim
+      properties:
+        claim:
+          type: object
+        coverageReview:
+          type: object
+        triage:
+          type: object
+        documents:
+          type: object
+        settlement:
+          type: object
+    toolMetadata:
+      read_only: true
+      destructive: false
   - name: listProducts
     path: '/v1/market/{store}/products'
     method: get
