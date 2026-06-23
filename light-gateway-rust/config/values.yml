@@ -110,6 +110,7 @@ handler.handlers:
   - header
   - prefix
   - token
+  - access-control
   - router
   - proxy
   - proxyServerInfo
@@ -163,6 +164,7 @@ handler.chains:
     # - path
     - prefix
     - token
+    - access-control
     - router
 
   chat:
