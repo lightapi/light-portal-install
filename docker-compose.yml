@@ -289,6 +289,9 @@ services:
       - ./light-gateway-rust/signin/dist:/signin/dist:Z
     environment:
       LIGHT_RS_CONFIG_DIR: /config
+      # ACCESS_CONTROL_ENABLED: "false"
+      CLIENT_VERIFYHOSTNAME: "false"
+      CLIENT_CACERTPATH: /config/ca.pem
       STATELESSAUTH_BOOTSTRAPTOKEN: ${STATELESSAUTH_BOOTSTRAPTOKEN:-}
       STATELESSAUTH_GITHUBCLIENTSECRET: ${STATELESSAUTH_GITHUBCLIENTSECRET:-}
       STATELESSAUTH_GOOGLECLIENTSECRET: ${STATELESSAUTH_GOOGLECLIENTSECRET:-}
@@ -302,6 +305,8 @@ services:
       postgres:
         condition: service_healthy
       config-server:
+        condition: service_healthy
+      controller:
         condition: service_healthy
 
   light-agent:
