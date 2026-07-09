@@ -399,6 +399,8 @@ CREATE TABLE schedule_t (
 
 CREATE INDEX idx_schedule_host_id ON schedule_t (host_id);
 CREATE INDEX idx_schedule_active_next_run ON schedule_t (active, next_run_ts);
+CREATE INDEX idx_schedule_host_owner_user ON schedule_t (host_id, owner_user_id);
+CREATE INDEX idx_schedule_host_owner_position ON schedule_t (host_id, owner_position_id);
 
 
 CREATE TABLE tag_t (
@@ -1097,6 +1099,8 @@ CREATE TABLE deployment_instance_t (
 );
 
 ALTER TABLE deployment_instance_t ADD CONSTRAINT deployment_instance_uk UNIQUE(host_id, instance_id, service_id);
+CREATE INDEX idx_deployment_instance_host_owner_user ON deployment_instance_t (host_id, owner_user_id);
+CREATE INDEX idx_deployment_instance_host_owner_position ON deployment_instance_t (host_id, owner_position_id);
 
 -- customized config at the deployment instance level. Usually, it is the hostname.
 CREATE TABLE deployment_instance_property_t (
