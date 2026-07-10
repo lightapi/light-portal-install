@@ -789,6 +789,8 @@ CREATE TABLE api_endpoint_t (
     sensitivity_tier     VARCHAR(64),
     semantic_weight      REAL DEFAULT 1.0,
     source_protocol      VARCHAR(50),
+    lifecycle_status     VARCHAR(32) DEFAULT 'active',
+    cost_tier            VARCHAR(32),
     target_personas      TEXT,
     endpoint_desc        TEXT,
     active               BOOLEAN NOT NULL DEFAULT TRUE,
@@ -803,8 +805,14 @@ CREATE TABLE api_endpoint_t (
 ALTER TABLE api_endpoint_t
     ADD CHECK ( http_method IN ( 'delete', 'get', 'patch', 'post', 'put', 'call' ) );
 
+ALTER TABLE api_endpoint_t
+    ADD CONSTRAINT chk_api_endpoint_source_protocol CHECK (source_protocol IN ('openapi', 'mcp', 'lightapi', 'http') OR source_protocol IS NULL),
+    ADD CONSTRAINT chk_api_endpoint_lifecycle CHECK (lifecycle_status IS NOT NULL AND lifecycle_status IN ('active', 'deprecated', 'retired')),
+    ADD CONSTRAINT chk_api_endpoint_cost CHECK (cost_tier IN ('low', 'medium', 'high') OR cost_tier IS NULL);
+
 CREATE INDEX idx_api_endpoint_routing ON api_endpoint_t(host_id, active, routing_domain, semantic_namespace, sensitivity_tier);
 CREATE INDEX idx_api_endpoint_source_protocol ON api_endpoint_t(host_id, source_protocol);
+CREATE INDEX idx_api_endpoint_lifecycle_cost ON api_endpoint_t(host_id, active, lifecycle_status, cost_tier);
 CREATE INDEX idx_api_endpoint_version_active ON api_endpoint_t(host_id, api_version_id, active);
 
 
@@ -3097,11 +3105,14 @@ CREATE TABLE tool_t (
     endpoint_id         UUID,                  -- Reference to fine-grained auth endpoint
     script_content      TEXT,                  -- Source code if 'python'/'javascript'
     response_schema     JSONB,                 -- Strict output schema for tool results
+    tool_metadata       JSONB,                 -- Canonical MCP/catalog metadata for manually authored tools
     routing_domain      VARCHAR(128),          -- Macro-filtering domain for semantic routing
     semantic_namespace  VARCHAR(128),          -- Semantic namespace/owner of the tool
     sensitivity_tier    VARCHAR(64),           -- Safety/routing sensitivity tier
     semantic_weight     REAL DEFAULT 1.0,      -- Search/routing weight
-    source_protocol     VARCHAR(50),           -- Source protocol such as openapi, mcp, or lightapi
+    source_protocol     VARCHAR(50),           -- Source protocol such as openapi, mcp, lightapi, or http
+    lifecycle_status    VARCHAR(32) DEFAULT 'active',
+    cost_tier           VARCHAR(32),
     target_personas     TEXT,                  -- JSON array or comma-separated persona hints
 
     description_embedding VECTOR(384),          -- For semantic lookup/discovery
@@ -3120,11 +3131,17 @@ CREATE TABLE tool_t (
     FOREIGN KEY(host_id, endpoint_id) REFERENCES api_endpoint_t(host_id, endpoint_id) ON DELETE CASCADE
 );
 
+ALTER TABLE tool_t
+    ADD CONSTRAINT chk_tool_source_protocol CHECK (source_protocol IN ('openapi', 'mcp', 'lightapi', 'http') OR source_protocol IS NULL),
+    ADD CONSTRAINT chk_tool_lifecycle CHECK (lifecycle_status IS NOT NULL AND lifecycle_status IN ('active', 'deprecated', 'retired')),
+    ADD CONSTRAINT chk_tool_cost CHECK (cost_tier IN ('low', 'medium', 'high') OR cost_tier IS NULL);
+
 CREATE INDEX idx_tool_host_endpoint ON tool_t(host_id, endpoint_id);
 CREATE INDEX idx_tool_active ON tool_t(active);
 CREATE INDEX idx_tool_name ON tool_t(name);
 CREATE INDEX idx_tool_routing ON tool_t(host_id, active, routing_domain, semantic_namespace, sensitivity_tier);
 CREATE INDEX idx_tool_source_protocol ON tool_t(host_id, source_protocol);
+CREATE INDEX idx_tool_lifecycle_cost ON tool_t(host_id, active, lifecycle_status, cost_tier);
 CREATE INDEX idx_tool_description_embedding_status ON tool_t(host_id, active, description_embedding_status);
 CREATE INDEX idx_tool_description_embedding_source_hash ON tool_t(host_id, description_embedding_source_hash);
 CREATE INDEX idx_tool_description_embedding ON tool_t USING hnsw (description_embedding vector_cosine_ops)
