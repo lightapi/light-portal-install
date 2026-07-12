@@ -4,6 +4,37 @@ CREATE DATABASE configserver;
 -- Enable pgvector extension
 CREATE EXTENSION IF NOT EXISTS vector;
 
+DROP TABLE IF EXISTS execution_fixed_action_t CASCADE;
+DROP TABLE IF EXISTS agent_delegation_replay_t CASCADE;
+DROP TABLE IF EXISTS agent_fixed_action_t CASCADE;
+DROP TABLE IF EXISTS agent_job_t CASCADE;
+DROP TABLE IF EXISTS agent_trigger_t CASCADE;
+DROP TABLE IF EXISTS agent_channel_message_t CASCADE;
+DROP TABLE IF EXISTS agent_channel_binding_t CASCADE;
+DROP TABLE IF EXISTS execution_runtime_tool_manifest_t CASCADE;
+DROP TABLE IF EXISTS execution_credential_grant_audit_t CASCADE;
+DROP TABLE IF EXISTS execution_provenance_t CASCADE;
+DROP TABLE IF EXISTS agent_turn_materialization_t CASCADE;
+DROP TABLE IF EXISTS skill_package_proposal_t CASCADE;
+DROP TABLE IF EXISTS skill_package_t CASCADE;
+DROP TABLE IF EXISTS agent_session_event_t CASCADE;
+DROP TABLE IF EXISTS agent_approval_t CASCADE;
+DROP TABLE IF EXISTS agent_action_attempt_t CASCADE;
+DROP TABLE IF EXISTS agent_turn_t CASCADE;
+DROP TABLE IF EXISTS agent_session_t CASCADE;
+DROP TABLE IF EXISTS agent_policy_snapshot_t CASCADE;
+DROP TABLE IF EXISTS execution_runtime_audit_t CASCADE;
+DROP TABLE IF EXISTS workflow_approval_t CASCADE;
+DROP TABLE IF EXISTS workflow_artifact_t CASCADE;
+DROP TABLE IF EXISTS execution_input_t CASCADE;
+DROP TABLE IF EXISTS execution_session_cleanup_request_t CASCADE;
+DROP TABLE IF EXISTS execution_session_t CASCADE;
+DROP TABLE IF EXISTS execution_attempt_t CASCADE;
+DROP TABLE IF EXISTS runner_scheduling_request_t CASCADE;
+DROP TABLE IF EXISTS runner_backend_t CASCADE;
+DROP TABLE IF EXISTS runner_session_t CASCADE;
+DROP TABLE IF EXISTS workflow_execution_policy_t CASCADE;
+
 DROP TABLE IF EXISTS session_memory_t CASCADE;
 
 DROP TABLE IF EXISTS user_memory_t CASCADE;
@@ -91,6 +122,10 @@ DROP TABLE IF EXISTS rule_t CASCADE;
 DROP TABLE IF EXISTS api_endpoint_rule_t CASCADE;
 
 DROP TABLE IF EXISTS api_endpoint_t CASCADE;
+
+DROP TABLE IF EXISTS instance_clone_request_t CASCADE;
+
+DROP TABLE IF EXISTS instance_graph_revision_t CASCADE;
 
 DROP TABLE IF EXISTS deployment_instance_property_t CASCADE;
 
@@ -1617,6 +1652,91 @@ CREATE TABLE host_t (
 
 
 ALTER TABLE host_t ADD CONSTRAINT domain_uk UNIQUE ( domain, sub_domain );
+
+
+-- Command-side coordination for an instance and its cloneable child graph.
+-- This table intentionally does not reference instance_t: a command can reserve
+-- a target revision before InstanceCreatedEvent projects, and an instance delete
+-- retains the revision tombstone for replay and idempotency.
+CREATE TABLE instance_graph_revision_t (
+    host_id              UUID NOT NULL,
+    instance_id          UUID NOT NULL,
+    accepted_revision    BIGINT NOT NULL DEFAULT 0,
+    projected_revision   BIGINT NOT NULL DEFAULT 0,
+    accepted_ts          TIMESTAMP WITH TIME ZONE,
+    projected_ts         TIMESTAMP WITH TIME ZONE,
+    CONSTRAINT instance_graph_revision_pk PRIMARY KEY(host_id, instance_id),
+    CONSTRAINT instance_graph_revision_host_fk FOREIGN KEY(host_id)
+        REFERENCES host_t(host_id) ON DELETE CASCADE,
+    CONSTRAINT instance_graph_revision_nonnegative_ck CHECK(
+        accepted_revision >= 0 AND projected_revision >= 0
+    ),
+    CONSTRAINT instance_graph_revision_projection_ck CHECK(
+        projected_revision <= accepted_revision
+    )
+);
+
+CREATE INDEX instance_graph_revision_lag_idx
+    ON instance_graph_revision_t(host_id, instance_id)
+    WHERE accepted_revision <> projected_revision;
+
+
+-- Durable idempotency and asynchronous projection outcome for instance clone.
+-- Source/target instance and requested-by foreign keys are intentionally
+-- omitted so audit rows survive instance/user/catalog lifecycle changes.
+CREATE TABLE instance_clone_request_t (
+    host_id                   UUID NOT NULL,
+    clone_request_id          UUID NOT NULL,
+    request_hash              VARCHAR(128) NOT NULL,
+    source_instance_id        UUID NOT NULL,
+    source_graph_digest       VARCHAR(128) NOT NULL,
+    catalog_schema_digest     VARCHAR(128) NOT NULL,
+    target_instance_id        UUID NOT NULL,
+    target_instance_name      VARCHAR(126) NOT NULL,
+    target_service_id         VARCHAR(512) NOT NULL,
+    target_env_tag            VARCHAR(16),
+    target_product_version_id UUID NOT NULL,
+    transaction_id            UUID NOT NULL,
+    terminal_event_id         UUID NOT NULL,
+    snapshot_id               UUID,
+    clone_status              VARCHAR(32) NOT NULL DEFAULT 'ACCEPTED',
+    event_count               INTEGER NOT NULL,
+    payload_bytes             BIGINT NOT NULL,
+    result_summary            JSONB NOT NULL DEFAULT '{}'::jsonb,
+    error_code                VARCHAR(64),
+    error_message             VARCHAR(2048),
+    requested_by              UUID NOT NULL,
+    created_ts                TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_ts                TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT instance_clone_request_pk PRIMARY KEY(host_id, clone_request_id),
+    CONSTRAINT instance_clone_request_host_fk FOREIGN KEY(host_id)
+        REFERENCES host_t(host_id) ON DELETE CASCADE,
+    CONSTRAINT instance_clone_request_status_ck CHECK(
+        clone_status IN ('ACCEPTED', 'PROJECTED', 'SNAPSHOT_READY', 'FAILED_DLQ')
+    ),
+    CONSTRAINT instance_clone_request_event_count_ck CHECK(event_count >= 0),
+    CONSTRAINT instance_clone_request_payload_bytes_ck CHECK(payload_bytes >= 0),
+    CONSTRAINT instance_clone_request_result_summary_ck CHECK(
+        jsonb_typeof(result_summary) = 'object'
+    ),
+    CONSTRAINT instance_clone_request_snapshot_ck CHECK(
+        clone_status <> 'SNAPSHOT_READY' OR snapshot_id IS NOT NULL
+    )
+);
+
+CREATE INDEX instance_clone_request_target_id_idx
+    ON instance_clone_request_t(host_id, target_instance_id);
+
+CREATE INDEX instance_clone_request_target_identity_idx
+    ON instance_clone_request_t(
+        host_id, target_service_id, target_env_tag, target_product_version_id
+    );
+
+CREATE UNIQUE INDEX instance_clone_request_transaction_uk
+    ON instance_clone_request_t(host_id, transaction_id);
+
+CREATE INDEX instance_clone_request_status_idx
+    ON instance_clone_request_t(host_id, clone_status, updated_ts);
 
 
 -- Table for defining reference types (e.g., 'Countries', 'OrderStatus')
@@ -3670,807 +3790,949 @@ ON pii_token_vault_t(expires_ts)
 WHERE expires_ts IS NOT NULL;
 
 
--- create a view to simplify the foreign key relationship.
+ALTER TABLE process_info_t
+    ADD COLUMN IF NOT EXISTS definition_snapshot JSONB,
+    ADD COLUMN IF NOT EXISTS definition_digest VARCHAR(64),
+    ADD COLUMN IF NOT EXISTS policy_snapshot_id UUID,
+    ADD COLUMN IF NOT EXISTS policy_digest VARCHAR(64),
+    ADD COLUMN IF NOT EXISTS source_event_id VARCHAR(126),
+    ADD COLUMN IF NOT EXISTS execution_profile_id VARCHAR(126);
 
-DROP VIEW IF EXISTS cascade_relationships_v;
+CREATE UNIQUE INDEX IF NOT EXISTS process_info_source_event_uk
+    ON process_info_t(host_id, wf_def_id, source_event_id)
+    WHERE source_event_id IS NOT NULL;
 
-CREATE VIEW cascade_relationships_v AS
-WITH fk_details AS (
-    SELECT
-        pn.nspname::text AS parent_schema,
-        pc.relname::text AS parent_table,
-        cn.nspname::text AS child_schema,
-        cc.relname::text AS child_table,
-        c.conname::text AS constraint_name,
-        c.oid AS constraint_id,
-        cc.oid AS child_table_oid,
-        pc.oid AS parent_table_oid,
-        unnest.parent_col,
-        unnest.child_col,
-        unnest.ord
-    FROM pg_constraint c
-    JOIN pg_class pc ON c.confrelid = pc.oid
-    JOIN pg_namespace pn ON pc.relnamespace = pn.oid
-    JOIN pg_class cc ON c.conrelid = cc.oid
-    JOIN pg_namespace cn ON cc.relnamespace = cn.oid
-    CROSS JOIN LATERAL (
-        SELECT
-            unnest(c.confkey) AS parent_col,
-            unnest(c.conkey) AS child_col,
-            generate_series(1, array_length(c.conkey, 1)) AS ord
-    ) unnest
-    WHERE c.contype = 'f'
-)
-SELECT
-    fd.parent_schema,
-    fd.parent_table,
-    fd.child_schema,
-    fd.child_table,
-    fd.constraint_name,
-    -- Human readable mapping
-    string_agg(
-        format('%I → %I', 
-            (SELECT attname FROM pg_attribute 
-             WHERE attrelid = fd.parent_table_oid
-               AND attnum = fd.parent_col),
-            (SELECT attname FROM pg_attribute 
-             WHERE attrelid = fd.child_table_oid
-               AND attnum = fd.child_col)
-        ), 
-        ', ' ORDER BY fd.ord
-    ) AS foreign_key_mapping,
-    -- Structured data for trigger
-    jsonb_object_agg(
-        (SELECT attname FROM pg_attribute 
-         WHERE attrelid = fd.parent_table_oid
-           AND attnum = fd.parent_col),
-        (SELECT attname FROM pg_attribute 
-         WHERE attrelid = fd.child_table_oid
-           AND attnum = fd.child_col)
-    ) AS foreign_key_json,
-    -- Arrays for easier processing
-    array_agg(
-        (SELECT attname FROM pg_attribute 
-         WHERE attrelid = fd.parent_table_oid
-           AND attnum = fd.parent_col)
-        ORDER BY fd.ord
-    ) AS parent_columns,
-    array_agg(
-        (SELECT attname FROM pg_attribute 
-         WHERE attrelid = fd.child_table_oid
-           AND attnum = fd.child_col)
-        ORDER BY fd.ord
-    ) AS child_columns,
-    COUNT(*) AS column_count,
-    fd.child_table_oid,
-    fd.parent_table_oid,
-    -- Check for required columns
-    EXISTS (
-        SELECT 1 FROM pg_attribute a
-        WHERE a.attrelid = fd.parent_table_oid
-          AND a.attname = 'delete_ts'
-          AND NOT a.attisdropped
-    ) AS parent_has_delete_ts,
-    EXISTS (
-        SELECT 1 FROM pg_attribute a
-        WHERE a.attrelid = fd.child_table_oid
-          AND a.attname = 'delete_ts'
-          AND NOT a.attisdropped
-    ) AS child_has_delete_ts,
-    EXISTS (
-        SELECT 1 FROM pg_attribute a
-        WHERE a.attrelid = fd.parent_table_oid
-          AND a.attname = 'delete_user'
-          AND NOT a.attisdropped
-    ) AS parent_has_delete_user,
-    EXISTS (
-        SELECT 1 FROM pg_attribute a
-        WHERE a.attrelid = fd.child_table_oid
-          AND a.attname = 'delete_user'
-          AND NOT a.attisdropped
-    ) AS child_has_delete_user
-FROM fk_details fd
--- Only include relationships where both tables have deletion tracking
-WHERE EXISTS (
-    SELECT 1 FROM pg_attribute a
-    WHERE a.attrelid = fd.parent_table_oid
-      AND a.attname = 'delete_ts'
-      AND NOT a.attisdropped
-) AND EXISTS (
-    SELECT 1 FROM pg_attribute a
-    WHERE a.attrelid = fd.child_table_oid
-      AND a.attname = 'delete_ts'
-      AND NOT a.attisdropped
-)
-GROUP BY 
-    fd.parent_schema, fd.parent_table,
-    fd.child_schema, fd.child_table,
-    fd.constraint_name, fd.constraint_id, 
-    fd.child_table_oid, fd.parent_table_oid
-ORDER BY fd.parent_schema, fd.parent_table, fd.child_schema, fd.child_table;
+ALTER TABLE task_info_t
+    ADD COLUMN IF NOT EXISTS execution_placement VARCHAR(16) NOT NULL DEFAULT 'host',
+    ADD COLUMN IF NOT EXISTS task_policy_digest VARCHAR(64),
+    ADD COLUMN IF NOT EXISTS scheduling_request_id UUID,
+    ADD COLUMN IF NOT EXISTS accepted_attempt INTEGER;
 
-CREATE OR REPLACE FUNCTION smart_cascade_soft_delete()
+ALTER TABLE task_info_t DROP CONSTRAINT IF EXISTS task_info_execution_placement_ck;
+ALTER TABLE task_info_t ADD CONSTRAINT task_info_execution_placement_ck
+    CHECK (execution_placement IN ('host', 'runner'));
+
+CREATE INDEX IF NOT EXISTS task_info_active_host_idx
+    ON task_info_t(host_id, priority DESC, started_ts, task_id)
+    WHERE active = TRUE AND status_code = 'A' AND execution_placement = 'host';
+CREATE INDEX IF NOT EXISTS task_info_active_runner_idx
+    ON task_info_t(host_id, priority DESC, started_ts, task_id)
+    WHERE active = TRUE AND status_code = 'A' AND execution_placement = 'runner';
+
+CREATE TABLE IF NOT EXISTS workflow_execution_policy_t (
+    policy_snapshot_id UUID PRIMARY KEY,
+    host_id UUID NOT NULL REFERENCES host_t(host_id) ON DELETE RESTRICT,
+    tenant_id UUID,
+    definition_digest VARCHAR(64) NOT NULL,
+    profile_id VARCHAR(126) NOT NULL,
+    profile_version INTEGER NOT NULL,
+    resolved_policy JSONB NOT NULL,
+    policy_digest VARCHAR(64) NOT NULL,
+    source VARCHAR(126) NOT NULL,
+    created_by VARCHAR(126) NOT NULL,
+    created_ts TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    UNIQUE(host_id, policy_snapshot_id),
+    UNIQUE(host_id, policy_digest)
+);
+
+ALTER TABLE process_info_t DROP CONSTRAINT IF EXISTS process_info_policy_snapshot_fk;
+ALTER TABLE process_info_t ADD CONSTRAINT process_info_policy_snapshot_fk
+    FOREIGN KEY(host_id, policy_snapshot_id)
+    REFERENCES workflow_execution_policy_t(host_id, policy_snapshot_id) ON DELETE RESTRICT;
+
+CREATE TABLE IF NOT EXISTS runner_session_t (
+    host_id UUID NOT NULL REFERENCES host_t(host_id) ON DELETE RESTRICT,
+    session_id UUID NOT NULL,
+    runner_id VARCHAR(126) NOT NULL,
+    authenticated_subject VARCHAR(255) NOT NULL,
+    enrollment_id VARCHAR(126) NOT NULL,
+    runner_version VARCHAR(64) NOT NULL,
+    protocol_version VARCHAR(32) NOT NULL,
+    connection_generation BIGINT NOT NULL CHECK (connection_generation > 0),
+    status VARCHAR(32) NOT NULL,
+    drain_state VARCHAR(32) NOT NULL DEFAULT 'ACCEPTING',
+    binary_digest VARCHAR(128) NOT NULL,
+    effective_config_digest VARCHAR(128) NOT NULL,
+    command_allowlist_digest VARCHAR(128) NOT NULL,
+    capability_document JSONB NOT NULL,
+    compatibility_digest VARCHAR(128) NOT NULL,
+    maximum_concurrency INTEGER NOT NULL CHECK (maximum_concurrency > 0),
+    reported_available_capacity INTEGER NOT NULL DEFAULT 0 CHECK (reported_available_capacity >= 0),
+    watchdog_healthy BOOLEAN NOT NULL,
+    journal_healthy BOOLEAN NOT NULL,
+    cleanup_backlog INTEGER NOT NULL DEFAULT 0 CHECK (cleanup_backlog >= 0),
+    registered_ts TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    heartbeat_ts TIMESTAMP WITH TIME ZONE,
+    disconnected_ts TIMESTAMP WITH TIME ZONE,
+    PRIMARY KEY(host_id, session_id),
+    UNIQUE(host_id, runner_id, connection_generation)
+);
+
+CREATE INDEX IF NOT EXISTS runner_session_live_idx
+    ON runner_session_t(host_id, status, drain_state, heartbeat_ts DESC);
+
+CREATE TABLE IF NOT EXISTS runner_backend_t (
+    host_id UUID NOT NULL,
+    session_id UUID NOT NULL,
+    backend_id VARCHAR(126) NOT NULL,
+    backend_version VARCHAR(64) NOT NULL,
+    boundary_class VARCHAR(32) NOT NULL,
+    host_exposure_class VARCHAR(32) NOT NULL,
+    supported_actions JSONB NOT NULL DEFAULT '[]'::jsonb,
+    supported_features JSONB NOT NULL DEFAULT '[]'::jsonb,
+    capability_limits JSONB NOT NULL DEFAULT '{}'::jsonb,
+    compatibility_digest VARCHAR(128) NOT NULL,
+    health VARCHAR(32) NOT NULL,
+    available_slots INTEGER NOT NULL DEFAULT 0 CHECK (available_slots >= 0),
+    observed_ts TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    PRIMARY KEY(host_id, session_id, backend_id),
+    FOREIGN KEY(host_id, session_id) REFERENCES runner_session_t(host_id, session_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS runner_backend_capacity_idx
+    ON runner_backend_t(host_id, health, boundary_class, available_slots DESC)
+    WHERE available_slots > 0;
+
+CREATE TABLE IF NOT EXISTS runner_scheduling_request_t (
+    host_id UUID NOT NULL,
+    request_id UUID NOT NULL,
+    idempotency_key VARCHAR(255) NOT NULL,
+    origin_kind VARCHAR(32) NOT NULL CHECK (origin_kind IN ('workflow', 'agent')),
+    origin_service_id VARCHAR(255) NOT NULL,
+    origin_instance_id VARCHAR(255) NOT NULL,
+    subject_kind VARCHAR(32) NOT NULL CHECK (subject_kind IN ('workflow-task', 'agent-turn', 'agent-action')),
+    subject_id UUID NOT NULL,
+    process_id UUID,
+    task_id UUID,
+    agent_session_id UUID,
+    agent_turn_id UUID,
+    agent_action_id UUID,
+    policy_snapshot_id UUID NOT NULL,
+    policy_digest VARCHAR(64) NOT NULL,
+    normalized_requirements JSONB NOT NULL,
+    execution_spec JSONB NOT NULL DEFAULT '{}'::jsonb,
+    fairness_key VARCHAR(255) NOT NULL,
+    priority INTEGER NOT NULL DEFAULT 0,
+    queue_sequence BIGINT GENERATED BY DEFAULT AS IDENTITY,
+    not_before_ts TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    state VARCHAR(32) NOT NULL CHECK (state IN ('PENDING_CAPACITY', 'RESERVED', 'ATTEMPT_CREATED', 'LEASED', 'SATISFIED', 'CANCELLED', 'EXPIRED')),
+    selected_runner_session_id UUID,
+    selected_backend_id VARCHAR(126),
+    reservation_token_hash VARCHAR(128),
+    reservation_expires_ts TIMESTAMP WITH TIME ZONE,
+    retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count >= 0),
+    next_retry_ts TIMESTAMP WITH TIME ZONE,
+    diagnostic_reason VARCHAR(255),
+    approval_id UUID,
+    pinned_runner_id VARCHAR(126),
+    pinned_backend_id VARCHAR(126),
+    edge_binding_id UUID,
+    created_ts TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_ts TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    PRIMARY KEY(host_id, request_id),
+    UNIQUE(host_id, origin_service_id, origin_instance_id, idempotency_key),
+    FOREIGN KEY(host_id, policy_snapshot_id)
+        REFERENCES workflow_execution_policy_t(host_id, policy_snapshot_id) ON DELETE RESTRICT,
+    FOREIGN KEY(host_id, process_id) REFERENCES process_info_t(host_id, process_id) ON DELETE CASCADE,
+    FOREIGN KEY(host_id, task_id) REFERENCES task_info_t(host_id, task_id) ON DELETE CASCADE,
+    FOREIGN KEY(host_id, selected_runner_session_id, selected_backend_id)
+        REFERENCES runner_backend_t(host_id, session_id, backend_id) ON DELETE RESTRICT,
+    CHECK (
+        (subject_kind = 'workflow-task' AND process_id IS NOT NULL AND task_id IS NOT NULL
+            AND agent_session_id IS NULL AND agent_turn_id IS NULL AND agent_action_id IS NULL)
+        OR (subject_kind = 'agent-turn' AND process_id IS NULL AND task_id IS NULL
+            AND agent_session_id IS NOT NULL AND agent_turn_id IS NOT NULL AND agent_action_id IS NULL)
+        OR (subject_kind = 'agent-action' AND process_id IS NULL AND task_id IS NULL
+            AND agent_session_id IS NOT NULL AND agent_turn_id IS NOT NULL AND agent_action_id IS NOT NULL)
+    )
+);
+
+
+CREATE UNIQUE INDEX IF NOT EXISTS runner_request_active_subject_uk
+    ON runner_scheduling_request_t(host_id, origin_service_id, origin_instance_id, subject_kind, subject_id)
+    WHERE state IN ('PENDING_CAPACITY', 'RESERVED', 'ATTEMPT_CREATED', 'LEASED');
+CREATE INDEX IF NOT EXISTS runner_request_fair_queue_idx
+    ON runner_scheduling_request_t(state, not_before_ts, priority DESC, queue_sequence)
+    WHERE state = 'PENDING_CAPACITY';
+CREATE INDEX IF NOT EXISTS runner_request_reservation_expiry_idx
+    ON runner_scheduling_request_t(reservation_expires_ts) WHERE state = 'RESERVED';
+
+ALTER TABLE task_info_t DROP CONSTRAINT IF EXISTS task_info_scheduling_request_fk;
+ALTER TABLE task_info_t ADD CONSTRAINT task_info_scheduling_request_fk
+    FOREIGN KEY(host_id, scheduling_request_id)
+    REFERENCES runner_scheduling_request_t(host_id, request_id) ON DELETE RESTRICT;
+
+CREATE TABLE IF NOT EXISTS execution_attempt_t (
+    host_id UUID NOT NULL,
+    execution_id UUID NOT NULL,
+    request_id UUID NOT NULL,
+    origin_kind VARCHAR(32) NOT NULL CHECK (origin_kind IN ('workflow', 'agent')),
+    origin_service_id VARCHAR(255) NOT NULL,
+    origin_instance_id VARCHAR(255) NOT NULL,
+    subject_kind VARCHAR(32) NOT NULL CHECK (subject_kind IN ('workflow-task', 'agent-turn', 'agent-action')),
+    subject_id UUID NOT NULL,
+    attempt_number INTEGER NOT NULL CHECK (attempt_number > 0),
+    process_id UUID,
+    task_id UUID,
+    agent_session_id UUID,
+    agent_turn_id UUID,
+    agent_action_id UUID,
+    lease_id UUID NOT NULL UNIQUE,
+    fencing_token BIGINT NOT NULL CHECK (fencing_token > 0),
+    runner_session_id UUID NOT NULL,
+    connection_generation BIGINT NOT NULL CHECK (connection_generation > 0),
+    backend_id VARCHAR(126) NOT NULL,
+    backend_operation_id VARCHAR(255),
+    state VARCHAR(32) NOT NULL CHECK (state IN ('CREATED', 'LEASED', 'STARTED', 'SUCCEEDED', 'FAILED', 'CANCELLED', 'TIMED_OUT', 'UNKNOWN', 'CLEANED')),
+    lease_issued_ts TIMESTAMP WITH TIME ZONE NOT NULL,
+    lease_started_ts TIMESTAMP WITH TIME ZONE,
+    lease_renewed_ts TIMESTAMP WITH TIME ZONE,
+    lease_deadline_ts TIMESTAMP WITH TIME ZONE NOT NULL,
+    terminal_ts TIMESTAMP WITH TIME ZONE,
+    normalized_result JSONB,
+    normalized_error JSONB,
+    retry_classification VARCHAR(32) CHECK (retry_classification IS NULL OR retry_classification IN ('safe', 'unsafe', 'inspect-required')),
+    cleanup_state VARCHAR(32) NOT NULL DEFAULT 'REQUIRED'
+        CHECK (cleanup_state IN ('NOT_REQUIRED', 'REQUIRED', 'IN_PROGRESS', 'CONFIRMED', 'FAILED')),
+    cleanup_evidence JSONB,
+    accepted_by_origin_ts TIMESTAMP WITH TIME ZONE,
+    created_ts TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_ts TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    PRIMARY KEY(host_id, execution_id),
+    UNIQUE(host_id, origin_service_id, origin_instance_id, subject_kind, subject_id, attempt_number),
+    UNIQUE(host_id, origin_service_id, origin_instance_id, subject_kind, subject_id, fencing_token),
+    FOREIGN KEY(host_id, request_id)
+        REFERENCES runner_scheduling_request_t(host_id, request_id) ON DELETE RESTRICT,
+    FOREIGN KEY(host_id, runner_session_id, backend_id)
+        REFERENCES runner_backend_t(host_id, session_id, backend_id) ON DELETE RESTRICT,
+    FOREIGN KEY(host_id, process_id) REFERENCES process_info_t(host_id, process_id) ON DELETE CASCADE,
+    FOREIGN KEY(host_id, task_id) REFERENCES task_info_t(host_id, task_id) ON DELETE CASCADE,
+    CHECK ((state IN ('SUCCEEDED', 'FAILED', 'CANCELLED', 'TIMED_OUT', 'UNKNOWN', 'CLEANED')) = (terminal_ts IS NOT NULL))
+);
+
+CREATE INDEX IF NOT EXISTS execution_attempt_active_lease_idx
+    ON execution_attempt_t(lease_deadline_ts) WHERE state IN ('CREATED', 'LEASED', 'STARTED');
+CREATE INDEX IF NOT EXISTS execution_attempt_origin_result_idx
+    ON execution_attempt_t(origin_service_id, origin_instance_id, terminal_ts, execution_id)
+    WHERE terminal_ts IS NOT NULL AND accepted_by_origin_ts IS NULL;
+CREATE INDEX IF NOT EXISTS execution_attempt_cleanup_idx
+    ON execution_attempt_t(cleanup_state, updated_ts)
+    WHERE cleanup_state IN ('REQUIRED', 'IN_PROGRESS', 'FAILED');
+
+CREATE TABLE IF NOT EXISTS execution_session_t (
+    host_id UUID NOT NULL,
+    execution_session_id UUID NOT NULL,
+    origin_kind VARCHAR(32) NOT NULL,
+    origin_service_id VARCHAR(255) NOT NULL,
+    origin_instance_id VARCHAR(255) NOT NULL,
+    subject_kind VARCHAR(32) NOT NULL,
+    subject_id UUID NOT NULL,
+    origin_session_id UUID,
+    policy_digest VARCHAR(64) NOT NULL,
+    compatibility_digest VARCHAR(128) NOT NULL,
+    runner_session_id UUID NOT NULL,
+    backend_id VARCHAR(126) NOT NULL,
+    backend_session_handle VARCHAR(255),
+    checkpoint_handle VARCHAR(255),
+    idle_expires_ts TIMESTAMP WITH TIME ZONE,
+    maximum_expires_ts TIMESTAMP WITH TIME ZONE NOT NULL,
+    effective_expires_ts TIMESTAMP WITH TIME ZONE NOT NULL,
+    state VARCHAR(32) NOT NULL CHECK (state IN ('READY', 'ACTIVE_ACTION', 'IDLE', 'IDLE_APPROVAL_HOLD', 'CLEANUP_REQUESTED', 'CLEANING', 'CLEANED', 'FAILED')),
+    session_version BIGINT NOT NULL CHECK (session_version > 0),
+    session_fence BIGINT NOT NULL CHECK (session_fence > 0),
+    hold_id UUID,
+    hold_reason VARCHAR(126),
+    hold_until_ts TIMESTAMP WITH TIME ZONE,
+    hold_policy_digest VARCHAR(64),
+    retained_resource_evidence JSONB,
+    cleanup_status VARCHAR(32) NOT NULL DEFAULT 'NOT_REQUESTED'
+        CHECK (cleanup_status IN ('NOT_REQUESTED', 'PENDING', 'CLEANING', 'CLEANED', 'FAILED')),
+    cleanup_evidence JSONB,
+    created_ts TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_ts TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    PRIMARY KEY(host_id, execution_session_id),
+    FOREIGN KEY(host_id, runner_session_id, backend_id)
+        REFERENCES runner_backend_t(host_id, session_id, backend_id) ON DELETE RESTRICT,
+    CHECK ((state = 'IDLE_APPROVAL_HOLD' AND hold_id IS NOT NULL AND hold_until_ts IS NOT NULL)
+        OR state <> 'IDLE_APPROVAL_HOLD')
+);
+
+CREATE INDEX IF NOT EXISTS execution_session_expiry_idx
+    ON execution_session_t(effective_expires_ts, state) WHERE state NOT IN ('CLEANED', 'FAILED');
+CREATE INDEX IF NOT EXISTS execution_session_hold_expiry_idx
+    ON execution_session_t(hold_until_ts) WHERE state = 'IDLE_APPROVAL_HOLD';
+
+CREATE TABLE IF NOT EXISTS execution_session_cleanup_request_t (
+    host_id UUID NOT NULL,
+    cleanup_request_id UUID NOT NULL,
+    execution_session_id UUID NOT NULL,
+    origin_kind VARCHAR(32) NOT NULL,
+    origin_service_id VARCHAR(255) NOT NULL,
+    origin_instance_id VARCHAR(255) NOT NULL,
+    origin_session_id UUID,
+    subject_kind VARCHAR(32) NOT NULL,
+    subject_id UUID NOT NULL,
+    idempotency_key VARCHAR(255) NOT NULL,
+    reason VARCHAR(64) NOT NULL,
+    requested_by VARCHAR(255) NOT NULL,
+    requested_ts TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    cleanup_deadline_ts TIMESTAMP WITH TIME ZONE NOT NULL,
+    state VARCHAR(32) NOT NULL CHECK (state IN ('PENDING', 'FENCED', 'DELIVERED', 'CLEANED', 'FAILED', 'EXPIRED')),
+    runner_ack_ts TIMESTAMP WITH TIME ZONE,
+    cleanup_evidence JSONB,
+    updated_ts TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    PRIMARY KEY(host_id, cleanup_request_id),
+    UNIQUE(host_id, origin_service_id, origin_instance_id, idempotency_key),
+    FOREIGN KEY(host_id, execution_session_id)
+        REFERENCES execution_session_t(host_id, execution_session_id) ON DELETE RESTRICT
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS execution_session_cleanup_active_uk
+    ON execution_session_cleanup_request_t(host_id, execution_session_id)
+    WHERE state IN ('PENDING', 'FENCED', 'DELIVERED');
+CREATE INDEX IF NOT EXISTS execution_session_cleanup_due_idx
+    ON execution_session_cleanup_request_t(state, cleanup_deadline_ts)
+    WHERE state IN ('PENDING', 'FENCED', 'DELIVERED');
+
+CREATE TABLE IF NOT EXISTS execution_input_t (
+    host_id UUID NOT NULL,
+    input_id UUID NOT NULL,
+    request_id UUID NOT NULL,
+    execution_id UUID,
+    execution_session_id UUID,
+    kind VARCHAR(32) NOT NULL,
+    artifact_uri TEXT NOT NULL,
+    content_digest VARCHAR(128) NOT NULL,
+    size_bytes BIGINT NOT NULL CHECK (size_bytes >= 0),
+    media_type VARCHAR(255) NOT NULL,
+    signer_binding JSONB,
+    provenance_binding JSONB,
+    scanner_binding JSONB,
+    revocation_binding JSONB,
+    staging_root TEXT NOT NULL,
+    mount_target TEXT NOT NULL,
+    read_only BOOLEAN NOT NULL DEFAULT TRUE,
+    executable BOOLEAN NOT NULL DEFAULT FALSE,
+    staging_state VARCHAR(32) NOT NULL DEFAULT 'PENDING'
+        CHECK (staging_state IN ('PENDING', 'STAGED', 'VERIFIED', 'REJECTED', 'REVOKED')),
+    verification_error VARCHAR(255),
+    created_ts TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_ts TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    PRIMARY KEY(host_id, input_id),
+    FOREIGN KEY(host_id, request_id)
+        REFERENCES runner_scheduling_request_t(host_id, request_id) ON DELETE RESTRICT,
+    FOREIGN KEY(host_id, execution_id)
+        REFERENCES execution_attempt_t(host_id, execution_id) ON DELETE RESTRICT,
+    FOREIGN KEY(host_id, execution_session_id)
+        REFERENCES execution_session_t(host_id, execution_session_id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS workflow_artifact_t (
+    host_id UUID NOT NULL,
+    artifact_id UUID NOT NULL,
+    execution_id UUID NOT NULL,
+    execution_session_id UUID,
+    process_id UUID,
+    task_id UUID,
+    logical_name VARCHAR(255) NOT NULL,
+    media_type VARCHAR(255) NOT NULL,
+    size_bytes BIGINT NOT NULL CHECK (size_bytes >= 0),
+    content_digest VARCHAR(128) NOT NULL,
+    storage_reference TEXT NOT NULL,
+    producer VARCHAR(255) NOT NULL,
+    policy_digest VARCHAR(64) NOT NULL,
+    provenance_reference TEXT,
+    signature_reference TEXT,
+    retain_until_ts TIMESTAMP WITH TIME ZONE NOT NULL,
+    legal_hold BOOLEAN NOT NULL DEFAULT FALSE,
+    verification_state VARCHAR(32) NOT NULL CHECK (verification_state IN ('PENDING', 'VERIFIED', 'REJECTED')),
+    deletion_state VARCHAR(32) NOT NULL DEFAULT 'RETAINED'
+        CHECK (deletion_state IN ('RETAINED', 'DELETE_PENDING', 'DELETING', 'DELETED', 'DELETE_FAILED')),
+    deletion_attempt INTEGER NOT NULL DEFAULT 0 CHECK (deletion_attempt >= 0),
+    deletion_next_retry_ts TIMESTAMP WITH TIME ZONE,
+    deletion_evidence JSONB,
+    deleted_ts TIMESTAMP WITH TIME ZONE,
+    created_ts TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_ts TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    PRIMARY KEY(host_id, artifact_id),
+    FOREIGN KEY(host_id, execution_id)
+        REFERENCES execution_attempt_t(host_id, execution_id) ON DELETE RESTRICT,
+    FOREIGN KEY(host_id, execution_session_id)
+        REFERENCES execution_session_t(host_id, execution_session_id) ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS workflow_artifact_retention_idx
+    ON workflow_artifact_t(deletion_state, legal_hold, retain_until_ts, deletion_next_retry_ts)
+    WHERE deletion_state IN ('RETAINED', 'DELETE_PENDING', 'DELETE_FAILED');
+
+CREATE TABLE IF NOT EXISTS workflow_approval_t (
+    host_id UUID NOT NULL,
+    approval_id UUID NOT NULL,
+    process_id UUID NOT NULL,
+    task_id UUID NOT NULL,
+    preceding_execution_id UUID,
+    consuming_execution_id UUID,
+    artifact_digest_set JSONB NOT NULL DEFAULT '[]'::jsonb,
+    provenance_digest VARCHAR(128),
+    target VARCHAR(255) NOT NULL,
+    operation VARCHAR(126) NOT NULL,
+    policy_digest VARCHAR(64) NOT NULL,
+    state VARCHAR(32) NOT NULL CHECK (state IN ('REQUESTED', 'APPROVED', 'REJECTED', 'EXPIRED', 'CONSUMED')),
+    actor VARCHAR(255),
+    reason TEXT,
+    requested_ts TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    decided_ts TIMESTAMP WITH TIME ZONE,
+    expires_ts TIMESTAMP WITH TIME ZONE NOT NULL,
+    PRIMARY KEY(host_id, approval_id),
+    FOREIGN KEY(host_id, process_id) REFERENCES process_info_t(host_id, process_id) ON DELETE RESTRICT,
+    FOREIGN KEY(host_id, task_id) REFERENCES task_info_t(host_id, task_id) ON DELETE RESTRICT,
+    FOREIGN KEY(host_id, preceding_execution_id)
+        REFERENCES execution_attempt_t(host_id, execution_id) ON DELETE RESTRICT,
+    FOREIGN KEY(host_id, consuming_execution_id)
+        REFERENCES execution_attempt_t(host_id, execution_id) ON DELETE RESTRICT,
+    CHECK (consuming_execution_id IS NULL OR state = 'CONSUMED')
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS workflow_approval_active_uk
+    ON workflow_approval_t(host_id, process_id, task_id, policy_digest, target, operation)
+    WHERE state IN ('REQUESTED', 'APPROVED');
+
+ALTER TABLE runner_scheduling_request_t ADD CONSTRAINT runner_scheduling_request_approval_fk
+    FOREIGN KEY(host_id, approval_id) REFERENCES workflow_approval_t(host_id, approval_id) ON DELETE RESTRICT;
+CREATE UNIQUE INDEX IF NOT EXISTS runner_request_approval_uk
+    ON runner_scheduling_request_t(host_id, approval_id) WHERE approval_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS execution_runtime_audit_t (
+    audit_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    host_id UUID NOT NULL,
+    origin_kind VARCHAR(32) NOT NULL,
+    origin_service_id VARCHAR(255) NOT NULL,
+    origin_instance_id VARCHAR(255) NOT NULL,
+    subject_kind VARCHAR(32) NOT NULL,
+    subject_id UUID NOT NULL,
+    execution_id UUID,
+    execution_session_id UUID,
+    process_id UUID,
+    task_id UUID,
+    agent_session_id UUID,
+    agent_turn_id UUID,
+    agent_action_id UUID,
+    actor VARCHAR(255) NOT NULL,
+    event_type VARCHAR(126) NOT NULL,
+    message_id UUID,
+    lease_id UUID,
+    fencing_token BIGINT,
+    policy_digest VARCHAR(64),
+    redacted_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    event_ts TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS execution_runtime_audit_subject_idx
+    ON execution_runtime_audit_t(host_id, subject_kind, subject_id, audit_id);
+CREATE INDEX IF NOT EXISTS execution_runtime_audit_execution_idx
+    ON execution_runtime_audit_t(host_id, execution_id, audit_id) WHERE execution_id IS NOT NULL;
+
+CREATE OR REPLACE FUNCTION execution_runtime_audit_append_only()
 RETURNS TRIGGER AS $$
-DECLARE
-    fk_record RECORD;
-    where_clause TEXT;
-    query_text TEXT;
-    column_index INT;
-    current_user_name TEXT;
-    deletion_context TEXT;
-    deletion_context_pattern TEXT;
-    delete_timestamp TIMESTAMP;
 BEGIN
-    -- Get current user
-    current_user_name := current_user;
-    
-    -- Handle SOFT DELETE (active = false)
-    IF NEW.active = FALSE AND OLD.active = TRUE THEN
-        -- Generate deletion timestamp
-        delete_timestamp := CURRENT_TIMESTAMP;
-        
-        -- Set deletion context
-        deletion_context := format('PARENT_CASCADE_%s_%s', 
-            TG_TABLE_NAME, 
-            to_char(delete_timestamp, 'YYYYMMDD_HH24MISSMS')
-        );
-        
-        -- Update parent with deletion context if columns exist
-        IF EXISTS (
-            SELECT 1 FROM information_schema.columns 
-            WHERE table_schema = TG_TABLE_SCHEMA 
-              AND table_name = TG_TABLE_NAME 
-              AND column_name = 'delete_user'
-        ) THEN
-            NEW.delete_user := deletion_context;
-        END IF;
-        
-        IF EXISTS (
-            SELECT 1 FROM information_schema.columns 
-            WHERE table_schema = TG_TABLE_SCHEMA 
-              AND table_name = TG_TABLE_NAME 
-              AND column_name = 'delete_ts'
-        ) THEN
-            NEW.delete_ts := delete_timestamp;
-        END IF;
-        
-        -- Update parent's update columns
-        NEW.update_ts := delete_timestamp;
-        NEW.update_user := current_user_name;
-        
-        FOR fk_record IN
-            SELECT *
-            FROM cascade_relationships_v
-            WHERE parent_schema = TG_TABLE_SCHEMA
-              AND parent_table = TG_TABLE_NAME
-        LOOP
-            -- Build WHERE clause
-            where_clause := '';
-            FOR column_index IN 1..fk_record.column_count LOOP
-                IF column_index > 1 THEN
-                    where_clause := where_clause || ' AND ';
-                END IF;
-                where_clause := where_clause || format(
-                    '%I = ($1).%I',
-                    fk_record.child_columns[column_index],
-                    fk_record.parent_columns[column_index]
-                );
-            END LOOP;
-            
-            -- Add condition to only update currently active records
-            where_clause := where_clause || ' AND active = TRUE';
-            
-            -- Cascade the soft delete with context
-            query_text := format(
-                'UPDATE %I.%I 
-                 SET active = FALSE,
-                     delete_ts = $2, 
-                     delete_user = $3,
-                     update_ts = $2,
-                     update_user = $4
-                 WHERE %s',
-                fk_record.child_schema,
-                fk_record.child_table,
-                where_clause
-            );
-            
-            EXECUTE query_text USING OLD, delete_timestamp, deletion_context, current_user_name;
-        END LOOP;
-        
-    -- Handle RESTORE (active = true)
-    ELSIF NEW.active = TRUE AND OLD.active = FALSE THEN
-        -- Only restore children that were deleted by parent cascade
-        
-        FOR fk_record IN
-            SELECT *
-            FROM cascade_relationships_v
-            WHERE parent_schema = TG_TABLE_SCHEMA
-              AND parent_table = TG_TABLE_NAME
-        LOOP
-            -- Pattern to match cascade deletions
-            deletion_context_pattern := format('PARENT_CASCADE_%s_%%', TG_TABLE_NAME);
-            
-            -- Build WHERE clause
-            where_clause := '';
-            FOR column_index IN 1..fk_record.column_count LOOP
-                IF column_index > 1 THEN
-                    where_clause := where_clause || ' AND ';
-                END IF;
-                where_clause := where_clause || format(
-                    '%I = ($1).%I',
-                    fk_record.child_columns[column_index],
-                    fk_record.parent_columns[column_index]
-                );
-            END LOOP;
-            
-            -- Only restore cascade-deleted records
-            where_clause := where_clause || 
-                ' AND delete_user LIKE $2 AND active = FALSE';
-            
-            -- Restore the records
-            query_text := format(
-                'UPDATE %I.%I 
-                 SET active = TRUE,
-                     delete_ts = NULL, 
-                     delete_user = NULL,
-                     update_ts = CURRENT_TIMESTAMP,
-                     update_user = $3
-                 WHERE %s',
-                fk_record.child_schema,
-                fk_record.child_table,
-                where_clause
-            );
-            
-            EXECUTE query_text USING OLD, deletion_context_pattern, current_user_name;
-        END LOOP;
-        
-        -- Clear parent's deletion context
-        IF EXISTS (
-            SELECT 1 FROM information_schema.columns 
-            WHERE table_schema = TG_TABLE_SCHEMA 
-              AND table_name = TG_TABLE_NAME 
-              AND column_name = 'delete_user'
-        ) THEN
-            NEW.delete_user := NULL;
-        END IF;
-        
-        IF EXISTS (
-            SELECT 1 FROM information_schema.columns 
-            WHERE table_schema = TG_TABLE_SCHEMA 
-              AND table_name = TG_TABLE_NAME 
-              AND column_name = 'delete_ts'
-        ) THEN
-            NEW.delete_ts := NULL;
-        END IF;
-        
-        -- Update parent's update columns
-        NEW.update_ts := CURRENT_TIMESTAMP;
-        NEW.update_user := current_user_name;
+    RAISE EXCEPTION 'execution_runtime_audit_t is append-only';
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS execution_runtime_audit_no_update ON execution_runtime_audit_t;
+CREATE TRIGGER execution_runtime_audit_no_update
+    BEFORE UPDATE OR DELETE ON execution_runtime_audit_t
+    FOR EACH ROW EXECUTE FUNCTION execution_runtime_audit_append_only();
+
+CREATE OR REPLACE FUNCTION notify_execution_result_ready_v1()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.terminal_ts IS NOT NULL
+       AND NEW.state IN ('SUCCEEDED', 'FAILED', 'CANCELLED', 'TIMED_OUT', 'UNKNOWN')
+       AND (TG_OP = 'INSERT' OR OLD.terminal_ts IS NULL) THEN
+        PERFORM pg_notify('execution_result_ready_v1', json_build_object(
+            'version', 1,
+            'originServiceId', NEW.origin_service_id,
+            'originInstanceId', NEW.origin_instance_id,
+            'subjectKind', NEW.subject_kind,
+            'subjectId', NEW.subject_id,
+            'subjectAttempt', NEW.attempt_number,
+            'executionId', NEW.execution_id
+        )::text);
     END IF;
-    
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS execution_attempt_result_notify ON execution_attempt_t;
+CREATE TRIGGER execution_attempt_result_notify
+    AFTER INSERT OR UPDATE OF state, terminal_ts ON execution_attempt_t
+    FOR EACH ROW EXECUTE FUNCTION notify_execution_result_ready_v1();
 
+-- Light-Agent durable runtime (canonical fresh-install schema).
 
--- Apply cascade triggers only to tables that have BOTH active AND delete_ts columns
-DO $$
-DECLARE
-    table_record RECORD;
-    has_active_column BOOLEAN;
-    has_delete_ts_column BOOLEAN;
+ALTER TABLE agent_definition_t
+    ADD COLUMN IF NOT EXISTS product_profile VARCHAR(32) NOT NULL DEFAULT 'enterprise',
+    ADD COLUMN IF NOT EXISTS default_execution_profile_id VARCHAR(126),
+    ADD COLUMN IF NOT EXISTS policy_snapshot JSONB,
+    ADD COLUMN IF NOT EXISTS policy_digest VARCHAR(71),
+    ADD COLUMN IF NOT EXISTS maximum_session_seconds BIGINT,
+    ADD COLUMN IF NOT EXISTS maximum_turn_seconds BIGINT;
+
+ALTER TABLE tool_t
+    ADD COLUMN IF NOT EXISTS stable_tool_ref UUID,
+    ADD COLUMN IF NOT EXISTS execution_placement VARCHAR(16),
+    ADD COLUMN IF NOT EXISTS model_alias VARCHAR(126),
+    ADD COLUMN IF NOT EXISTS schema_digest VARCHAR(71),
+    ADD COLUMN IF NOT EXISTS dispatch_policy_ref VARCHAR(255);
+
+ALTER TABLE tool_t DROP CONSTRAINT IF EXISTS tool_execution_placement_ck;
+ALTER TABLE tool_t ADD CONSTRAINT tool_execution_placement_ck
+    CHECK (execution_placement IS NULL OR execution_placement IN ('gateway', 'runner', 'workflow', 'fixed'));
+CREATE UNIQUE INDEX IF NOT EXISTS tool_stable_ref_uk ON tool_t(host_id, stable_tool_ref)
+    WHERE stable_tool_ref IS NOT NULL;
+UPDATE tool_t
+SET stable_tool_ref = COALESCE(stable_tool_ref, tool_id),
+    model_alias = COALESCE(model_alias, name),
+    execution_placement = COALESCE(execution_placement, 'gateway')
+WHERE execution_placement IS NULL
+  AND (endpoint_id IS NOT NULL OR mcp_server_name IS NOT NULL OR implementation_type IN ('mcp_server','rest'));
+
+ALTER TABLE agent_session_history_t
+    ADD COLUMN IF NOT EXISTS durable_session_id UUID,
+    ADD COLUMN IF NOT EXISTS projection_sequence BIGINT NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS projection_state VARCHAR(16) NOT NULL DEFAULT 'CURRENT';
+
+CREATE TABLE IF NOT EXISTS agent_policy_snapshot_t (
+    host_id UUID NOT NULL REFERENCES host_t(host_id) ON DELETE RESTRICT,
+    policy_snapshot_id UUID NOT NULL,
+    agent_def_id UUID NOT NULL,
+    definition_digest VARCHAR(71) NOT NULL,
+    product_profile_digest VARCHAR(71) NOT NULL,
+    model_digest VARCHAR(71) NOT NULL,
+    catalog_digest VARCHAR(71) NOT NULL,
+    memory_digest VARCHAR(71) NOT NULL,
+    execution_digest VARCHAR(71) NOT NULL,
+    channel_digest VARCHAR(71) NOT NULL,
+    data_boundary_digest VARCHAR(71) NOT NULL,
+    resolved_snapshot JSONB NOT NULL,
+    policy_digest VARCHAR(71) NOT NULL,
+    revoked_ts TIMESTAMP WITH TIME ZONE,
+    created_ts TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(host_id, policy_snapshot_id),
+    UNIQUE(host_id, policy_digest),
+    FOREIGN KEY(host_id, agent_def_id) REFERENCES agent_definition_t(host_id, agent_def_id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS agent_session_t (
+    host_id UUID NOT NULL REFERENCES host_t(host_id) ON DELETE RESTRICT,
+    session_id UUID NOT NULL,
+    principal_id VARCHAR(255) NOT NULL,
+    user_id UUID,
+    agent_def_id UUID NOT NULL,
+    agent_definition_version BIGINT NOT NULL,
+    bank_id UUID,
+    execution_session_id UUID,
+    policy_snapshot_id UUID NOT NULL,
+    state VARCHAR(16) NOT NULL DEFAULT 'ACTIVE' CHECK (state IN ('ACTIVE','CLOSING','CLOSED','REVOKED','EXPIRED')),
+    session_version BIGINT NOT NULL DEFAULT 1 CHECK (session_version > 0),
+    active_turn_id UUID,
+    next_turn_sequence BIGINT NOT NULL DEFAULT 1 CHECK (next_turn_sequence > 0),
+    next_queue_sequence BIGINT NOT NULL DEFAULT 1 CHECK (next_queue_sequence > 0),
+    idle_expires_ts TIMESTAMP WITH TIME ZONE NOT NULL,
+    maximum_expires_ts TIMESTAMP WITH TIME ZONE NOT NULL,
+    resume_handle_digest VARCHAR(71) NOT NULL,
+    resume_revoked_ts TIMESTAMP WITH TIME ZONE,
+    approval_hold_id UUID,
+    approval_hold_state VARCHAR(32),
+    approval_hold_expires_ts TIMESTAMP WITH TIME ZONE,
+    preserved_workspace_ref VARCHAR(1024),
+    cleanup_state VARCHAR(32) NOT NULL DEFAULT 'NOT_REQUIRED' CHECK (cleanup_state IN ('NOT_REQUIRED','CLEANUP_REQUESTED','CLEANUP_PENDING','CLEANED','CLEANUP_FAILED')),
+    cleanup_request_id UUID,
+    cleanup_evidence JSONB,
+    created_ts TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_ts TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(host_id, session_id),
+    FOREIGN KEY(host_id, agent_def_id) REFERENCES agent_definition_t(host_id, agent_def_id) ON DELETE RESTRICT,
+    FOREIGN KEY(host_id, bank_id) REFERENCES agent_memory_bank_t(host_id, bank_id) ON DELETE RESTRICT,
+    FOREIGN KEY(host_id, policy_snapshot_id) REFERENCES agent_policy_snapshot_t(host_id, policy_snapshot_id) ON DELETE RESTRICT,
+    FOREIGN KEY(host_id, execution_session_id) REFERENCES execution_session_t(host_id, execution_session_id) ON DELETE RESTRICT,
+    CHECK (idle_expires_ts <= maximum_expires_ts),
+    CHECK ((approval_hold_id IS NULL AND approval_hold_state IS NULL AND approval_hold_expires_ts IS NULL)
+        OR (approval_hold_id IS NOT NULL AND approval_hold_state IS NOT NULL AND approval_hold_expires_ts IS NOT NULL))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS agent_session_resume_uk ON agent_session_t(host_id, resume_handle_digest);
+CREATE INDEX IF NOT EXISTS agent_session_expiry_idx ON agent_session_t(idle_expires_ts, maximum_expires_ts)
+    WHERE state = 'ACTIVE';
+CREATE INDEX IF NOT EXISTS agent_session_cleanup_idx ON agent_session_t(cleanup_state, updated_ts)
+    WHERE cleanup_state IN ('CLEANUP_REQUESTED','CLEANUP_PENDING','CLEANUP_FAILED');
+
+CREATE TABLE IF NOT EXISTS agent_turn_t (
+    host_id UUID NOT NULL,
+    turn_id UUID NOT NULL,
+    session_id UUID NOT NULL,
+    turn_sequence BIGINT NOT NULL CHECK (turn_sequence > 0),
+    queue_sequence BIGINT NOT NULL CHECK (queue_sequence > 0),
+    origin_kind VARCHAR(16) NOT NULL CHECK (origin_kind IN ('user','channel','workflow','scheduler','connector','service')),
+    origin_ref VARCHAR(255),
+    client_message_id VARCHAR(255) NOT NULL,
+    idempotency_key VARCHAR(255) NOT NULL,
+    state VARCHAR(32) NOT NULL DEFAULT 'QUEUED' CHECK (state IN ('QUEUED','RECEIVED','RUNNING_MODEL','WAITING_ACTION','RUNNING_ACTION','WAITING_RECONCILIATION','WAITING_APPROVAL','COMPLETED','FAILED','CANCELLED','UNKNOWN')),
+    policy_snapshot_id UUID NOT NULL,
+    policy_digest VARCHAR(71) NOT NULL,
+    data_boundary_digest VARCHAR(71) NOT NULL,
+    model_provider VARCHAR(64) NOT NULL,
+    model_name VARCHAR(126) NOT NULL,
+    model_action_budget INTEGER NOT NULL CHECK (model_action_budget > 0),
+    token_budget BIGINT NOT NULL CHECK (token_budget > 0),
+    cost_budget_micros BIGINT NOT NULL CHECK (cost_budget_micros >= 0),
+    deadline_ts TIMESTAMP WITH TIME ZONE NOT NULL,
+    delegation_depth INTEGER NOT NULL DEFAULT 0 CHECK (delegation_depth >= 0),
+    terminal_result JSONB,
+    terminal_error JSONB,
+    event_sequence BIGINT NOT NULL DEFAULT 0,
+    projection_sequence BIGINT NOT NULL DEFAULT 0,
+    activated_ts TIMESTAMP WITH TIME ZONE,
+    terminal_ts TIMESTAMP WITH TIME ZONE,
+    created_ts TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_ts TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(host_id, turn_id),
+    UNIQUE(host_id, session_id, turn_sequence),
+    UNIQUE(host_id, session_id, queue_sequence),
+    UNIQUE(host_id, session_id, client_message_id),
+    UNIQUE(host_id, session_id, idempotency_key),
+    FOREIGN KEY(host_id, session_id) REFERENCES agent_session_t(host_id, session_id) ON DELETE CASCADE,
+    FOREIGN KEY(host_id, policy_snapshot_id) REFERENCES agent_policy_snapshot_t(host_id, policy_snapshot_id) ON DELETE RESTRICT
+);
+
+ALTER TABLE agent_session_t DROP CONSTRAINT IF EXISTS agent_session_active_turn_fk;
+ALTER TABLE agent_session_t ADD CONSTRAINT agent_session_active_turn_fk
+    FOREIGN KEY(host_id, active_turn_id) REFERENCES agent_turn_t(host_id, turn_id) DEFERRABLE INITIALLY DEFERRED;
+CREATE UNIQUE INDEX IF NOT EXISTS agent_turn_one_active_uk ON agent_turn_t(host_id, session_id)
+    WHERE state IN ('RECEIVED','RUNNING_MODEL','WAITING_ACTION','RUNNING_ACTION','WAITING_RECONCILIATION','WAITING_APPROVAL');
+CREATE INDEX IF NOT EXISTS agent_turn_fifo_idx ON agent_turn_t(host_id, session_id, queue_sequence)
+    WHERE state = 'QUEUED';
+CREATE INDEX IF NOT EXISTS agent_turn_reconcile_idx ON agent_turn_t(host_id, updated_ts)
+    WHERE state IN ('WAITING_RECONCILIATION','RUNNING_ACTION');
+
+CREATE TABLE IF NOT EXISTS agent_action_attempt_t (
+    host_id UUID NOT NULL,
+    action_attempt_id UUID NOT NULL,
+    turn_id UUID NOT NULL,
+    logical_action_id UUID NOT NULL,
+    attempt_number INTEGER NOT NULL CHECK (attempt_number > 0),
+    stable_tool_ref UUID NOT NULL,
+    model_alias VARCHAR(126) NOT NULL,
+    placement VARCHAR(16) NOT NULL CHECK (placement IN ('gateway','runner','workflow','fixed')),
+    schema_digest VARCHAR(71) NOT NULL,
+    policy_digest VARCHAR(71) NOT NULL,
+    argument_digest VARCHAR(71) NOT NULL,
+    effect_class VARCHAR(32) NOT NULL,
+    state VARCHAR(32) NOT NULL CHECK (state IN ('PROPOSED','WAITING_APPROVAL','READY','DISPATCHED','RUNNING','APPROVAL_REQUIRED','SUCCEEDED','FAILED','CANCELLED','UNKNOWN','OPERATOR_REQUIRED','ACCEPTED')),
+    approval_id UUID,
+    execution_attempt_id UUID,
+    superseded_action_attempt_id UUID,
+    gateway_request_id UUID,
+    gateway_token_id UUID,
+    runtime_adapter_id VARCHAR(126),
+    runtime_adapter_version VARCHAR(64),
+    runtime_capability_digest VARCHAR(71),
+    result JSONB,
+    result_digest VARCHAR(71),
+    origin_accepted_ts TIMESTAMP WITH TIME ZONE,
+    created_ts TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_ts TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(host_id, action_attempt_id),
+    UNIQUE(host_id, turn_id, logical_action_id, attempt_number),
+    UNIQUE(host_id, execution_attempt_id),
+    UNIQUE(host_id, gateway_request_id),
+    FOREIGN KEY(host_id, turn_id) REFERENCES agent_turn_t(host_id, turn_id) ON DELETE CASCADE,
+    FOREIGN KEY(host_id, execution_attempt_id) REFERENCES execution_attempt_t(host_id, execution_id) ON DELETE RESTRICT,
+    FOREIGN KEY(host_id, superseded_action_attempt_id) REFERENCES agent_action_attempt_t(host_id, action_attempt_id) ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS agent_action_pending_result_idx ON agent_action_attempt_t(host_id, execution_attempt_id)
+    WHERE execution_attempt_id IS NOT NULL AND origin_accepted_ts IS NULL;
+
+CREATE TABLE IF NOT EXISTS agent_approval_t (
+    host_id UUID NOT NULL,
+    approval_id UUID NOT NULL,
+    turn_id UUID NOT NULL,
+    logical_action_id UUID NOT NULL,
+    subject_digest VARCHAR(71) NOT NULL,
+    input_digest VARCHAR(71) NOT NULL,
+    policy_digest VARCHAR(71) NOT NULL,
+    approver_scope JSONB NOT NULL,
+    state VARCHAR(16) NOT NULL DEFAULT 'REQUESTED' CHECK (state IN ('REQUESTED','APPROVED','REJECTED','EXPIRED','REVOKED')),
+    nonce_digest VARCHAR(71) NOT NULL,
+    expires_ts TIMESTAMP WITH TIME ZONE NOT NULL,
+    decision_actor VARCHAR(255),
+    decision_ts TIMESTAMP WITH TIME ZONE,
+    decision_reason TEXT,
+    consumed_action_attempt_id UUID,
+    consumed_execution_attempt_id UUID,
+    created_ts TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(host_id, approval_id),
+    UNIQUE(host_id, nonce_digest),
+    FOREIGN KEY(host_id, turn_id) REFERENCES agent_turn_t(host_id, turn_id) ON DELETE CASCADE,
+    FOREIGN KEY(host_id, consumed_action_attempt_id) REFERENCES agent_action_attempt_t(host_id, action_attempt_id) ON DELETE RESTRICT,
+    FOREIGN KEY(host_id, consumed_execution_attempt_id) REFERENCES execution_attempt_t(host_id, execution_id) ON DELETE RESTRICT,
+    CHECK ((state = 'REQUESTED' AND decision_ts IS NULL) OR (state <> 'REQUESTED' AND decision_ts IS NOT NULL))
+);
+
+ALTER TABLE agent_action_attempt_t DROP CONSTRAINT IF EXISTS agent_action_approval_fk;
+ALTER TABLE agent_action_attempt_t ADD CONSTRAINT agent_action_approval_fk
+    FOREIGN KEY(host_id, approval_id) REFERENCES agent_approval_t(host_id, approval_id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
+CREATE INDEX IF NOT EXISTS agent_approval_expiry_idx ON agent_approval_t(expires_ts) WHERE state = 'REQUESTED';
+
+CREATE TABLE IF NOT EXISTS agent_session_event_t (
+    host_id UUID NOT NULL,
+    event_id UUID NOT NULL,
+    session_id UUID NOT NULL,
+    event_sequence BIGINT NOT NULL CHECK (event_sequence > 0),
+    turn_id UUID,
+    action_attempt_id UUID,
+    actor_class VARCHAR(32) NOT NULL,
+    event_type VARCHAR(64) NOT NULL,
+    content JSONB NOT NULL,
+    content_digest VARCHAR(71) NOT NULL,
+    policy_digest VARCHAR(71) NOT NULL,
+    visibility VARCHAR(16) NOT NULL DEFAULT 'USER',
+    retention_class VARCHAR(32) NOT NULL DEFAULT 'STANDARD',
+    created_ts TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(host_id, event_id),
+    UNIQUE(host_id, session_id, event_sequence),
+    FOREIGN KEY(host_id, session_id) REFERENCES agent_session_t(host_id, session_id) ON DELETE CASCADE,
+    FOREIGN KEY(host_id, turn_id) REFERENCES agent_turn_t(host_id, turn_id) ON DELETE CASCADE,
+    FOREIGN KEY(host_id, action_attempt_id) REFERENCES agent_action_attempt_t(host_id, action_attempt_id) ON DELETE RESTRICT
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS agent_action_result_event_uk
+    ON agent_session_event_t(host_id, action_attempt_id)
+    WHERE action_attempt_id IS NOT NULL AND event_type = 'ACTION_RESULT';
+CREATE INDEX IF NOT EXISTS agent_event_projection_idx ON agent_session_event_t(host_id, session_id, event_sequence);
+
+-- Workflow execution Phases 7-10 foundations (canonical schema).
+
+ALTER TABLE workflow_artifact_t
+    ADD COLUMN IF NOT EXISTS staging_reference TEXT,
+    ADD COLUMN IF NOT EXISTS promotion_state VARCHAR(32) NOT NULL DEFAULT 'BOUND',
+    ADD COLUMN IF NOT EXISTS provenance_digest VARCHAR(128);
+ALTER TABLE workflow_artifact_t DROP CONSTRAINT IF EXISTS workflow_artifact_promotion_state_ck;
+ALTER TABLE workflow_artifact_t ADD CONSTRAINT workflow_artifact_promotion_state_ck
+    CHECK (promotion_state IN ('STAGED','METADATA_COMMITTED','BOUND','QUARANTINED'));
+
+ALTER TABLE execution_input_t
+    ADD COLUMN IF NOT EXISTS trust_bundle_id VARCHAR(126),
+    ADD COLUMN IF NOT EXISTS trust_bundle_version INTEGER,
+    ADD COLUMN IF NOT EXISTS package_manifest_digest VARCHAR(128),
+    ADD COLUMN IF NOT EXISTS mount_options JSONB NOT NULL DEFAULT '["ro","nodev","nosuid","noexec"]'::jsonb;
+
+CREATE TABLE IF NOT EXISTS execution_provenance_t (
+    host_id UUID NOT NULL,
+    provenance_id UUID NOT NULL,
+    execution_id UUID NOT NULL,
+    statement JSONB NOT NULL,
+    statement_digest VARCHAR(128) NOT NULL,
+    predicate_type VARCHAR(255) NOT NULL,
+    trusted_generator VARCHAR(255) NOT NULL,
+    signature_reference TEXT,
+    created_ts TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(host_id, provenance_id),
+    UNIQUE(host_id, execution_id, statement_digest),
+    FOREIGN KEY(host_id, execution_id) REFERENCES execution_attempt_t(host_id, execution_id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS execution_credential_grant_audit_t (
+    host_id UUID NOT NULL,
+    grant_id UUID NOT NULL,
+    execution_id UUID NOT NULL,
+    fencing_token BIGINT NOT NULL,
+    policy_digest VARCHAR(128) NOT NULL,
+    operation VARCHAR(126) NOT NULL,
+    destination_digest VARCHAR(128) NOT NULL,
+    maximum_uses INTEGER NOT NULL CHECK (maximum_uses > 0),
+    use_count INTEGER NOT NULL DEFAULT 0 CHECK (use_count >= 0),
+    expires_ts TIMESTAMP WITH TIME ZONE NOT NULL,
+    revoked_ts TIMESTAMP WITH TIME ZONE,
+    revocation_reason VARCHAR(255),
+    created_ts TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(host_id, grant_id),
+    FOREIGN KEY(host_id, execution_id) REFERENCES execution_attempt_t(host_id, execution_id) ON DELETE RESTRICT,
+    CHECK (use_count <= maximum_uses)
+);
+CREATE INDEX IF NOT EXISTS execution_credential_grant_expiry_idx
+    ON execution_credential_grant_audit_t(expires_ts) WHERE revoked_ts IS NULL;
+
+CREATE TABLE IF NOT EXISTS execution_runtime_tool_manifest_t (
+    host_id UUID NOT NULL,
+    manifest_id UUID NOT NULL,
+    execution_id UUID NOT NULL,
+    manifest JSONB NOT NULL,
+    manifest_digest VARCHAR(128) NOT NULL,
+    signer_reference VARCHAR(255) NOT NULL,
+    verified_ts TIMESTAMP WITH TIME ZONE NOT NULL,
+    created_ts TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(host_id, manifest_id),
+    UNIQUE(host_id, execution_id, manifest_digest),
+    FOREIGN KEY(host_id, execution_id) REFERENCES execution_attempt_t(host_id, execution_id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS execution_fixed_action_t (
+    host_id UUID NOT NULL,
+    fixed_action_id UUID NOT NULL,
+    action_kind VARCHAR(64) NOT NULL CHECK (action_kind IN ('apply-patch','create-branch','push-commit','open-pr','publish','sign')),
+    execution_id UUID NOT NULL,
+    approval_id UUID NOT NULL,
+    repository_digest VARCHAR(128) NOT NULL,
+    base_commit VARCHAR(64),
+    repository_object_format VARCHAR(16) NOT NULL DEFAULT 'sha1',
+    target_ref VARCHAR(255) NOT NULL,
+    artifact_digest VARCHAR(128) NOT NULL,
+    policy_digest VARCHAR(128) NOT NULL,
+    repository_reference TEXT,
+    patch_artifact_reference TEXT,
+    changed_paths JSONB NOT NULL DEFAULT '[]'::jsonb,
+    action_spec JSONB NOT NULL DEFAULT '{}'::jsonb,
+    provenance_digest VARCHAR(128),
+    idempotency_key VARCHAR(255),
+    provider_receipt JSONB,
+    state VARCHAR(32) NOT NULL CHECK (state IN ('REQUESTED','VALIDATED','RUNNING','SUCCEEDED','FAILED','REJECTED','UNKNOWN')),
+    result_evidence JSONB,
+    created_ts TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_ts TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(host_id, fixed_action_id),
+    FOREIGN KEY(host_id, execution_id) REFERENCES execution_attempt_t(host_id, execution_id) ON DELETE RESTRICT,
+    FOREIGN KEY(host_id, approval_id) REFERENCES workflow_approval_t(host_id, approval_id) ON DELETE RESTRICT
+);
+ALTER TABLE execution_fixed_action_t ADD CONSTRAINT execution_fixed_action_object_format_ck CHECK (repository_object_format IN ('sha1','sha256'));
+ALTER TABLE execution_fixed_action_t ADD CONSTRAINT execution_fixed_action_base_commit_ck CHECK (action_kind NOT IN ('apply-patch','create-branch','open-pr','push-commit') OR ((repository_object_format='sha1' AND base_commit ~ '^[0-9A-Fa-f]{40}$') OR (repository_object_format='sha256' AND base_commit ~ '^[0-9A-Fa-f]{64}$')));
+ALTER TABLE execution_fixed_action_t ADD CONSTRAINT execution_fixed_action_apply_patch_input_ck CHECK (action_kind <> 'apply-patch' OR (repository_reference IS NOT NULL AND patch_artifact_reference IS NOT NULL AND jsonb_typeof(changed_paths) = 'array'));
+ALTER TABLE execution_fixed_action_t ADD CONSTRAINT execution_fixed_action_provider_input_ck CHECK (action_kind NOT IN ('create-branch','open-pr','publish','sign') OR (jsonb_typeof(action_spec)='object' AND idempotency_key IS NOT NULL AND length(idempotency_key) BETWEEN 16 AND 255));
+CREATE UNIQUE INDEX IF NOT EXISTS execution_fixed_action_idempotency_uk ON execution_fixed_action_t(host_id,action_kind,idempotency_key) WHERE idempotency_key IS NOT NULL;
+ALTER TABLE execution_fixed_action_t ADD COLUMN IF NOT EXISTS unknown_since_ts TIMESTAMPTZ,ADD COLUMN IF NOT EXISTS next_reconcile_ts TIMESTAMPTZ,ADD COLUMN IF NOT EXISTS reconciliation_attempt_count INTEGER NOT NULL DEFAULT 0,ADD COLUMN IF NOT EXISTS reconciliation_claim_token UUID,ADD COLUMN IF NOT EXISTS reconciliation_lease_expires_ts TIMESTAMPTZ;
+ALTER TABLE execution_fixed_action_t ADD CONSTRAINT execution_fixed_action_reconciliation_ck CHECK(reconciliation_attempt_count>=0 AND ((reconciliation_claim_token IS NULL AND reconciliation_lease_expires_ts IS NULL) OR (state='UNKNOWN' AND reconciliation_claim_token IS NOT NULL AND reconciliation_lease_expires_ts IS NOT NULL)) AND (state<>'UNKNOWN' OR unknown_since_ts IS NOT NULL));
+CREATE INDEX IF NOT EXISTS execution_fixed_action_reconcile_due_idx ON execution_fixed_action_t(next_reconcile_ts,updated_ts) WHERE state IN('RUNNING','UNKNOWN');
+
+-- Light-Agent Phases 4-5: immutable packages, materialization, and origin-neutral scheduling.
+ALTER TABLE runner_scheduling_request_t ALTER COLUMN policy_digest TYPE VARCHAR(71);
+ALTER TABLE agent_definition_t ADD COLUMN IF NOT EXISTS materializer_id VARCHAR(126) NOT NULL DEFAULT 'enterprise', ADD COLUMN IF NOT EXISTS materializer_version INTEGER NOT NULL DEFAULT 1, ADD COLUMN IF NOT EXISTS skill_selection_policy JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE tool_t ADD COLUMN IF NOT EXISTS script_execution_policy VARCHAR(32) NOT NULL DEFAULT 'AUTHORING_ONLY';
+ALTER TABLE tool_t DROP CONSTRAINT IF EXISTS tool_script_execution_policy_ck;
+ALTER TABLE tool_t ADD CONSTRAINT tool_script_execution_policy_ck CHECK (script_execution_policy IN ('AUTHORING_ONLY','LEGACY_LOCAL_DISABLED'));
+CREATE TABLE IF NOT EXISTS skill_package_t (
+ host_id UUID NOT NULL, package_id UUID NOT NULL, package_name VARCHAR(255) NOT NULL, package_version VARCHAR(64) NOT NULL,
+ product_profile VARCHAR(64) NOT NULL CHECK (product_profile IN ('enterprise','native-workflow','coding','personal-assistant','external-adapter')),
+ object_reference TEXT NOT NULL, content_digest VARCHAR(71) NOT NULL, media_type VARCHAR(126) NOT NULL, size_bytes BIGINT NOT NULL CHECK(size_bytes>=0),
+ signer_reference VARCHAR(255) NOT NULL, signature_reference TEXT NOT NULL, scanner_reference VARCHAR(255) NOT NULL, scan_digest VARCHAR(71) NOT NULL,
+ provenance_reference TEXT NOT NULL, entrypoint VARCHAR(1024) NOT NULL, compatibility JSONB NOT NULL,
+ instruction_authority VARCHAR(32) NOT NULL CHECK(instruction_authority IN ('platform','product','administrator','repository','generated')),
+ state VARCHAR(32) NOT NULL CHECK(state IN ('PUBLISHED','REVOKED','RETIRED')), reviewed_by VARCHAR(255) NOT NULL, reviewed_ts TIMESTAMPTZ NOT NULL,
+ revoked_ts TIMESTAMPTZ, revocation_reason TEXT, retain_until_ts TIMESTAMPTZ NOT NULL,
+ deletion_state VARCHAR(32) NOT NULL DEFAULT 'RETAINED' CHECK(deletion_state IN ('RETAINED','DELETE_PENDING','DELETING','DELETED','DELETE_FAILED')),
+ deletion_evidence JSONB, created_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ PRIMARY KEY(host_id,package_id), UNIQUE(host_id,package_name,package_version), UNIQUE(host_id,content_digest), FOREIGN KEY(host_id) REFERENCES host_t(host_id) ON DELETE RESTRICT);
+CREATE INDEX IF NOT EXISTS skill_package_select_idx ON skill_package_t(host_id,product_profile,state,package_name,package_version);
+CREATE INDEX IF NOT EXISTS skill_package_retention_idx ON skill_package_t(deletion_state,retain_until_ts) WHERE state <> 'PUBLISHED';
+CREATE TABLE IF NOT EXISTS skill_package_proposal_t (
+ host_id UUID NOT NULL, proposal_id UUID NOT NULL, source_kind VARCHAR(32) NOT NULL CHECK(source_kind IN ('repository','agent-generated','import')),
+ source_reference TEXT NOT NULL, proposed_manifest JSONB NOT NULL, proposed_digest VARCHAR(71) NOT NULL,
+ state VARCHAR(32) NOT NULL DEFAULT 'INACTIVE' CHECK(state IN ('INACTIVE','REVIEWING','APPROVED','REJECTED','WITHDRAWN')),
+ approved_package_id UUID, decision_actor VARCHAR(255), decision_reason TEXT, decision_ts TIMESTAMPTZ, created_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ updated_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(host_id,proposal_id),
+ FOREIGN KEY(host_id,approved_package_id) REFERENCES skill_package_t(host_id,package_id) ON DELETE RESTRICT, CHECK((state='APPROVED')=(approved_package_id IS NOT NULL)));
+CREATE TABLE IF NOT EXISTS agent_turn_materialization_t (
+ host_id UUID NOT NULL, turn_id UUID NOT NULL, materializer_id VARCHAR(126) NOT NULL, materializer_version INTEGER NOT NULL,
+ product_profile VARCHAR(64) NOT NULL, manifest JSONB NOT NULL, manifest_digest VARCHAR(71) NOT NULL, created_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ PRIMARY KEY(host_id,turn_id), UNIQUE(host_id,turn_id,manifest_digest), FOREIGN KEY(host_id,turn_id) REFERENCES agent_turn_t(host_id,turn_id) ON DELETE CASCADE);
+ALTER TABLE agent_turn_t ADD COLUMN IF NOT EXISTS scheduling_request_id UUID, ADD COLUMN IF NOT EXISTS execution_attempt_id UUID, ADD COLUMN IF NOT EXISTS materialization_manifest_digest VARCHAR(71), ADD COLUMN IF NOT EXISTS coding_base_revision VARCHAR(64), ADD COLUMN IF NOT EXISTS coding_patch_digest VARCHAR(71);
+CREATE UNIQUE INDEX IF NOT EXISTS agent_turn_scheduling_request_uk ON agent_turn_t(host_id,scheduling_request_id) WHERE scheduling_request_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS agent_turn_execution_attempt_uk ON agent_turn_t(host_id,execution_attempt_id) WHERE execution_attempt_id IS NOT NULL;
+ALTER TABLE runner_scheduling_request_t DROP CONSTRAINT IF EXISTS runner_scheduling_request_t_host_id_policy_snapshot_id_fkey;
+CREATE OR REPLACE FUNCTION validate_runner_request_policy_snapshot_v1()
+RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-    FOR table_record IN
-        SELECT 
-            n.nspname AS schema_name,
-            c.relname AS table_name,
-            c.oid AS table_oid
-        FROM pg_class c
-        JOIN pg_namespace n ON c.relnamespace = n.oid
-        WHERE c.relkind = 'r'  -- Regular tables only
-          AND n.nspname NOT IN ('pg_catalog', 'information_schema')
-          AND EXISTS (
-              SELECT 1 FROM pg_constraint con
-              JOIN pg_class ref ON con.confrelid = ref.oid
-              WHERE con.contype = 'f'
-                AND ref.oid = c.oid
-          )
-    LOOP
-        -- Check if table has required columns
-        SELECT EXISTS (
-            SELECT 1 FROM pg_attribute a
-            WHERE a.attrelid = table_record.table_oid
-              AND a.attname = 'active'
-              AND NOT a.attisdropped
-        ) INTO has_active_column;
-        
-        SELECT EXISTS (
-            SELECT 1 FROM pg_attribute a
-            WHERE a.attrelid = table_record.table_oid
-              AND a.attname = 'delete_ts'
-              AND NOT a.attisdropped
-        ) INTO has_delete_ts_column;
-        
-        IF NOT (has_active_column AND has_delete_ts_column) THEN
-            RAISE NOTICE 'Skipping %.% - missing required columns (active: %, delete_ts: %)', 
-                table_record.schema_name, table_record.table_name,
-                has_active_column, has_delete_ts_column;
-            CONTINUE;
+    IF NEW.origin_kind = 'workflow' THEN
+        IF NOT EXISTS (SELECT 1 FROM workflow_execution_policy_t p WHERE p.host_id=NEW.host_id AND p.policy_snapshot_id=NEW.policy_snapshot_id AND p.policy_digest=NEW.policy_digest) THEN
+            RAISE EXCEPTION 'workflow runner request policy snapshot is invalid';
         END IF;
-        
-        -- Drop existing trigger if it exists
-        EXECUTE format(
-            'DROP TRIGGER IF EXISTS trg_cascade_soft_ops ON %I.%I',
-            table_record.schema_name, table_record.table_name
-        );
-        
-        -- Create new trigger
-        EXECUTE format(
-            'CREATE TRIGGER trg_cascade_soft_ops
-             AFTER UPDATE OF active ON %I.%I
-             FOR EACH ROW
-             EXECUTE FUNCTION smart_cascade_soft_delete()',
-            table_record.schema_name, table_record.table_name
-        );
-        
-        RAISE NOTICE 'Created cascade trigger on %.%', 
-            table_record.schema_name, table_record.table_name;
-    END LOOP;
+    ELSIF NEW.origin_kind = 'agent' THEN
+        IF NOT EXISTS (SELECT 1 FROM agent_policy_snapshot_t p WHERE p.host_id=NEW.host_id AND p.policy_snapshot_id=NEW.policy_snapshot_id AND p.policy_digest=NEW.policy_digest AND p.revoked_ts IS NULL) THEN
+            RAISE EXCEPTION 'agent runner request policy snapshot is invalid or revoked';
+        END IF;
+    ELSE
+        RAISE EXCEPTION 'unsupported runner request origin %', NEW.origin_kind;
+    END IF;
+    RETURN NEW;
 END $$;
+DROP TRIGGER IF EXISTS runner_request_policy_snapshot_v1 ON runner_scheduling_request_t;
+CREATE CONSTRAINT TRIGGER runner_request_policy_snapshot_v1 AFTER INSERT OR UPDATE OF origin_kind,host_id,policy_snapshot_id,policy_digest ON runner_scheduling_request_t DEFERRABLE INITIALLY IMMEDIATE FOR EACH ROW EXECUTE FUNCTION validate_runner_request_policy_snapshot_v1();
+ALTER TABLE agent_turn_t DROP CONSTRAINT IF EXISTS agent_turn_scheduling_request_fk;
+ALTER TABLE agent_turn_t ADD CONSTRAINT agent_turn_scheduling_request_fk FOREIGN KEY(host_id,scheduling_request_id) REFERENCES runner_scheduling_request_t(host_id,request_id) ON DELETE RESTRICT;
+ALTER TABLE agent_turn_t DROP CONSTRAINT IF EXISTS agent_turn_execution_attempt_fk;
+ALTER TABLE agent_turn_t ADD CONSTRAINT agent_turn_execution_attempt_fk FOREIGN KEY(host_id,execution_attempt_id) REFERENCES execution_attempt_t(host_id,execution_id) ON DELETE RESTRICT;
 
-
--- DDL for the Stored Procedure (Requires PostgreSQL 11+ for PROCEDURE support)
-CREATE OR REPLACE PROCEDURE create_snapshot(
-    p_host_id UUID,
-    p_instance_id UUID,
-    p_snapshot_type VARCHAR(32),
-    p_description TEXT,
-    p_user_id UUID,
-    p_deployment_id UUID,
-    p_snapshot_id UUID
-)
-LANGUAGE plpgsql
-AS $$
-DECLARE
-    -- Variables to hold scope data derived from instance_t
-    v_product_version_id UUID;
-    v_service_id VARCHAR(512);
-    v_environment VARCHAR(16);
-    v_instance_app_id_list UUID[];
-    v_instance_api_id_list UUID[];
-    v_deployment_instance_id UUID;
-    v_product_id VARCHAR(8);
-BEGIN
-
-    -- 1. Get essential scope data from instance_t
-    SELECT
-        t.product_version_id,
-        t.service_id,
-        COALESCE(NULLIF(t.env_tag, ''), t.environment)
-    INTO
-        v_product_version_id,
-        v_service_id,
-        v_environment
-    FROM
-        instance_t t
-    WHERE
-        t.host_id = p_host_id
-        AND t.instance_id = p_instance_id
-        AND t.active = TRUE; -- Only snapshot an active instance
-
-    -- If instance not found or inactive, raise exception (or simply return if non-critical)
-    IF v_product_version_id IS NULL THEN
-        RAISE EXCEPTION 'Instance with host_id % and instance_id % not found or is inactive.', p_host_id, p_instance_id;
-    END IF;
-
-    -- 2. Get additional IDs for cascading copies
-    -- Get deployment_instance_id
-    SELECT deployment_instance_id INTO v_deployment_instance_id
-    FROM deployment_instance_t
-    WHERE host_id = p_host_id AND instance_id = p_instance_id AND active = TRUE
-    LIMIT 1;
-    
-    -- Get product_id (Needed for product_property_t)
-    SELECT product_id INTO v_product_id
-    FROM product_version_t
-    WHERE host_id = p_host_id AND product_version_id = v_product_version_id AND active = TRUE
-    LIMIT 1;
-
-    -- Get instance_app_id list (used for multiple snapshot tables)
-    SELECT ARRAY_AGG(instance_app_id) INTO v_instance_app_id_list
-    FROM instance_app_t
-    WHERE host_id = p_host_id AND instance_id = p_instance_id AND active = TRUE;
-
-    -- Get instance_api_id list (used for multiple snapshot tables)
-    SELECT ARRAY_AGG(instance_api_id) INTO v_instance_api_id_list
-    FROM instance_api_t
-    WHERE host_id = p_host_id AND instance_id = p_instance_id AND active = TRUE;
-
-    RAISE NOTICE 'Debugging Snapshot: host_id=%, instance_id=%', p_host_id, p_instance_id;
-    RAISE NOTICE 'Found instance_api_id count: %', array_length(v_instance_api_id_list, 1);
-    RAISE NOTICE 'instance_api_id list: %', v_instance_api_id_list;
-
-
-    -- 3. Insert into config_snapshot_t (Snapshot Header)
-    INSERT INTO config_snapshot_t (
-        snapshot_id, snapshot_type, host_id, instance_id, description, user_id, deployment_id,
-        environment, product_id, product_version, service_id
-    ) VALUES (
-        p_snapshot_id, p_snapshot_type, p_host_id, p_instance_id, p_description, p_user_id, p_deployment_id,
-        v_environment, v_product_id, (
-            SELECT product_version
-            FROM product_version_t
-            WHERE product_version_id = v_product_version_id
-              AND host_id = p_host_id
-              AND active = TRUE
-        ), v_service_id
-    );
-
-    -- 4. Copy data to all relevant RAW snapshot tables (STEPS A-I)
-    -- This data will be used by the MERGE step (Step J)
-    
-    -- A. snapshot_instance_property_t (Instance Overrides)
-    INSERT INTO snapshot_instance_property_t (
-        snapshot_id, host_id, instance_id, property_id, property_value,
-        aggregate_version, update_user, update_ts
-    )
-    SELECT
-        p_snapshot_id, t.host_id, t.instance_id, t.property_id, t.property_value,
-        t.aggregate_version, t.update_user, t.update_ts
-    FROM
-        instance_property_t t
-    WHERE
-        t.host_id = p_host_id AND t.instance_id = p_instance_id AND t.active = TRUE;
-
-
-    -- B. snapshot_deployment_instance_property_t (Deployment Instance Overrides)
-    IF v_deployment_instance_id IS NOT NULL THEN
-        INSERT INTO snapshot_deployment_instance_property_t (
-            snapshot_id, host_id, deployment_instance_id, property_id, property_value,
-            aggregate_version, update_user, update_ts
-        )
-        SELECT
-            p_snapshot_id, t.host_id, t.deployment_instance_id, t.property_id, t.property_value,
-            t.aggregate_version, t.update_user, t.update_ts
-        FROM
-            deployment_instance_property_t t
-        WHERE
-            t.host_id = p_host_id AND t.deployment_instance_id = v_deployment_instance_id AND t.active = TRUE;
-    END IF;
-
-
-    -- C. snapshot_instance_file_t (Instance Files)
-    INSERT INTO snapshot_instance_file_t (
-        snapshot_id, host_id, instance_file_id, instance_id, config_phase, file_type, file_name, file_value, file_desc, expiration_ts,
-        aggregate_version, active, update_user, update_ts
-    )
-    SELECT
-        p_snapshot_id, t.host_id, t.instance_file_id, t.instance_id, t.config_phase, t.file_type, t.file_name, t.file_value, t.file_desc, t.expiration_ts,
-        t.aggregate_version, t.active, t.update_user, t.update_ts
-    FROM
-        instance_file_t t
-    WHERE
-        t.host_id = p_host_id AND t.instance_id = p_instance_id AND t.active = TRUE;
-
-
-    -- D. snapshot_instance_api_property_t (Instance API Overrides)
-    IF v_instance_api_id_list IS NOT NULL AND array_length(v_instance_api_id_list, 1) > 0 THEN
-        RAISE NOTICE 'Step D: Copying % instance_api_property_t records...', array_length(v_instance_api_id_list, 1);
-        INSERT INTO snapshot_instance_api_property_t (
-            snapshot_id, host_id, instance_api_id, property_id, property_value,
-            aggregate_version, update_user, update_ts
-        )
-        SELECT
-            p_snapshot_id, t.host_id, t.instance_api_id, t.property_id, t.property_value,
-            t.aggregate_version, t.update_user, t.update_ts
-        FROM
-            instance_api_property_t t
-        WHERE
-            t.host_id = p_host_id AND t.instance_api_id = ANY(v_instance_api_id_list) AND t.active = TRUE;
-    ELSE
-        RAISE NOTICE 'Step D: Skipped (v_instance_api_id_list is empty or NULL)';
-    END IF;
-
-
-    -- E. snapshot_instance_app_property_t (Instance App Overrides)
-    IF v_instance_app_id_list IS NOT NULL AND array_length(v_instance_app_id_list, 1) > 0 THEN
-        RAISE NOTICE 'Step E: Copying % instance_app_property_t records...', array_length(v_instance_app_id_list, 1);
-        INSERT INTO snapshot_instance_app_property_t (
-            snapshot_id, host_id, instance_app_id, property_id, property_value,
-            aggregate_version, update_user, update_ts
-        )
-        SELECT
-            p_snapshot_id, t.host_id, t.instance_app_id, t.property_id, t.property_value,
-            t.aggregate_version, t.update_user, t.update_ts
-        FROM
-            instance_app_property_t t
-        WHERE
-            t.host_id = p_host_id AND t.instance_app_id = ANY(v_instance_app_id_list) AND t.active = TRUE;
-    ELSE
-        RAISE NOTICE 'Step E: Skipped (v_instance_app_id_list is empty or NULL)';
-    END IF;
-
-
-    -- F. snapshot_instance_app_api_property_t (Instance App API Overrides)
-    IF v_instance_app_id_list IS NOT NULL AND array_length(v_instance_app_id_list, 1) > 0 AND v_instance_api_id_list IS NOT NULL AND array_length(v_instance_api_id_list, 1) > 0 THEN
-        RAISE NOTICE 'Step F: Copying instance_app_api_property_t for % apps and % apis...', array_length(v_instance_app_id_list, 1), array_length(v_instance_api_id_list, 1);
-        INSERT INTO snapshot_instance_app_api_property_t (
-            snapshot_id, host_id, instance_app_id, instance_api_id, property_id, property_value,
-            aggregate_version, update_user, update_ts
-        )
-        SELECT
-            p_snapshot_id, t.host_id, t.instance_app_id, t.instance_api_id, t.property_id, t.property_value,
-            t.aggregate_version, t.update_user, t.update_ts
-        FROM
-            instance_app_api_property_t t
-        WHERE
-            t.host_id = p_host_id
-            AND t.instance_app_id = ANY(v_instance_app_id_list)
-            AND t.instance_api_id = ANY(v_instance_api_id_list)
-            AND t.active = TRUE;
-    ELSE
-        RAISE NOTICE 'Step F: Skipped (v_instance_app_id_list or v_instance_api_id_list is empty or NULL)';
-    END IF;
-
-
-    -- G. snapshot_product_version_property_t (Product Version Overrides)
-    INSERT INTO snapshot_product_version_property_t (
-        snapshot_id, host_id, product_version_id, property_id, property_value,
-        aggregate_version, update_user, update_ts
-    )
-    SELECT
-        p_snapshot_id, t.host_id, t.product_version_id, t.property_id, t.property_value,
-        t.aggregate_version, t.update_user, t.update_ts
-    FROM
-        product_version_property_t t
-    WHERE
-        t.host_id = p_host_id AND t.product_version_id = v_product_version_id AND t.active = TRUE;
-
-
-    -- H. snapshot_product_property_t (Product Overrides)
-    IF v_product_id IS NOT NULL THEN
-        INSERT INTO snapshot_product_property_t (
-            snapshot_id, product_id, property_id, property_value,
-            aggregate_version, update_user, update_ts
-        )
-        SELECT
-            p_snapshot_id, t.product_id, t.property_id, t.property_value,
-            t.aggregate_version, t.update_user, t.update_ts
-        FROM
-            product_property_t t
-        WHERE
-            t.product_id = v_product_id AND t.active = TRUE;
-    END IF;
-
-
-    -- I. snapshot_environment_property_t (Environment Overrides)
-    IF v_environment IS NOT NULL THEN
-        INSERT INTO snapshot_environment_property_t (
-            snapshot_id, host_id, environment, property_id, property_value,
-            aggregate_version, update_user, update_ts
-        )
-        SELECT
-            p_snapshot_id, t.host_id, t.environment, t.property_id, t.property_value,
-            t.aggregate_version, t.update_user, t.update_ts
-        FROM
-            environment_property_t t
-        WHERE
-            t.host_id = p_host_id AND t.environment = v_environment AND t.active = TRUE;
-    END IF;
-
-
--- J. MERGE: Insert merged, effective properties into config_snapshot_property_t
-    INSERT INTO config_snapshot_property_t (
-        snapshot_property_id,
-        snapshot_id,
-        config_phase,
-        config_id,
-        property_id,
-        property_name,
-        property_type,
-        property_value,
-        value_type,
-        source_level
-    )
-    WITH 
-    -- 1. Deployment Override (Highest Priority - No Merge)
-    DeploymentOverride AS (
-        SELECT t.property_id, t.property_value, 1 AS priority_rank, 'deployment_instance' AS source_level
-        FROM snapshot_deployment_instance_property_t t
-        WHERE t.snapshot_id = p_snapshot_id
-    ),
-    -- 2. Instance Level Merge Pool
-    -- Gather all potential contributors to the instance-level config
-    InstancePool AS (
-        SELECT property_id, property_value, update_ts FROM snapshot_instance_property_t WHERE snapshot_id = p_snapshot_id
-        UNION ALL
-        SELECT property_id, property_value, update_ts FROM snapshot_instance_api_property_t WHERE snapshot_id = p_snapshot_id
-        UNION ALL
-        SELECT property_id, property_value, update_ts FROM snapshot_instance_app_property_t WHERE snapshot_id = p_snapshot_id
-        UNION ALL
-        SELECT property_id, property_value, update_ts FROM snapshot_instance_app_api_property_t WHERE snapshot_id = p_snapshot_id
-    ),
-    -- Perform the Merge for the Instance Pool
-    MergedInstanceLevel AS (
-        SELECT 
-            ip.property_id,
-            CASE cp.value_type
-                WHEN 'list' THEN (
-                    -- Explode arrays from all matching rows and re-aggregate into one list
-                    -- Handles non-JSON strings gracefully by treating them as single-item lists
-                    SELECT jsonb_agg(elem ORDER BY sub.update_ts ASC)
-                    FROM InstancePool sub
-                    CROSS JOIN LATERAL (
-                        SELECT jsonb_array_elements(sub.property_value::jsonb) AS elem
-                        WHERE sub.property_value ~ '^\s*\[.*\]\s*$'
-                        UNION ALL
-                        SELECT to_jsonb(sub.property_value) AS elem
-                        WHERE sub.property_value !~ '^\s*\[.*\]\s*$' 
-                          AND sub.property_value != ''
-                    ) q
-                    WHERE sub.property_id = ip.property_id
-                )::text
-                WHEN 'map' THEN (
-                    -- Explode objects from all matching rows and re-aggregate into one map
-                    -- Ignores non-JSON strings to avoid crashing
-                    SELECT jsonb_object_agg(kv.key, kv.value)
-                    FROM InstancePool sub
-                    CROSS JOIN LATERAL (
-                        SELECT key, value FROM jsonb_each(sub.property_value::jsonb)
-                        WHERE sub.property_value ~ '^\s*\{.*\}\s*$'
-                        UNION ALL
-                        SELECT NULL, NULL
-                        WHERE sub.property_value !~ '^\s*\{.*\}\s*$' OR sub.property_value IS NULL
-                    ) kv
-                    WHERE sub.property_id = ip.property_id AND kv.key IS NOT NULL
-                )::text
-                ELSE (
-                    -- For simple types (e.g. boolean/string), the latest update wins
-                    SELECT sub.property_value
-                    FROM InstancePool sub
-                    WHERE sub.property_id = ip.property_id
-                    ORDER BY sub.update_ts DESC
-                    LIMIT 1
-                )
-            END AS property_value,
-            2 AS priority_rank,
-            'instance_merged' AS source_level
-        FROM InstancePool ip
-        JOIN config_property_t cp ON ip.property_id = cp.property_id
-        GROUP BY ip.property_id, cp.value_type
-    ),
-    -- 3. Lower Priority Inheritance Layers
-    InheritanceLayers AS (
-        -- Product Version
-        SELECT t.property_id, t.property_value, 3 AS priority_rank, 'product_version' AS source_level
-        FROM snapshot_product_version_property_t t
-        WHERE t.snapshot_id = p_snapshot_id
-        UNION ALL
-        -- Environment
-        SELECT t.property_id, t.property_value, 4 AS priority_rank, 'environment' AS source_level
-        FROM snapshot_environment_property_t t
-        WHERE t.snapshot_id = p_snapshot_id
-        UNION ALL
-        -- Product
-        SELECT t.property_id, t.property_value, 5 AS priority_rank, 'product' AS source_level
-        FROM snapshot_product_property_t t
-        WHERE t.snapshot_id = p_snapshot_id
-    ),
-    -- 4. Combine All Levels
-    AllLevels AS (
-        SELECT * FROM DeploymentOverride
-        UNION ALL
-        SELECT * FROM MergedInstanceLevel
-        UNION ALL
-        SELECT * FROM InheritanceLayers
-    ),
-    -- 5. Determine Final Winner
-    ResolvedProperties AS (
-        SELECT
-            ap.property_id,
-            ap.property_value,
-            ap.source_level,
-            -- Assign rank 1 to the highest priority available for each property
-            ROW_NUMBER() OVER (PARTITION BY ap.property_id ORDER BY ap.priority_rank ASC) as rn
-        FROM AllLevels ap
-        WHERE ap.property_value IS NOT NULL
-    )
-    -- Final Select
-    SELECT
-        gen_random_uuid(),
-        p_snapshot_id,
-        c.config_phase,
-        cp.config_id,
-        rp.property_id,
-        cp.property_name,
-        cp.property_type,
-        rp.property_value,
-        cp.value_type,
-        rp.source_level
-    FROM ResolvedProperties rp
-    JOIN config_property_t cp ON rp.property_id = cp.property_id
-    JOIN config_t c ON cp.config_id = c.config_id
-    WHERE rp.rn = 1;
-
-END;
-$$;
-
--- LISTEN/NOTIFY for low-latency pub/sub
-CREATE OR REPLACE FUNCTION notify_event() RETURNS TRIGGER AS $$
-BEGIN
-  PERFORM pg_notify('event_channel', 'new_event');
-  RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-DROP TRIGGER IF EXISTS event_trigger ON outbox_message_t;
-CREATE TRIGGER event_trigger
-AFTER INSERT ON outbox_message_t
-FOR EACH STATEMENT
-EXECUTE FUNCTION notify_event();
-
-CREATE OR REPLACE FUNCTION revoke_auth_session_by_refresh_token(
-    p_host_id UUID,
-    p_refresh_token UUID,
-    p_admin_user VARCHAR,
-    p_reason TEXT DEFAULT 'ADMIN_REVOKED'
-) RETURNS UUID AS $$
-DECLARE
-    v_session_id UUID;
-    v_auth_host_id UUID;
-    v_user_id UUID;
-    v_client_id UUID;
-    v_provider_id VARCHAR(22);
-BEGIN
-    SELECT session_id, auth_host_id, user_id, client_id, provider_id
-      INTO v_session_id, v_auth_host_id, v_user_id, v_client_id, v_provider_id
-      FROM auth_refresh_token_t
-     WHERE host_id = p_host_id
-       AND refresh_token = p_refresh_token;
-
-    IF v_session_id IS NULL THEN
-        DELETE FROM auth_refresh_token_t
-         WHERE host_id = p_host_id
-           AND refresh_token = p_refresh_token;
-        RETURN NULL;
-    END IF;
-
-    DELETE FROM auth_refresh_token_t
-     WHERE host_id = p_host_id
-       AND refresh_token = p_refresh_token;
-
-    UPDATE auth_session_t
-       SET status = 'REVOKED',
-           logout_ts = CURRENT_TIMESTAMP,
-           end_reason = p_reason,
-           update_user = COALESCE(p_admin_user, SESSION_USER),
-           update_ts = CURRENT_TIMESTAMP
-     WHERE host_id = p_host_id
-       AND session_id = v_session_id;
-
-    INSERT INTO auth_session_audit_t (
-        audit_id, host_id, auth_host_id, session_id, user_id, client_id, provider_id,
-        event_type, result, failure_reason, metadata, update_user
-    ) VALUES (
-        gen_random_uuid(), p_host_id, v_auth_host_id, v_session_id, v_user_id, v_client_id, v_provider_id,
-        'SESSION_REVOKED', 'SUCCESS', p_reason,
-        jsonb_build_object('source', 'admin', 'refreshTokenId', p_refresh_token::text),
-        COALESCE(p_admin_user, SESSION_USER)
-    );
-
-    RETURN v_session_id;
-END;
-$$ LANGUAGE plpgsql;
-
-
-INSERT INTO user_t (user_id, language, first_name, last_name, email, user_type, verified, password)
-VALUES ('01964b05-5532-7c79-8cde-191dcbd421b8', 'en', 'Steve', 'Hu', 'steve.hu@lightapi.net', 'E', true, '1000:5b39342c202d37372c203132302c202d3132302c2034372c2032332c2034352c202d34342c202d31362c2034372c202d35392c202d35362c2039302c202d352c202d38322c202d32385d:949e6fcf9c4bb8a3d6a8c141a3a9182a572fb95fe8ccdc93b54ba53df8ef2e930f7b0348590df0d53f242ccceeae03aef6d273a34638b49c559ada110ec06992');
-
-INSERT INTO org_t (domain, org_name, org_desc, org_owner) VALUES ('lightapi.net', 'Light Api Portal', 'Light Api Portal', '01964b05-5532-7c79-8cde-191dcbd421b8');
-
-INSERT INTO host_t (host_id, domain, sub_domain, host_owner) VALUES ('01964b05-552a-7c4b-9184-6857e7f3dc5f', 'lightapi.net', 'dev', '01964b05-5532-7c79-8cde-191dcbd421b8');
-
-INSERT INTO user_host_t (host_id, user_id, current)  values ('01964b05-552a-7c4b-9184-6857e7f3dc5f', '01964b05-5532-7c79-8cde-191dcbd421b8', true);
-
-INSERT INTO employee_t (host_id, employee_id, user_id, title, manager_id, hire_date) VALUES ('01964b05-552a-7c4b-9184-6857e7f3dc5f', 'sh35', '01964b05-5532-7c79-8cde-191dcbd421b8', 'Consulant API Platform', null, '2023-06-18');
+-- Light-Agent later profiles: session reuse, channels, workflow jobs, fixed actions.
+ALTER TABLE agent_session_t ADD COLUMN IF NOT EXISTS workspace_compatibility JSONB, ADD COLUMN IF NOT EXISTS workspace_compatibility_digest VARCHAR(71), ADD COLUMN IF NOT EXISTS workspace_checkpoint_digest VARCHAR(71), ADD COLUMN IF NOT EXISTS workspace_effective_expires_ts TIMESTAMPTZ;
+CREATE TABLE IF NOT EXISTS agent_channel_binding_t(host_id UUID NOT NULL,binding_id UUID NOT NULL,principal_id VARCHAR(255) NOT NULL,agent_def_id UUID NOT NULL,adapter_id VARCHAR(64) NOT NULL,external_identity VARCHAR(512) NOT NULL,allowed_destinations JSONB NOT NULL,group_allowed BOOLEAN NOT NULL DEFAULT FALSE,maximum_attachment_bytes BIGINT NOT NULL,quiet_hours JSONB NOT NULL,notification_policy JSONB NOT NULL,revoked_ts TIMESTAMPTZ,created_ts TIMESTAMPTZ NOT NULL DEFAULT now(),PRIMARY KEY(host_id,binding_id),UNIQUE(host_id,adapter_id,external_identity),FOREIGN KEY(host_id,agent_def_id) REFERENCES agent_definition_t(host_id,agent_def_id));
+ALTER TABLE agent_channel_binding_t ADD CONSTRAINT agent_channel_binding_attachment_limit_ck CHECK(maximum_attachment_bytes>=0);
+CREATE TABLE IF NOT EXISTS agent_channel_message_t(host_id UUID NOT NULL,message_id UUID NOT NULL,binding_id UUID NOT NULL,external_event_id VARCHAR(255) NOT NULL,response_destination VARCHAR(512) NOT NULL,direction VARCHAR(16) NOT NULL CHECK(direction IN('INBOUND','OUTBOUND')),payload_digest VARCHAR(71) NOT NULL,state VARCHAR(32) NOT NULL CHECK(state IN('RECEIVED','TURN_CREATED','PENDING_DELIVERY','DELIVERED','FAILED','REJECTED')),turn_id UUID,attempt_count INTEGER NOT NULL DEFAULT 0,next_attempt_ts TIMESTAMPTZ,receipt JSONB,created_ts TIMESTAMPTZ NOT NULL DEFAULT now(),updated_ts TIMESTAMPTZ NOT NULL DEFAULT now(),PRIMARY KEY(host_id,message_id),UNIQUE(host_id,binding_id,external_event_id,direction),FOREIGN KEY(host_id,binding_id) REFERENCES agent_channel_binding_t(host_id,binding_id),FOREIGN KEY(host_id,turn_id) REFERENCES agent_turn_t(host_id,turn_id));
+CREATE INDEX IF NOT EXISTS agent_channel_delivery_idx ON agent_channel_message_t(state,next_attempt_ts) WHERE state IN('PENDING_DELIVERY','FAILED');
+ALTER TABLE agent_channel_message_t ADD COLUMN IF NOT EXISTS payload JSONB NOT NULL DEFAULT '{}'::jsonb, ADD COLUMN IF NOT EXISTS provider_receipt_id VARCHAR(255), ADD COLUMN IF NOT EXISTS last_error JSONB;
+ALTER TABLE agent_channel_message_t DROP CONSTRAINT agent_channel_message_t_state_check;
+ALTER TABLE agent_channel_message_t ADD CONSTRAINT agent_channel_message_t_state_check CHECK(state IN('RECEIVED','TURN_CREATED','PENDING_DELIVERY','SENDING','DELIVERED','FAILED','REJECTED'));
+CREATE INDEX IF NOT EXISTS agent_channel_turn_result_idx ON agent_channel_message_t(host_id,turn_id,state) WHERE direction='INBOUND' AND state='TURN_CREATED';
+ALTER TABLE agent_channel_message_t ADD COLUMN IF NOT EXISTS attachment_scan_state VARCHAR(16) NOT NULL DEFAULT 'NOT_REQUIRED',ADD COLUMN IF NOT EXISTS scan_claim_token UUID,ADD COLUMN IF NOT EXISTS scan_lease_expires_ts TIMESTAMPTZ,ADD COLUMN IF NOT EXISTS scan_attempt_count INTEGER NOT NULL DEFAULT 0,ADD COLUMN IF NOT EXISTS next_scan_attempt_ts TIMESTAMPTZ;
+ALTER TABLE agent_channel_message_t ADD CONSTRAINT agent_channel_attachment_scan_state_ck CHECK(attachment_scan_state IN('NOT_REQUIRED','PENDING','CLAIMED','CLEAN','REJECTED') AND scan_attempt_count>=0 AND ((attachment_scan_state='CLAIMED' AND scan_claim_token IS NOT NULL AND scan_lease_expires_ts IS NOT NULL) OR (attachment_scan_state<>'CLAIMED' AND scan_claim_token IS NULL AND scan_lease_expires_ts IS NULL)));
+CREATE INDEX IF NOT EXISTS agent_channel_attachment_scan_due_idx ON agent_channel_message_t(host_id,next_scan_attempt_ts,created_ts) WHERE direction='INBOUND' AND state='RECEIVED' AND attachment_scan_state IN('PENDING','CLAIMED');
+CREATE TABLE IF NOT EXISTS agent_trigger_t(host_id UUID NOT NULL,trigger_id UUID NOT NULL,binding_id UUID NOT NULL,trigger_kind VARCHAR(32) NOT NULL CHECK(trigger_kind IN('SCHEDULE','CONNECTOR')),schedule_or_cursor JSONB NOT NULL,budget JSONB NOT NULL,maximum_delay_seconds INTEGER NOT NULL,state VARCHAR(16) NOT NULL CHECK(state IN('ACTIVE','PAUSED','REVOKED')),next_fire_ts TIMESTAMPTZ,created_ts TIMESTAMPTZ NOT NULL DEFAULT now(),PRIMARY KEY(host_id,trigger_id),FOREIGN KEY(host_id,binding_id) REFERENCES agent_channel_binding_t(host_id,binding_id));
+CREATE TABLE IF NOT EXISTS agent_connector_grant_t(host_id UUID NOT NULL,grant_id UUID NOT NULL,binding_id UUID NOT NULL,connector_alias VARCHAR(126) NOT NULL,allowed_operations JSONB NOT NULL,data_boundary_digest VARCHAR(128) NOT NULL,credential_reference VARCHAR(255) NOT NULL,maximum_uses INTEGER NOT NULL CHECK(maximum_uses>0),use_count INTEGER NOT NULL DEFAULT 0 CHECK(use_count>=0),expires_ts TIMESTAMPTZ NOT NULL,revoked_ts TIMESTAMPTZ,created_ts TIMESTAMPTZ NOT NULL DEFAULT now(),PRIMARY KEY(host_id,grant_id),FOREIGN KEY(host_id,binding_id) REFERENCES agent_channel_binding_t(host_id,binding_id) ON DELETE CASCADE,CHECK(use_count<=maximum_uses));
+CREATE INDEX IF NOT EXISTS agent_connector_grant_live_idx ON agent_connector_grant_t(host_id,binding_id,connector_alias,expires_ts) WHERE revoked_ts IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS agent_connector_grant_live_uk ON agent_connector_grant_t(host_id,binding_id,connector_alias) WHERE revoked_ts IS NULL;
+ALTER TABLE agent_channel_message_t ADD COLUMN IF NOT EXISTS connector_grant_id UUID,ADD COLUMN IF NOT EXISTS connector_data_boundary_digest VARCHAR(128);
+ALTER TABLE agent_channel_message_t ADD CONSTRAINT agent_channel_message_connector_grant_fk FOREIGN KEY(host_id,connector_grant_id) REFERENCES agent_connector_grant_t(host_id,grant_id) ON DELETE RESTRICT;
+CREATE INDEX IF NOT EXISTS agent_channel_connector_delivery_idx ON agent_channel_message_t(host_id,connector_grant_id,next_attempt_ts) WHERE direction='OUTBOUND' AND state IN('PENDING_DELIVERY','FAILED');
+CREATE TABLE IF NOT EXISTS agent_channel_attachment_t(host_id UUID NOT NULL,attachment_id UUID NOT NULL,message_id UUID NOT NULL,external_file_id VARCHAR(255) NOT NULL,media_type VARCHAR(255) NOT NULL,size_bytes BIGINT NOT NULL CHECK(size_bytes>=0),content_digest VARCHAR(128) NOT NULL,immutable_reference TEXT NOT NULL,scanner_id VARCHAR(126) NOT NULL,scanner_receipt_digest VARCHAR(128) NOT NULL,scan_state VARCHAR(16) NOT NULL CHECK(scan_state IN('CLEAN','REJECTED','ERROR')),created_ts TIMESTAMPTZ NOT NULL DEFAULT now(),PRIMARY KEY(host_id,attachment_id),UNIQUE(host_id,message_id,external_file_id),FOREIGN KEY(host_id,message_id) REFERENCES agent_channel_message_t(host_id,message_id) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS agent_edge_runner_binding_t(host_id UUID NOT NULL,edge_binding_id UUID NOT NULL,principal_id VARCHAR(255) NOT NULL,runner_id VARCHAR(126) NOT NULL,backend_id VARCHAR(126) NOT NULL,execution_profile_id VARCHAR(126) NOT NULL,allowed_actions JSONB NOT NULL,required_capabilities JSONB NOT NULL,compatibility_digest VARCHAR(128) NOT NULL,expires_ts TIMESTAMPTZ NOT NULL,revoked_ts TIMESTAMPTZ,created_ts TIMESTAMPTZ NOT NULL DEFAULT now(),PRIMARY KEY(host_id,edge_binding_id),UNIQUE(host_id,principal_id,runner_id,backend_id));
+ALTER TABLE agent_edge_runner_binding_t ADD COLUMN IF NOT EXISTS action_policies JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE agent_edge_runner_binding_t ADD CONSTRAINT agent_edge_runner_action_policies_ck CHECK(jsonb_typeof(action_policies)='object' AND NOT jsonb_path_exists(action_policies,'$.* ? (!exists(@.stableToolRef) || !exists(@.schemaDigest) || !exists(@.schema) || !exists(@.effectClass) || !exists(@.approvalRequired))'));
+CREATE INDEX IF NOT EXISTS agent_edge_runner_action_policy_idx ON agent_edge_runner_binding_t USING GIN(action_policies jsonb_path_ops);
+ALTER TABLE agent_trigger_t ADD COLUMN IF NOT EXISTS connector_grant_id UUID,ADD COLUMN IF NOT EXISTS last_fire_ts TIMESTAMPTZ,ADD COLUMN IF NOT EXISTS last_idempotency_key VARCHAR(255),ADD COLUMN IF NOT EXISTS timezone VARCHAR(64) NOT NULL DEFAULT 'UTC',ADD COLUMN IF NOT EXISTS fire_count BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE agent_trigger_t ADD CONSTRAINT agent_trigger_connector_grant_fk FOREIGN KEY(host_id,connector_grant_id) REFERENCES agent_connector_grant_t(host_id,grant_id) ON DELETE RESTRICT;
+CREATE INDEX IF NOT EXISTS agent_trigger_due_idx ON agent_trigger_t(host_id,next_fire_ts) WHERE state='ACTIVE';
+ALTER TABLE agent_trigger_t ADD COLUMN IF NOT EXISTS misfire_policy VARCHAR(16) NOT NULL DEFAULT 'SKIP',ADD COLUMN IF NOT EXISTS maximum_catch_up_fires INTEGER NOT NULL DEFAULT 1,ADD COLUMN IF NOT EXISTS last_misfire_ts TIMESTAMPTZ,ADD COLUMN IF NOT EXISTS misfire_count BIGINT NOT NULL DEFAULT 0,ADD COLUMN IF NOT EXISTS skipped_fire_count BIGINT NOT NULL DEFAULT 0,ADD COLUMN IF NOT EXISTS last_error JSONB,ADD COLUMN IF NOT EXISTS updated_ts TIMESTAMPTZ NOT NULL DEFAULT now();
+ALTER TABLE agent_trigger_t ADD CONSTRAINT agent_trigger_runtime_policy_ck CHECK(misfire_policy IN('SKIP','FIRE_ONCE','CATCH_UP') AND maximum_catch_up_fires BETWEEN 1 AND 10 AND maximum_delay_seconds>=0 AND misfire_count>=0 AND skipped_fire_count>=0 AND jsonb_typeof(budget)='object');
+CREATE TABLE IF NOT EXISTS agent_trigger_budget_usage_t(host_id UUID NOT NULL,trigger_id UUID NOT NULL,window_start_ts TIMESTAMPTZ NOT NULL,fire_count BIGINT NOT NULL DEFAULT 0,turn_count BIGINT NOT NULL DEFAULT 0,reserved_tokens BIGINT NOT NULL DEFAULT 0,reserved_cost_micros BIGINT NOT NULL DEFAULT 0,created_ts TIMESTAMPTZ NOT NULL DEFAULT now(),updated_ts TIMESTAMPTZ NOT NULL DEFAULT now(),PRIMARY KEY(host_id,trigger_id,window_start_ts),CHECK(fire_count>=0 AND turn_count>=0 AND reserved_tokens>=0 AND reserved_cost_micros>=0));
+ALTER TABLE agent_trigger_budget_usage_t ADD CONSTRAINT agent_trigger_budget_usage_trigger_fk FOREIGN KEY(host_id,trigger_id) REFERENCES agent_trigger_t(host_id,trigger_id) ON DELETE CASCADE;
+CREATE INDEX IF NOT EXISTS agent_trigger_budget_retention_idx ON agent_trigger_budget_usage_t(host_id,window_start_ts);
+ALTER TABLE runner_scheduling_request_t ADD CONSTRAINT runner_request_edge_binding_fk FOREIGN KEY(host_id,edge_binding_id) REFERENCES agent_edge_runner_binding_t(host_id,edge_binding_id) ON DELETE RESTRICT;
+CREATE TABLE IF NOT EXISTS agent_job_t(host_id UUID NOT NULL,job_id UUID NOT NULL,workflow_process_id UUID NOT NULL,workflow_task_id UUID NOT NULL,agent_def_id UUID NOT NULL,turn_id UUID,idempotency_key VARCHAR(255) NOT NULL,input JSONB NOT NULL,input_schema_digest VARCHAR(71) NOT NULL,output_schema JSONB NOT NULL,policy_digest VARCHAR(71) NOT NULL,data_boundary_digest VARCHAR(71) NOT NULL,deadline_ts TIMESTAMPTZ NOT NULL,token_budget BIGINT NOT NULL,cost_budget_micros BIGINT NOT NULL,delegation_depth INTEGER NOT NULL,state VARCHAR(32) NOT NULL CHECK(state IN('PENDING','TURN_CREATED','RUNNING','SUCCEEDED','FAILED','CANCELLED','UNKNOWN')),public_output JSONB,error JSONB,created_ts TIMESTAMPTZ NOT NULL DEFAULT now(),updated_ts TIMESTAMPTZ NOT NULL DEFAULT now(),PRIMARY KEY(host_id,job_id),UNIQUE(host_id,idempotency_key),FOREIGN KEY(host_id,turn_id) REFERENCES agent_turn_t(host_id,turn_id));
+ALTER TABLE agent_job_t ADD COLUMN IF NOT EXISTS maximum_delegation_depth INTEGER NOT NULL DEFAULT 4, ADD COLUMN IF NOT EXISTS memory_mode VARCHAR(16) NOT NULL DEFAULT 'ISOLATED', ADD COLUMN IF NOT EXISTS cancellation_requested_ts TIMESTAMPTZ, ADD COLUMN IF NOT EXISTS terminal_ts TIMESTAMPTZ;
+ALTER TABLE agent_job_t ADD CONSTRAINT agent_job_delegation_depth_ck CHECK(delegation_depth >= 0 AND maximum_delegation_depth >= 0 AND delegation_depth <= maximum_delegation_depth);
+ALTER TABLE agent_job_t ADD CONSTRAINT agent_job_memory_mode_ck CHECK(memory_mode IN('ISOLATED','SESSION'));
+CREATE UNIQUE INDEX IF NOT EXISTS agent_job_workflow_task_uk ON agent_job_t(host_id,workflow_process_id,workflow_task_id);
+CREATE INDEX IF NOT EXISTS agent_job_pending_idx ON agent_job_t(state,deadline_ts) WHERE state IN('PENDING','TURN_CREATED','RUNNING');
+CREATE TABLE IF NOT EXISTS agent_service_pool_t(host_id UUID NOT NULL,pool_id UUID NOT NULL,pool_name VARCHAR(126) NOT NULL,compatibility_dimensions JSONB NOT NULL,compatibility_digest VARCHAR(71) NOT NULL,enabled BOOLEAN NOT NULL DEFAULT TRUE,maximum_concurrency INTEGER NOT NULL CHECK(maximum_concurrency>0),created_ts TIMESTAMPTZ NOT NULL DEFAULT now(),updated_ts TIMESTAMPTZ NOT NULL DEFAULT now(),PRIMARY KEY(host_id,pool_id),UNIQUE(host_id,pool_name),UNIQUE(host_id,compatibility_digest));
+CREATE TABLE IF NOT EXISTS agent_pool_assignment_t(host_id UUID NOT NULL,agent_def_id UUID NOT NULL,agent_definition_version BIGINT NOT NULL,policy_digest VARCHAR(71) NOT NULL,pool_id UUID NOT NULL,compatibility_digest VARCHAR(71) NOT NULL,revoked_ts TIMESTAMPTZ,created_ts TIMESTAMPTZ NOT NULL DEFAULT now(),PRIMARY KEY(host_id,agent_def_id,agent_definition_version,policy_digest),FOREIGN KEY(host_id,pool_id) REFERENCES agent_service_pool_t(host_id,pool_id) ON DELETE RESTRICT,FOREIGN KEY(host_id,agent_def_id) REFERENCES agent_definition_t(host_id,agent_def_id) ON DELETE RESTRICT);
+CREATE INDEX IF NOT EXISTS agent_pool_assignment_live_idx ON agent_pool_assignment_t(host_id,pool_id) WHERE revoked_ts IS NULL;
+CREATE TABLE IF NOT EXISTS agent_quota_policy_t(host_id UUID NOT NULL,quota_id UUID NOT NULL,scope_kind VARCHAR(16) NOT NULL CHECK(scope_kind IN('HOST','PRINCIPAL','AGENT','PROFILE','PROVIDER','POOL')),scope_key VARCHAR(255) NOT NULL,maximum_active_sessions INTEGER,maximum_queued_turns INTEGER,maximum_running_turns INTEGER,token_budget_per_window BIGINT,cost_budget_micros_per_window BIGINT,window_seconds INTEGER NOT NULL DEFAULT 60 CHECK(window_seconds BETWEEN 1 AND 86400),enabled BOOLEAN NOT NULL DEFAULT TRUE,created_ts TIMESTAMPTZ NOT NULL DEFAULT now(),updated_ts TIMESTAMPTZ NOT NULL DEFAULT now(),PRIMARY KEY(host_id,quota_id),UNIQUE(host_id,scope_kind,scope_key));
+ALTER TABLE agent_quota_policy_t ADD CONSTRAINT agent_quota_nonnegative_ck CHECK((maximum_active_sessions IS NULL OR maximum_active_sessions>=0) AND (maximum_queued_turns IS NULL OR maximum_queued_turns>=0) AND (maximum_running_turns IS NULL OR maximum_running_turns>=0) AND (token_budget_per_window IS NULL OR token_budget_per_window>=0) AND (cost_budget_micros_per_window IS NULL OR cost_budget_micros_per_window>=0));
+CREATE TABLE IF NOT EXISTS agent_model_rate_t(host_id UUID NOT NULL,rate_id UUID NOT NULL,provider VARCHAR(64) NOT NULL,model VARCHAR(126) NOT NULL,input_cost_micros_per_million BIGINT NOT NULL CHECK(input_cost_micros_per_million>=0),output_cost_micros_per_million BIGINT NOT NULL CHECK(output_cost_micros_per_million>=0),effective_ts TIMESTAMPTZ NOT NULL,expires_ts TIMESTAMPTZ,enabled BOOLEAN NOT NULL DEFAULT TRUE,created_ts TIMESTAMPTZ NOT NULL DEFAULT now(),updated_ts TIMESTAMPTZ NOT NULL DEFAULT now(),PRIMARY KEY(host_id,rate_id),FOREIGN KEY(host_id) REFERENCES host_t(host_id) ON DELETE CASCADE,CHECK(expires_ts IS NULL OR expires_ts>effective_ts));
+CREATE UNIQUE INDEX IF NOT EXISTS agent_model_rate_effective_uk ON agent_model_rate_t(host_id,provider,model,effective_ts);
+CREATE INDEX IF NOT EXISTS agent_model_rate_lookup_idx ON agent_model_rate_t(host_id,provider,model,effective_ts DESC) WHERE enabled=TRUE;
+ALTER TABLE agent_turn_t ADD COLUMN IF NOT EXISTS quota_input_cost_micros_per_million BIGINT NOT NULL DEFAULT 0,ADD COLUMN IF NOT EXISTS quota_output_cost_micros_per_million BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE agent_turn_t ADD CONSTRAINT agent_turn_quota_rates_nonnegative_ck CHECK(quota_input_cost_micros_per_million>=0 AND quota_output_cost_micros_per_million>=0);
+CREATE TABLE IF NOT EXISTS agent_quota_usage_t(host_id UUID NOT NULL,quota_id UUID NOT NULL,window_start_ts TIMESTAMPTZ NOT NULL,reserved_tokens BIGINT NOT NULL DEFAULT 0,reserved_cost_micros BIGINT NOT NULL DEFAULT 0,consumed_tokens BIGINT NOT NULL DEFAULT 0,consumed_cost_micros BIGINT NOT NULL DEFAULT 0,updated_ts TIMESTAMPTZ NOT NULL DEFAULT now(),PRIMARY KEY(host_id,quota_id,window_start_ts),FOREIGN KEY(host_id,quota_id) REFERENCES agent_quota_policy_t(host_id,quota_id) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS agent_quota_reservation_t(host_id UUID NOT NULL,quota_id UUID NOT NULL,turn_id UUID NOT NULL,window_start_ts TIMESTAMPTZ NOT NULL,reserved_tokens BIGINT NOT NULL DEFAULT 0,reserved_cost_micros BIGINT NOT NULL DEFAULT 0,actual_tokens BIGINT,actual_cost_micros BIGINT,accounting_source VARCHAR(32),usage_evidence_digest VARCHAR(71),reconciled_ts TIMESTAMPTZ,created_ts TIMESTAMPTZ NOT NULL DEFAULT now(),updated_ts TIMESTAMPTZ NOT NULL DEFAULT now(),PRIMARY KEY(host_id,quota_id,turn_id),FOREIGN KEY(host_id,quota_id,window_start_ts) REFERENCES agent_quota_usage_t(host_id,quota_id,window_start_ts) ON DELETE CASCADE,FOREIGN KEY(host_id,turn_id) REFERENCES agent_turn_t(host_id,turn_id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED);
+ALTER TABLE agent_quota_reservation_t ADD CONSTRAINT agent_quota_reservation_accounting_source_ck CHECK(accounting_source IS NULL OR accounting_source IN('trusted-provider','runner-broker','reservation-ceiling','released-no-effect','legacy-unverified'));
+ALTER TABLE agent_quota_reservation_t ADD CONSTRAINT agent_quota_reservation_reconciliation_evidence_ck CHECK((reconciled_ts IS NULL AND accounting_source IS NULL AND usage_evidence_digest IS NULL) OR (reconciled_ts IS NOT NULL AND accounting_source IS NOT NULL));
+CREATE INDEX IF NOT EXISTS agent_quota_reservation_pending_idx ON agent_quota_reservation_t(host_id,turn_id) WHERE reconciled_ts IS NULL;
+CREATE TABLE IF NOT EXISTS agent_delegation_replay_t(host_id UUID NOT NULL,audience VARCHAR(255) NOT NULL,replay_id UUID NOT NULL,token_id UUID NOT NULL,action_attempt_id UUID,issuer VARCHAR(255) NOT NULL,gateway_instance VARCHAR(255) NOT NULL,consumed_ts TIMESTAMPTZ NOT NULL DEFAULT now(),expires_ts TIMESTAMPTZ NOT NULL,PRIMARY KEY(audience,replay_id),CHECK(expires_ts > consumed_ts - interval '30 seconds'));
+CREATE INDEX IF NOT EXISTS agent_delegation_replay_expiry_idx ON agent_delegation_replay_t(expires_ts);
+ALTER TABLE agent_session_t ADD COLUMN IF NOT EXISTS service_pool_id UUID,ADD COLUMN IF NOT EXISTS service_pool_compatibility_digest VARCHAR(71);
+ALTER TABLE agent_session_t ADD CONSTRAINT agent_session_service_pool_fk FOREIGN KEY(host_id,service_pool_id) REFERENCES agent_service_pool_t(host_id,pool_id) ON DELETE RESTRICT;
+ALTER TABLE agent_turn_t ADD COLUMN IF NOT EXISTS service_pool_id UUID;
+CREATE INDEX IF NOT EXISTS agent_session_pool_active_idx ON agent_session_t(host_id,service_pool_id,state) WHERE state='ACTIVE';
+CREATE INDEX IF NOT EXISTS agent_turn_pool_queue_idx ON agent_turn_t(host_id,service_pool_id,state,queue_sequence) WHERE state IN('QUEUED','RECEIVED','RUNNING_MODEL','WAITING_ACTION','RUNNING_ACTION','WAITING_RECONCILIATION','WAITING_APPROVAL');
+CREATE TABLE IF NOT EXISTS agent_fixed_action_t(host_id UUID NOT NULL,fixed_action_id UUID NOT NULL,action_kind VARCHAR(32) NOT NULL CHECK(action_kind IN('CREATE_BRANCH','OPEN_PR','PUSH_COMMIT','PUBLISH','SIGN','DEPLOY','SEND_EMAIL','CREATE_EVENT','PAYMENT')),subject_kind VARCHAR(32) NOT NULL,subject_id UUID NOT NULL,input_digest VARCHAR(71) NOT NULL,target_digest VARCHAR(71) NOT NULL,policy_digest VARCHAR(71) NOT NULL,provenance_digest VARCHAR(71) NOT NULL,approval_reference UUID NOT NULL,approval_nonce_digest VARCHAR(71) NOT NULL,approval_expires_ts TIMESTAMPTZ NOT NULL,state VARCHAR(32) NOT NULL CHECK(state IN('REQUESTED','VALIDATED','RUNNING','SUCCEEDED','FAILED','REJECTED','REVOKED')),credential_grant_id UUID,result_evidence JSONB,created_ts TIMESTAMPTZ NOT NULL DEFAULT now(),updated_ts TIMESTAMPTZ NOT NULL DEFAULT now(),PRIMARY KEY(host_id,fixed_action_id),UNIQUE(host_id,approval_nonce_digest));
