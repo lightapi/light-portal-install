@@ -30,8 +30,11 @@ limits:
   inlinePayloadThresholdBytes: ${event-replay.inlinePayloadThresholdBytes:262144}
   maxSinglePayloadBytes: ${event-replay.maxSinglePayloadBytes:4194304}
   maxHostInlineArchiveBytes: ${event-replay.maxHostInlineArchiveBytes:536870912}
+  maxHostTotalArchiveBytes: ${event-replay.maxHostTotalArchiveBytes:5368709120}
   softDatabaseArchiveBytes: ${event-replay.softDatabaseArchiveBytes:10737418240}
   hardDatabaseArchiveBytes: ${event-replay.hardDatabaseArchiveBytes:21474836480}
+  softObjectStoreBacklogBytes: ${event-replay.softObjectStoreBacklogBytes:1073741824}
+  hardObjectStoreBacklogBytes: ${event-replay.hardObjectStoreBacklogBytes:5368709120}
   softDeferredBytes: ${event-replay.softDeferredBytes:5368709120}
   hardDeferredBytes: ${event-replay.hardDeferredBytes:10737418240}
   softPublicationOutboxRows: ${event-replay.softPublicationOutboxRows:50000}
