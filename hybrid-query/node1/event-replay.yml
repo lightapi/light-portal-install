@@ -88,3 +88,5 @@ kafkaDlq:
   maxReplayGeneration: 0
   maxPublishAttempts: ${event-replay.maxPublishAttempts:20}
   maxPublishAgeSeconds: ${event-replay.maxPublishAgeSeconds:86400}
+  publishAckTimeoutSeconds: ${event-replay.publishAckTimeoutSeconds:30}
+  legacyDirectPublicationEnabled: ${event-replay.legacyDirectPublicationEnabled:true}
