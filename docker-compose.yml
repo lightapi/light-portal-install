@@ -23,7 +23,7 @@ services:
     image: ${PORTAL_HYBRID_COMMAND_IMAGE:-networknt/portal-hybrid-command:latest}
     environment:
       NOREPLAY_EMAIL_PASSWORD: ${NOREPLAY_EMAIL_PASSWORD:-}
-      INSTANCE_CLONE_PLAN_HMAC_KEY: ${INSTANCE_CLONE_PLAN_HMAC_KEY:-}
+      INSTANCE_CLONE_PLAN_HMAC_KEY: ${INSTANCE_CLONE_PLAN_HMAC_KEY:-light-portal-development-only-instance-clone-hmac-key-v1}
       INSTANCE_CLONE_PLAN_HMAC_KEY_ID: ${INSTANCE_CLONE_PLAN_HMAC_KEY_ID:-v1}
     volumes:
       - ./hybrid-command/config:/config:Z
@@ -48,7 +48,7 @@ services:
     ports:
       - "8440:8440"
     environment:
-      INSTANCE_CLONE_PLAN_HMAC_KEY: ${INSTANCE_CLONE_PLAN_HMAC_KEY:-}
+      INSTANCE_CLONE_PLAN_HMAC_KEY: ${INSTANCE_CLONE_PLAN_HMAC_KEY:-light-portal-development-only-instance-clone-hmac-key-v1}
       INSTANCE_CLONE_PLAN_HMAC_KEY_ID: ${INSTANCE_CLONE_PLAN_HMAC_KEY_ID:-v1}
       embedding-task.enabled: ${EMBEDDING_TASK_ENABLED:-false}
       embedding-task.provider: ${EMBEDDING_TASK_PROVIDER:-disabled}
