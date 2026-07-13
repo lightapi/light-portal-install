@@ -124,16 +124,15 @@ Set `IMPORT_EVENTS=false` only when you intentionally want to skip the
 bootstrap import.
 # Instance clone rollout
 
-The install stack ships instance clone disabled in both hybrid processes. Copy
-`.env.example` to `.env` and supply one shared secret and key identifier:
+The development install stack ships instance clone enabled in both hybrid
+processes with a committed development-only fallback key. Copy `.env.example`
+to `.env` and override it for any shared or externally reachable environment:
 
 ```dotenv
 INSTANCE_CLONE_PLAN_HMAC_KEY=<secret-from-vault>
 INSTANCE_CLONE_PLAN_HMAC_KEY_ID=v1
 ```
 
-Never commit the populated `.env`, print the key in compose output, or store it
-in a portal configuration snapshot. Keep `enabled: false` until the database,
-writer, query, command, consumer, and UI versions are compatible and the
-graph-revision parity/backfill gate is clean. Enable command and query policies
-only as one coordinated change.
+Never commit the populated `.env`, print a real key in compose output, or store
+it in a portal configuration snapshot. Command and query must use the same key
+and key identifier.
