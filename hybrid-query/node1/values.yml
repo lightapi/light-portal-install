@@ -91,6 +91,8 @@ service.singletons:
     - com.networknt.db.provider.SqlDbStartupHook
     # Validate default-disabled event replay configuration before processors start.
     - net.lightapi.portal.db.EventReplayConfigStartupHook
+    # Fenced asynchronous replay worker (dormant while execution gates are disabled)
+    - net.lightapi.portal.db.replay.EventReplayWorkerStartupHook
     # Postgres Pub/Sub event processor
     - net.lightapi.portal.db.DbEventConsumerStartupHook
     # Operational cleanup startup hook
@@ -103,6 +105,8 @@ service.singletons:
   - com.networknt.server.ShutdownHookProvider:
     # Postgres Pub/Sub event processor
     - net.lightapi.portal.db.DbEventConsumerShutdownHook
+    # Fenced asynchronous replay worker
+    - net.lightapi.portal.db.replay.EventReplayWorkerShutdownHook
     # Operational cleanup shutdown hook
     - net.lightapi.portal.db.OperationalCleanupShutdownHook
     # Embedding task worker shutdown hook
