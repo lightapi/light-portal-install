@@ -89,6 +89,8 @@ service.singletons:
     - com.networknt.rpc.router.RpcStartupHookProvider
     # database startup hook to initialize datasource and cache.
     - com.networknt.db.provider.SqlDbStartupHook
+    # Validate default-disabled event replay configuration before processors start.
+    - net.lightapi.portal.db.EventReplayConfigStartupHook
     # Postgres Pub/Sub event processor
     - net.lightapi.portal.db.DbEventConsumerStartupHook
     # Operational cleanup startup hook
