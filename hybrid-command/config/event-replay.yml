@@ -43,6 +43,10 @@ limits:
   databaseFreeSpaceHardRatio: ${event-replay.databaseFreeSpaceHardRatio:0.10}
   databaseFreeSpaceHardBytes: ${event-replay.databaseFreeSpaceHardBytes:5368709120}
 
+databaseCapacity:
+  # Must resolve to the filesystem containing PostgreSQL data when capture is enabled.
+  dataPath: ${EVENT_REPLAY_DATABASE_DATA_PATH:}
+
 retentionDays:
   unresolvedPayload: ${event-replay.unresolvedPayloadRetentionDays:90}
   resolvedPayloadAfterResolution: ${event-replay.resolvedPayloadRetentionDays:14}
