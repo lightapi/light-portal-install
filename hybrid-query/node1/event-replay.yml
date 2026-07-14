@@ -13,6 +13,17 @@ featureGates:
   executionEnabled: ${event-replay.executionEnabled:false}
   breakGlassReleaseEnabled: ${event-replay.breakGlassReleaseEnabled:false}
 
+rollout:
+  # DISABLED is the shipped default. Use ALLOWLIST for canaries and ALL only
+  # after the Phase 11 expansion gate has passed.
+  mode: ${event-replay.rolloutMode:DISABLED}
+  sourceProcessors: ${event-replay.rolloutSourceProcessors:}
+  projectionNames: ${event-replay.rolloutProjectionNames:}
+  consumerGroups: ${event-replay.rolloutConsumerGroups:}
+  hostIds: ${event-replay.rolloutHostIds:}
+  changeTicket: ${event-replay.rolloutChangeTicket:}
+
+
 limits:
   maxTransactionsPerPlan: ${event-replay.maxTransactionsPerPlan:500}
   maxEventsPerPlan: ${event-replay.maxEventsPerPlan:5000}
