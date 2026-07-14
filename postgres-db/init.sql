@@ -365,7 +365,9 @@ CREATE TABLE outbox_message_t (
     payload JSONB NOT NULL,                -- The full event payload (JSON)
     metadata JSONB,                        -- Optional: correlation IDs, causation IDs, user ID, etc.
     c_offset BIGINT UNIQUE,                -- Gapless offset for Postgres pub/sub
-    transaction_id UUID NOT NULL           -- Generated UUID to group all events belong the same transaction
+    transaction_id UUID NOT NULL,          -- Generated UUID to group all events belong the same transaction
+    transaction_ordinal INTEGER NOT NULL CHECK (transaction_ordinal >= 0),
+    transaction_count INTEGER NOT NULL CHECK (transaction_count > 0 AND transaction_ordinal < transaction_count)
     -- Note: No sequence_number here, as the Event Store manages that.
     -- Debezium will process these by insertion order.
 );

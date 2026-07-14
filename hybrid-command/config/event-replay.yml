@@ -42,6 +42,7 @@ limits:
   maxSinglePayloadBytes: ${event-replay.maxSinglePayloadBytes:4194304}
   maxHostInlineArchiveBytes: ${event-replay.maxHostInlineArchiveBytes:536870912}
   maxHostTotalArchiveBytes: ${event-replay.maxHostTotalArchiveBytes:5368709120}
+  maxProjectionTotalArchiveBytes: ${event-replay.maxProjectionTotalArchiveBytes:10737418240}
   softDatabaseArchiveBytes: ${event-replay.softDatabaseArchiveBytes:10737418240}
   hardDatabaseArchiveBytes: ${event-replay.hardDatabaseArchiveBytes:21474836480}
   softObjectStoreBacklogBytes: ${event-replay.softObjectStoreBacklogBytes:1073741824}
@@ -55,7 +56,10 @@ limits:
   databaseFreeSpaceHardBytes: ${event-replay.databaseFreeSpaceHardBytes:5368709120}
 
 databaseCapacity:
-  # Must resolve to the filesystem containing PostgreSQL data when capture is enabled.
+  # DATABASE_QUOTA measures pg_database_size on the PostgreSQL server. Set the
+  # quota below the volume limit. FILESYSTEM is only valid for a shared data mount.
+  probeMode: ${EVENT_REPLAY_DATABASE_PROBE_MODE:DATABASE_QUOTA}
+  maxDatabaseBytes: ${EVENT_REPLAY_DATABASE_MAX_BYTES:107374182400}
   dataPath: ${EVENT_REPLAY_DATABASE_DATA_PATH:}
 
 retentionDays:
@@ -81,6 +85,7 @@ encryption:
   activeKeyAlias: ${EVENT_REPLAY_ACTIVE_KEY_ALIAS:}
 
 objectStore:
+  enabled: ${EVENT_REPLAY_OBJECT_ENABLED:false}
   provider: S3_COMPATIBLE
   endpoint: ${EVENT_REPLAY_OBJECT_ENDPOINT:}
   region: ${EVENT_REPLAY_OBJECT_REGION:}
