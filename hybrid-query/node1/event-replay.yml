@@ -82,6 +82,13 @@ objectStore:
 worker:
   clientId: ${EVENT_REPLAY_WORKER_CLIENT_ID:}
 
+operations:
+  enabled: ${event-replay.operationsEnabled:false}
+  refreshSeconds: ${event-replay.operationsRefreshSeconds:30}
+  cleanupIntervalSeconds: ${event-replay.cleanupIntervalSeconds:300}
+  cleanupBatchSize: ${event-replay.cleanupBatchSize:100}
+  orphanGraceHours: ${event-replay.orphanGraceHours:24}
+
 kafkaDlq:
   topicTemplate: "{sourceTopic}.portal-event-replay-v1.dlq"
   initialReplayGeneration: 0
