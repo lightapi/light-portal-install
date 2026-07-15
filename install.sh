@@ -302,10 +302,37 @@ wait_for_running_container() {
   return 1
 }
 
+wait_for_healthy_container() {
+  local container_name="$1"
+  local max_attempts="${LIGHT_OAUTH_READY_ATTEMPTS:-90}"
+  local interval="${LIGHT_OAUTH_READY_INTERVAL:-2}"
+  local attempt=1
+  local status
+
+  while [[ "$attempt" -le "$max_attempts" ]]; do
+    status="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' "$container_name" 2>/dev/null || true)"
+    if [[ "$status" == "healthy" ]]; then
+      return 0
+    fi
+    sleep "$interval"
+    attempt=$((attempt + 1))
+  done
+
+  return 1
+}
+
+start_light_oauth() {
+  log "starting light-oauth after postgres"
+  compose up -d light-oauth
+  wait_for_healthy_container light-oauth || die "light-oauth did not become healthy"
+}
+
 start_event_processors() {
   log "starting event bootstrap services"
   compose up -d postgres
   wait_for_postgres || die "postgres did not become ready for TCP connections"
+
+  start_light_oauth
 
   compose up -d --no-deps hybrid-command hybrid-query
   wait_for_running_container hybrid-command || die "hybrid-command did not start"
@@ -526,6 +553,7 @@ apply_release_deltas() {
 
   [[ -f data/manifest.json ]] || die "release manifest is missing; run ./install.sh update or assets first"
   apply_db_patches
+  start_light_oauth
   compose up -d --no-deps hybrid-command hybrid-query
   import_event_deltas
 }

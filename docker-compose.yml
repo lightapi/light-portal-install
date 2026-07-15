@@ -37,6 +37,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      light-oauth:
+        condition: service_healthy
       config-server:
         condition: service_healthy
 
@@ -63,6 +65,8 @@ services:
     container_name: hybrid-query
     depends_on:
       postgres:
+        condition: service_healthy
+      light-oauth:
         condition: service_healthy
       config-server:
         condition: service_healthy
@@ -169,6 +173,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      light-oauth:
+        condition: service_healthy
       config-server:
         condition: service_healthy
     healthcheck:
@@ -191,6 +197,8 @@ services:
     container_name: light-workflow
     depends_on:
       postgres:
+        condition: service_healthy
+      light-oauth:
         condition: service_healthy
       hybrid-command:
         condition: service_started
@@ -219,6 +227,8 @@ services:
     hostname: demo-customer-profile-api
     container_name: demo-customer-profile-api
     depends_on:
+      light-oauth:
+        condition: service_healthy
       controller:
         condition: service_healthy
       config-server:
@@ -246,6 +256,8 @@ services:
     hostname: demo-offer-decision-api
     container_name: demo-offer-decision-api
     depends_on:
+      light-oauth:
+        condition: service_healthy
       controller:
         condition: service_healthy
       config-server:
@@ -273,6 +285,8 @@ services:
     hostname: demo-insurance-claim-mcp-server
     container_name: demo-insurance-claim-mcp-server
     depends_on:
+      light-oauth:
+        condition: service_healthy
       controller:
         condition: service_healthy
       config-server:
@@ -309,6 +323,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      light-oauth:
+        condition: service_healthy
       config-server:
         condition: service_healthy
       controller:
@@ -338,6 +354,8 @@ services:
     container_name: light-agent
     depends_on:
       postgres:
+        condition: service_healthy
+      light-oauth:
         condition: service_healthy
       controller:
         condition: service_healthy
