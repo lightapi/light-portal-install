@@ -10,6 +10,7 @@ client.tokenAcClientId: f7d42348-c647-4efb-a52d-4c5787421e72
 client.tokenCcClientId: f7d42348-c647-4efb-a52d-4c5787421e72
 client.tokenKeyServerUrl: https://light-oauth:6881
 client.tokenKeyUri: /oauth2/AZZRJE52eXu3t1hseacnGQ/keys
+client.tokenKeyEnableHttp2: false
 # Client Credential
 client.tokenCcUri: /oauth2/AZZRJE52eXu3t1hseacnGQ/token
 client.tokenCcClientId: f7d42348-c647-4efb-a52d-4c5787421e72
