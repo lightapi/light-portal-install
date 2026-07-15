@@ -569,7 +569,11 @@ case "$command_name" in
     clean_volumes_if_requested
     bootstrap_events
     start_stack
-    log "portal should be available at https://localhost:${LIGHT_GATEWAY_HOST_PORT:-443}"
+    if [[ "${LIGHT_GATEWAY_HOST_PORT:-443}" == "443" ]]; then
+      log "portal should be available at https://local.localhost"
+    else
+      log "portal should be available at https://local.localhost:${LIGHT_GATEWAY_HOST_PORT}"
+    fi
     ;;
   update)
     download_assets
