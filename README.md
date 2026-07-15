@@ -8,7 +8,16 @@ bootstrap the repo and extract downloaded asset archives.
 curl -fsSL https://raw.githubusercontent.com/lightapi/light-portal-install/master/install.sh | bash
 ```
 
-Once the installation is complete, open your web browser and navigate to `https://local.localhost` to access the dashboard. To sign in, click the user icon in the bottom-left corner of the page. The default username and password are:
+Once the installation is complete, open your web browser and navigate to
+`https://local.localhost` to access the dashboard. This local deployment uses a
+self-signed TLS certificate, so your browser may display a privacy or security
+warning the first time you open the site. This warning is expected for the
+local installation. Choose the browser's advanced option and continue to
+`local.localhost` (the exact wording varies by browser). Only bypass this
+warning for this local address.
+
+To sign in, click the user icon in the bottom-left corner of the page. The
+default username and password are:
 
 ```
 steve.hu@lightapi.net/123456
@@ -61,8 +70,32 @@ cd "$HOME/.light-portal"
 ./install.sh stop
 ```
 
-Use `./install.sh uninstall` from the same directory when you also want the
-option to delete the Docker volumes for a fresh reinstall.
+## Reinstall from scratch
+
+The following procedure permanently deletes the existing PostgreSQL data,
+imported events, downloaded assets, and local installation files. For an
+installation created with `curl | bash`, first stop the stack and remove its
+Docker Compose volumes:
+
+```bash
+cd "$HOME/.light-portal"
+./install.sh uninstall
+```
+
+When prompted to delete the Docker volumes, enter `y`. After the uninstall
+finishes, leave the installation directory, delete it, and run the installer
+again:
+
+```bash
+cd "$HOME"
+rm -rf "$HOME/.light-portal"
+curl -fsSL https://raw.githubusercontent.com/lightapi/light-portal-install/master/install.sh | bash
+```
+
+For a checked-out repository that you want to keep, do not delete the
+repository. Use `CLEAN_VOLUMES=true ./install.sh install` from the repository
+instead; it removes the Compose volumes, downloads fresh assets, recreates the
+database, and imports the baseline `events.json` again.
 
 To force a fresh database and re-import `events.json`, run with
 `CLEAN_VOLUMES=true`. This stops the stack, deletes the Compose volumes, starts
