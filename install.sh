@@ -322,7 +322,7 @@ wait_for_healthy_container() {
 }
 
 start_light_oauth() {
-  log "starting light-oauth after postgres"
+  log "starting light-oauth after event bootstrap"
   compose up -d light-oauth
   wait_for_healthy_container light-oauth || die "light-oauth did not become healthy"
 }
@@ -331,8 +331,6 @@ start_event_processors() {
   log "starting event bootstrap services"
   compose up -d postgres
   wait_for_postgres || die "postgres did not become ready for TCP connections"
-
-  start_light_oauth
 
   compose up -d --no-deps hybrid-command hybrid-query
   wait_for_running_container hybrid-command || die "hybrid-command did not start"
@@ -553,7 +551,6 @@ apply_release_deltas() {
 
   [[ -f data/manifest.json ]] || die "release manifest is missing; run ./install.sh update or assets first"
   apply_db_patches
-  start_light_oauth
   compose up -d --no-deps hybrid-command hybrid-query
   import_event_deltas
 }
@@ -563,6 +560,7 @@ bootstrap_events() {
   [[ -f .env ]] || cp .env.example .env
   start_event_processors
   import_events
+  start_light_oauth
 }
 
 case "$command_name" in
