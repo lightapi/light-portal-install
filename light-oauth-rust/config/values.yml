@@ -11,6 +11,7 @@ public_issuer_base_url: "https://oauth.localhost"
 default_provider_id: "AZZRJE52eXu3t1hseacnGQ"
 oidc_scopes_supported:
   - "portal.r"
+  - "portal.w"
 msal_jwks_url: "https://light-oauth:6881/oauth2/AZZRJE52eXu3t1hseacnGQ/keys"
 msal_jwks_accept_invalid_certs: true
 msal_jwt_expected_issuer: "urn:com:networknt:oauth2:v1"
