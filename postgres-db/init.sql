@@ -5962,8 +5962,438 @@ COMMIT;
 
 -- PDB-1 authoritative LLM control-plane schema. Keeping the additive patch as
 -- the single definition prevents clean-install and upgrade DDL from drifting.
-\ir patch_20260719_01_llm_control_plane.sql
-\ir patch_20260719_03_llm_production_integration.sql
+BEGIN;
+
+CREATE TABLE IF NOT EXISTS llm_model_catalog_t (
+    host_id UUID NOT NULL,
+    model_catalog_id UUID NOT NULL,
+    provider_type VARCHAR(32) NOT NULL,
+    physical_model_id VARCHAR(255) NOT NULL,
+    model_family VARCHAR(126) NOT NULL,
+    model_version VARCHAR(64),
+    lifecycle_status VARCHAR(16) NOT NULL DEFAULT 'DRAFT',
+    context_token_limit BIGINT NOT NULL CHECK(context_token_limit > 0),
+    output_token_limit BIGINT NOT NULL CHECK(output_token_limit > 0),
+    modalities JSONB NOT NULL DEFAULT '[]'::jsonb CHECK(jsonb_typeof(modalities) = 'array'),
+    operations JSONB NOT NULL DEFAULT '[]'::jsonb CHECK(jsonb_typeof(operations) = 'array'),
+    declared_capabilities JSONB NOT NULL DEFAULT '{}'::jsonb CHECK(jsonb_typeof(declared_capabilities) = 'object'),
+    aggregate_version BIGINT NOT NULL DEFAULT 1 CHECK(aggregate_version > 0),
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
+    PRIMARY KEY(host_id, model_catalog_id),
+    FOREIGN KEY(host_id) REFERENCES host_t(host_id) ON DELETE CASCADE,
+    UNIQUE(host_id, provider_type, physical_model_id),
+    CHECK(lifecycle_status IN ('DRAFT','ACTIVE','DEPRECATED','RETIRED'))
+);
+
+CREATE TABLE IF NOT EXISTS llm_model_registration_t (
+    host_id UUID NOT NULL,
+    model_registration_id UUID NOT NULL,
+    model_catalog_id UUID NOT NULL,
+    environment VARCHAR(32) NOT NULL,
+    regions JSONB NOT NULL DEFAULT '[]'::jsonb CHECK(jsonb_typeof(regions) = 'array'),
+    data_classifications JSONB NOT NULL DEFAULT '[]'::jsonb CHECK(jsonb_typeof(data_classifications) = 'array'),
+    capability_restrictions JSONB NOT NULL DEFAULT '{}'::jsonb CHECK(jsonb_typeof(capability_restrictions) = 'object'),
+    lifecycle_status VARCHAR(16) NOT NULL DEFAULT 'DRAFT',
+    aggregate_version BIGINT NOT NULL DEFAULT 1 CHECK(aggregate_version > 0),
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
+    PRIMARY KEY(host_id, model_registration_id),
+    FOREIGN KEY(host_id) REFERENCES host_t(host_id) ON DELETE CASCADE,
+    FOREIGN KEY(host_id, model_catalog_id) REFERENCES llm_model_catalog_t(host_id, model_catalog_id) ON DELETE RESTRICT,
+    UNIQUE(host_id, model_catalog_id, environment),
+    CHECK(lifecycle_status IN ('DRAFT','ACTIVE','SUSPENDED','RETIRED'))
+);
+
+CREATE TABLE IF NOT EXISTS llm_provider_account_t (
+    host_id UUID NOT NULL,
+    provider_account_id UUID NOT NULL,
+    account_name VARCHAR(126) NOT NULL,
+    provider_type VARCHAR(32) NOT NULL,
+    billing_principal VARCHAR(255) NOT NULL,
+    quota_group_id VARCHAR(126) NOT NULL,
+    capacity_metadata JSONB NOT NULL DEFAULT '{}'::jsonb CHECK(jsonb_typeof(capacity_metadata) = 'object'),
+    lifecycle_status VARCHAR(16) NOT NULL DEFAULT 'DRAFT',
+    aggregate_version BIGINT NOT NULL DEFAULT 1 CHECK(aggregate_version > 0),
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
+    PRIMARY KEY(host_id, provider_account_id),
+    FOREIGN KEY(host_id) REFERENCES host_t(host_id) ON DELETE CASCADE,
+    UNIQUE(host_id, provider_type, account_name),
+    CHECK(lifecycle_status IN ('DRAFT','ACTIVE','SUSPENDED','RETIRED'))
+);
+
+CREATE TABLE IF NOT EXISTS llm_provider_deployment_t (
+    host_id UUID NOT NULL,
+    provider_deployment_id UUID NOT NULL,
+    model_registration_id UUID NOT NULL,
+    provider_account_id UUID NOT NULL,
+    deployment_name VARCHAR(126) NOT NULL,
+    provider_type VARCHAR(32) NOT NULL,
+    physical_model_id VARCHAR(255) NOT NULL,
+    base_url TEXT NOT NULL CHECK(base_url ~ '^https://'),
+    region VARCHAR(64),
+    transport_bounds JSONB NOT NULL DEFAULT '{}'::jsonb CHECK(jsonb_typeof(transport_bounds) = 'object'),
+    quota_group_id VARCHAR(126) NOT NULL,
+    conformance_state VARCHAR(16) NOT NULL DEFAULT 'UNKNOWN',
+    conformance_digest VARCHAR(71),
+    conformance_valid_until TIMESTAMPTZ,
+    conformance_result JSONB,
+    refresh_before_seconds INTEGER CHECK(refresh_before_seconds IS NULL OR refresh_before_seconds > 0),
+    lifecycle_status VARCHAR(16) NOT NULL DEFAULT 'DRAFT',
+    aggregate_version BIGINT NOT NULL DEFAULT 1 CHECK(aggregate_version > 0),
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
+    PRIMARY KEY(host_id, provider_deployment_id),
+    FOREIGN KEY(host_id, model_registration_id) REFERENCES llm_model_registration_t(host_id, model_registration_id) ON DELETE RESTRICT,
+    FOREIGN KEY(host_id, provider_account_id) REFERENCES llm_provider_account_t(host_id, provider_account_id) ON DELETE RESTRICT,
+    UNIQUE(host_id, deployment_name),
+    CHECK(conformance_state IN ('UNKNOWN','PENDING','PASS','FAIL','EXPIRED','QUARANTINED')),
+    CHECK(lifecycle_status IN ('DRAFT','VALIDATING','ACTIVE','SUSPENDED','RETIRED')),
+    CHECK(conformance_valid_until IS NULL OR conformance_digest IS NOT NULL)
+);
+
+ALTER TABLE llm_provider_deployment_t
+    ADD COLUMN IF NOT EXISTS conformance_result JSONB;
+-- Compact PASS flags from an older schema are not production attestations.
+-- Quarantine them during upgrade so the stronger constraint can be installed
+-- without treating unaudited capability declarations as evidence.
+UPDATE llm_provider_deployment_t
+   SET conformance_state = 'QUARANTINED'
+ WHERE conformance_state = 'PASS'
+   AND NOT ((
+       conformance_result IS NOT NULL
+       AND conformance_digest IS NOT NULL
+       AND conformance_valid_until IS NOT NULL
+       AND jsonb_typeof(conformance_result) = 'object'
+       AND conformance_result->>'schemaVersion' = '1'
+       AND conformance_result->>'state' = 'pass'
+       AND conformance_result->>'digest' = conformance_digest
+       AND conformance_result->>'provider' = provider_type
+       AND conformance_result->>'physicalModel' = physical_model_id
+       AND CASE
+           WHEN conformance_result->>'validUntil' ~ '^\d{4}-\d{2}-\d{2}T'
+           THEN (conformance_result->>'validUntil')::timestamptz = conformance_valid_until
+           ELSE FALSE
+       END
+       AND jsonb_typeof(conformance_result->'capabilities') = 'object'
+       AND jsonb_typeof(conformance_result->'capabilityEvidence') = 'object'
+   ) IS TRUE);
+ALTER TABLE llm_provider_deployment_t
+    DROP CONSTRAINT IF EXISTS llm_provider_deployment_conformance_result_shape_ck;
+ALTER TABLE llm_provider_deployment_t
+    ADD CONSTRAINT llm_provider_deployment_conformance_result_shape_ck CHECK(
+        (conformance_result IS NULL OR jsonb_typeof(conformance_result) = 'object') IS TRUE
+    );
+ALTER TABLE llm_provider_deployment_t
+    DROP CONSTRAINT IF EXISTS llm_provider_deployment_pass_result_ck;
+ALTER TABLE llm_provider_deployment_t
+    ADD CONSTRAINT llm_provider_deployment_pass_result_ck CHECK(
+        (conformance_state <> 'PASS' OR (
+            conformance_result IS NOT NULL
+            AND conformance_digest IS NOT NULL
+            AND conformance_valid_until IS NOT NULL
+            AND conformance_result->>'schemaVersion' = '1'
+            AND conformance_result->>'state' = 'pass'
+            AND conformance_result->>'digest' = conformance_digest
+            AND conformance_result->>'provider' = provider_type
+            AND conformance_result->>'physicalModel' = physical_model_id
+            AND (conformance_result->>'validUntil')::timestamptz = conformance_valid_until
+            AND jsonb_typeof(conformance_result->'capabilities') = 'object'
+            AND jsonb_typeof(conformance_result->'capabilityEvidence') = 'object'
+        )) IS TRUE
+    );
+
+CREATE TABLE IF NOT EXISTS llm_provider_credential_t (
+    host_id UUID NOT NULL,
+    provider_credential_id UUID NOT NULL,
+    provider_deployment_id UUID NOT NULL,
+    credential_version INTEGER NOT NULL CHECK(credential_version > 0),
+    secret_reference VARCHAR(1024) NOT NULL CHECK(secret_reference ~ '^[A-Za-z][A-Za-z0-9+.-]*://'),
+    effective_ts TIMESTAMPTZ NOT NULL,
+    expires_ts TIMESTAMPTZ,
+    lifecycle_status VARCHAR(16) NOT NULL DEFAULT 'PENDING',
+    aggregate_version BIGINT NOT NULL DEFAULT 1 CHECK(aggregate_version > 0),
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
+    PRIMARY KEY(host_id, provider_credential_id),
+    FOREIGN KEY(host_id, provider_deployment_id) REFERENCES llm_provider_deployment_t(host_id, provider_deployment_id) ON DELETE RESTRICT,
+    UNIQUE(host_id, provider_deployment_id, credential_version),
+    CHECK(expires_ts IS NULL OR expires_ts > effective_ts),
+    CHECK(lifecycle_status IN ('PENDING','ACTIVE','ROTATING','REVOKED','EXPIRED'))
+);
+
+CREATE TABLE IF NOT EXISTS llm_public_alias_t (
+    host_id UUID NOT NULL,
+    public_alias_id UUID NOT NULL,
+    environment VARCHAR(32) NOT NULL,
+    alias_name VARCHAR(126) NOT NULL,
+    operations JSONB NOT NULL DEFAULT '[]'::jsonb CHECK(jsonb_typeof(operations) = 'array'),
+    required_capabilities JSONB NOT NULL DEFAULT '{}'::jsonb CHECK(jsonb_typeof(required_capabilities) = 'object'),
+    max_input_tokens BIGINT CHECK(max_input_tokens IS NULL OR max_input_tokens > 0),
+    max_output_tokens BIGINT CHECK(max_output_tokens IS NULL OR max_output_tokens > 0),
+    max_request_bytes BIGINT CHECK(max_request_bytes IS NULL OR max_request_bytes > 0),
+    data_classification VARCHAR(32),
+    logging_mode VARCHAR(16) NOT NULL DEFAULT 'METADATA',
+    pii_mode VARCHAR(16) NOT NULL DEFAULT 'DENY',
+    lifecycle_status VARCHAR(16) NOT NULL DEFAULT 'DRAFT',
+    replacement_alias_id UUID,
+    aggregate_version BIGINT NOT NULL DEFAULT 1 CHECK(aggregate_version > 0),
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
+    PRIMARY KEY(host_id, public_alias_id),
+    FOREIGN KEY(host_id) REFERENCES host_t(host_id) ON DELETE CASCADE,
+    FOREIGN KEY(host_id, replacement_alias_id) REFERENCES llm_public_alias_t(host_id, public_alias_id) ON DELETE RESTRICT,
+    UNIQUE(host_id, environment, alias_name),
+    CHECK(logging_mode IN ('NONE','METADATA','REDACTED')),
+    CHECK(pii_mode IN ('DENY','REDACT','TOKENIZE','ALLOW')),
+    CHECK(lifecycle_status IN ('DRAFT','ACTIVE','DEPRECATED','RETIRED')),
+    CHECK(replacement_alias_id IS NULL OR replacement_alias_id <> public_alias_id)
+);
+
+CREATE TABLE IF NOT EXISTS llm_alias_route_t (
+    host_id UUID NOT NULL,
+    alias_route_id UUID NOT NULL,
+    public_alias_id UUID NOT NULL,
+    provider_deployment_id UUID NOT NULL,
+    route_priority INTEGER NOT NULL CHECK(route_priority >= 0),
+    route_weight INTEGER NOT NULL DEFAULT 1 CHECK(route_weight > 0),
+    fallback_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    canary_percent NUMERIC(5,2) NOT NULL DEFAULT 0 CHECK(canary_percent >= 0 AND canary_percent <= 100),
+    residency_conditions JSONB NOT NULL DEFAULT '{}'::jsonb CHECK(jsonb_typeof(residency_conditions) = 'object'),
+    aggregate_version BIGINT NOT NULL DEFAULT 1 CHECK(aggregate_version > 0),
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
+    PRIMARY KEY(host_id, alias_route_id),
+    FOREIGN KEY(host_id, public_alias_id) REFERENCES llm_public_alias_t(host_id, public_alias_id) ON DELETE CASCADE,
+    FOREIGN KEY(host_id, provider_deployment_id) REFERENCES llm_provider_deployment_t(host_id, provider_deployment_id) ON DELETE RESTRICT,
+    UNIQUE(host_id, public_alias_id, provider_deployment_id),
+    UNIQUE(host_id, public_alias_id, route_priority),
+    CHECK(route_weight = 1),
+    CHECK(canary_percent = 0)
+);
+
+CREATE TABLE IF NOT EXISTS llm_pricing_version_t (
+    host_id UUID NOT NULL,
+    pricing_version_id UUID NOT NULL,
+    provider_deployment_id UUID NOT NULL,
+    pricing_version INTEGER NOT NULL CHECK(pricing_version > 0),
+    input_micros_per_million BIGINT NOT NULL CHECK(input_micros_per_million >= 0),
+    output_micros_per_million BIGINT NOT NULL CHECK(output_micros_per_million >= 0),
+    cached_input_micros_per_million BIGINT CHECK(cached_input_micros_per_million IS NULL OR cached_input_micros_per_million >= 0),
+    effective_ts TIMESTAMPTZ NOT NULL,
+    expires_ts TIMESTAMPTZ,
+    source VARCHAR(255) NOT NULL,
+    approved_by VARCHAR(126) NOT NULL,
+    aggregate_version BIGINT NOT NULL DEFAULT 1 CHECK(aggregate_version > 0),
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
+    PRIMARY KEY(host_id, pricing_version_id),
+    FOREIGN KEY(host_id, provider_deployment_id) REFERENCES llm_provider_deployment_t(host_id, provider_deployment_id) ON DELETE RESTRICT,
+    UNIQUE(host_id, provider_deployment_id, pricing_version),
+    CHECK(expires_ts IS NULL OR expires_ts > effective_ts)
+);
+
+CREATE TABLE IF NOT EXISTS llm_model_policy_t (
+    host_id UUID NOT NULL,
+    model_policy_id UUID NOT NULL,
+    policy_name VARCHAR(126) NOT NULL,
+    access_policy JSONB NOT NULL DEFAULT '{}'::jsonb CHECK(jsonb_typeof(access_policy) = 'object'),
+    budget_policy JSONB NOT NULL DEFAULT '{}'::jsonb CHECK(jsonb_typeof(budget_policy) = 'object'),
+    content_policy JSONB NOT NULL DEFAULT '{}'::jsonb CHECK(jsonb_typeof(content_policy) = 'object'),
+    cache_policy JSONB NOT NULL DEFAULT '{}'::jsonb CHECK(jsonb_typeof(cache_policy) = 'object'),
+    pii_policy JSONB NOT NULL DEFAULT '{}'::jsonb CHECK(jsonb_typeof(pii_policy) = 'object'),
+    native_extension_policy JSONB NOT NULL DEFAULT '{}'::jsonb CHECK(jsonb_typeof(native_extension_policy) = 'object'),
+    lifecycle_status VARCHAR(16) NOT NULL DEFAULT 'DRAFT',
+    aggregate_version BIGINT NOT NULL DEFAULT 1 CHECK(aggregate_version > 0),
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
+    PRIMARY KEY(host_id, model_policy_id),
+    FOREIGN KEY(host_id) REFERENCES host_t(host_id) ON DELETE CASCADE,
+    UNIQUE(host_id, policy_name),
+    CHECK(lifecycle_status IN ('DRAFT','ACTIVE','SUSPENDED','RETIRED'))
+);
+
+CREATE TABLE IF NOT EXISTS llm_model_policy_binding_t (
+    host_id UUID NOT NULL,
+    model_policy_binding_id UUID NOT NULL,
+    model_policy_id UUID NOT NULL,
+    subject_type VARCHAR(16) NOT NULL,
+    subject_id VARCHAR(255) NOT NULL,
+    public_alias_id UUID,
+    agent_default BOOLEAN NOT NULL DEFAULT FALSE,
+    aggregate_version BIGINT NOT NULL DEFAULT 1 CHECK(aggregate_version > 0),
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
+    PRIMARY KEY(host_id, model_policy_binding_id),
+    FOREIGN KEY(host_id, model_policy_id) REFERENCES llm_model_policy_t(host_id, model_policy_id) ON DELETE CASCADE,
+    FOREIGN KEY(host_id, public_alias_id) REFERENCES llm_public_alias_t(host_id, public_alias_id) ON DELETE RESTRICT,
+    UNIQUE(host_id, model_policy_id, subject_type, subject_id, public_alias_id),
+    CHECK(subject_type IN ('AGENT','CLIENT','PRINCIPAL','PRODUCT_PROFILE')),
+    CHECK(NOT agent_default OR public_alias_id IS NOT NULL)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS llm_policy_binding_agent_default_uk
+    ON llm_model_policy_binding_t(host_id, model_policy_id, subject_type, subject_id)
+    WHERE active IS TRUE AND agent_default IS TRUE;
+
+CREATE TABLE IF NOT EXISTS llm_projection_resource_t (
+    host_id UUID NOT NULL,
+    environment VARCHAR(32) NOT NULL,
+    projection_resource_id UUID NOT NULL,
+    resource_type VARCHAR(32) NOT NULL,
+    resource_key VARCHAR(255) NOT NULL,
+    resource_version BIGINT NOT NULL CHECK(resource_version > 0),
+    sequence_id BIGINT NOT NULL CHECK(sequence_id > 0),
+    schema_version INTEGER NOT NULL CHECK(schema_version > 0),
+    payload JSONB NOT NULL CHECK(jsonb_typeof(payload) = 'object'),
+    payload_digest VARCHAR(71) NOT NULL CHECK(payload_digest ~ '^sha256:[0-9a-f]{64}$'),
+    lifecycle_status VARCHAR(16) NOT NULL DEFAULT 'CANDIDATE',
+    aggregate_version BIGINT NOT NULL DEFAULT 1 CHECK(aggregate_version > 0),
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
+    PRIMARY KEY(host_id, environment, projection_resource_id),
+    FOREIGN KEY(host_id) REFERENCES host_t(host_id) ON DELETE CASCADE,
+    UNIQUE(host_id, environment, resource_key, resource_version),
+    UNIQUE(host_id, environment, sequence_id),
+    CHECK(lifecycle_status IN ('CANDIDATE','PUBLISHED','RETIRED'))
+);
+
+CREATE TABLE IF NOT EXISTS llm_gateway_publication_t (
+    host_id UUID NOT NULL,
+    environment VARCHAR(32) NOT NULL,
+    gateway_publication_id UUID NOT NULL,
+    publication_version BIGINT NOT NULL CHECK(publication_version > 0),
+    manifest JSONB NOT NULL CHECK(jsonb_typeof(manifest) = 'object'),
+    manifest_digest VARCHAR(71) NOT NULL CHECK(manifest_digest ~ '^sha256:[0-9a-f]{64}$'),
+    minimum_gateway_version VARCHAR(32) NOT NULL,
+    enabled_routing_features JSONB NOT NULL DEFAULT '[]'::jsonb CHECK(jsonb_typeof(enabled_routing_features) = 'array'),
+    validation_result JSONB NOT NULL DEFAULT '{}'::jsonb CHECK(jsonb_typeof(validation_result) = 'object'),
+    publication_state VARCHAR(16) NOT NULL DEFAULT 'CANDIDATE',
+    rollback_of_publication_id UUID,
+    delivery_state VARCHAR(16) NOT NULL DEFAULT 'PENDING',
+    delivery_evidence JSONB,
+    aggregate_version BIGINT NOT NULL DEFAULT 1 CHECK(aggregate_version > 0),
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
+    PRIMARY KEY(host_id, environment, gateway_publication_id),
+    FOREIGN KEY(host_id) REFERENCES host_t(host_id) ON DELETE CASCADE,
+    FOREIGN KEY(host_id, environment, rollback_of_publication_id) REFERENCES llm_gateway_publication_t(host_id, environment, gateway_publication_id) ON DELETE RESTRICT,
+    UNIQUE(host_id, environment, publication_version),
+    UNIQUE(host_id, environment, manifest_digest),
+    CHECK(publication_state IN ('CANDIDATE','VALIDATED','PUBLISHED','FAILED','ROLLED_BACK')),
+    CHECK(delivery_state IN ('PENDING','ACKNOWLEDGED','FAILED'))
+);
+
+CREATE OR REPLACE FUNCTION llm_reject_published_digest_mutation()
+RETURNS trigger LANGUAGE plpgsql AS $function$
+BEGIN
+    IF OLD.lifecycle_status = 'PUBLISHED'
+       AND (NEW.payload_digest <> OLD.payload_digest OR NEW.payload <> OLD.payload) THEN
+        RAISE EXCEPTION 'published LLM projection resources are immutable';
+    END IF;
+    RETURN NEW;
+END
+$function$;
+
+DROP TRIGGER IF EXISTS llm_projection_resource_immutable_trg ON llm_projection_resource_t;
+CREATE TRIGGER llm_projection_resource_immutable_trg
+BEFORE UPDATE ON llm_projection_resource_t
+FOR EACH ROW EXECUTE FUNCTION llm_reject_published_digest_mutation();
+
+CREATE OR REPLACE FUNCTION llm_reject_published_manifest_mutation()
+RETURNS trigger LANGUAGE plpgsql AS $function$
+BEGIN
+    IF OLD.publication_state IN ('PUBLISHED','ROLLED_BACK')
+       AND (NEW.manifest_digest <> OLD.manifest_digest OR NEW.manifest <> OLD.manifest) THEN
+        RAISE EXCEPTION 'published LLM gateway manifests are immutable';
+    END IF;
+    RETURN NEW;
+END
+$function$;
+
+DROP TRIGGER IF EXISTS llm_gateway_publication_immutable_trg ON llm_gateway_publication_t;
+CREATE TRIGGER llm_gateway_publication_immutable_trg
+BEFORE UPDATE ON llm_gateway_publication_t
+FOR EACH ROW EXECUTE FUNCTION llm_reject_published_manifest_mutation();
+
+ALTER TABLE agent_definition_t
+    ADD COLUMN IF NOT EXISTS model_alias_id UUID,
+    ADD COLUMN IF NOT EXISTS model_policy_id UUID;
+
+ALTER TABLE agent_definition_t ALTER COLUMN model_provider DROP NOT NULL;
+ALTER TABLE agent_definition_t ALTER COLUMN model_name DROP NOT NULL;
+
+ALTER TABLE agent_definition_t DROP CONSTRAINT IF EXISTS agent_definition_model_selection_ck;
+ALTER TABLE agent_definition_t ADD CONSTRAINT agent_definition_model_selection_ck CHECK (
+    NOT (model_alias_id IS NOT NULL AND model_policy_id IS NOT NULL)
+    AND (
+        model_alias_id IS NOT NULL
+        OR model_policy_id IS NOT NULL
+        OR (model_provider IS NOT NULL AND model_name IS NOT NULL)
+    )
+    AND ((model_provider IS NULL) = (model_name IS NULL))
+    AND ((model_alias_id IS NULL AND model_policy_id IS NULL) OR api_key_ref IS NULL)
+);
+
+ALTER TABLE agent_definition_t DROP CONSTRAINT IF EXISTS agent_definition_model_alias_fk;
+ALTER TABLE agent_definition_t ADD CONSTRAINT agent_definition_model_alias_fk
+    FOREIGN KEY(host_id, model_alias_id) REFERENCES llm_public_alias_t(host_id, public_alias_id) ON DELETE RESTRICT;
+ALTER TABLE agent_definition_t DROP CONSTRAINT IF EXISTS agent_definition_model_policy_fk;
+ALTER TABLE agent_definition_t ADD CONSTRAINT agent_definition_model_policy_fk
+    FOREIGN KEY(host_id, model_policy_id) REFERENCES llm_model_policy_t(host_id, model_policy_id) ON DELETE RESTRICT;
+
+CREATE INDEX IF NOT EXISTS llm_deployment_conformance_due_idx
+    ON llm_provider_deployment_t(host_id, conformance_valid_until)
+    WHERE active IS TRUE AND lifecycle_status = 'ACTIVE';
+CREATE INDEX IF NOT EXISTS llm_projection_resource_sequence_idx
+    ON llm_projection_resource_t(host_id, environment, sequence_id);
+CREATE INDEX IF NOT EXISTS llm_publication_current_idx
+    ON llm_gateway_publication_t(host_id, environment, publication_version DESC)
+    WHERE active IS TRUE;
+
+COMMIT;
+-- DIST-1 / LA-1: distinguish public aliases from operator-approved,
+-- agent-bound compatibility aliases. Additive and idempotent.
+BEGIN;
+
+ALTER TABLE llm_public_alias_t
+    ADD COLUMN IF NOT EXISTS alias_visibility VARCHAR(24) NOT NULL DEFAULT 'PUBLIC';
+ALTER TABLE llm_public_alias_t
+    ADD COLUMN IF NOT EXISTS bound_agent_def_id UUID;
+
+ALTER TABLE llm_public_alias_t
+    DROP CONSTRAINT IF EXISTS llm_public_alias_visibility_ck;
+ALTER TABLE llm_public_alias_t
+    ADD CONSTRAINT llm_public_alias_visibility_ck CHECK (
+        (alias_visibility = 'PUBLIC' AND bound_agent_def_id IS NULL)
+        OR (alias_visibility = 'INTERNAL_LEGACY' AND bound_agent_def_id IS NOT NULL)
+    );
+
+ALTER TABLE llm_public_alias_t
+    DROP CONSTRAINT IF EXISTS llm_public_alias_bound_agent_fk;
+ALTER TABLE llm_public_alias_t
+    ADD CONSTRAINT llm_public_alias_bound_agent_fk
+    FOREIGN KEY(host_id, bound_agent_def_id)
+    REFERENCES agent_definition_t(host_id, agent_def_id) ON DELETE RESTRICT;
+
+CREATE INDEX IF NOT EXISTS llm_public_alias_bound_agent_idx
+    ON llm_public_alias_t(host_id, bound_agent_def_id)
+    WHERE alias_visibility = 'INTERNAL_LEGACY' AND active IS TRUE;
+
+COMMIT;
 
 
 -- create a view to simplify the foreign key relationship.
