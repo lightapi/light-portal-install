@@ -1,10 +1,7 @@
 # Default configuration values for portal-service
-db_url: "postgres://postgres:secret@postgres:5432/configserver"
-server_port: 2498
-host_id: "01964b05-552a-7c4b-9184-6857e7f3dc5f"
-tls_cert_path: "/config/cert.pem"
-tls_key_path: "/config/key.pem"
-jwks_url: "https://light-oauth:6881/oauth2/AZZRJE52eXu3t1hseacnGQ/keys"
-jwks_accept_invalid_certs: true
-jwt_expected_issuer: "urn:com:networknt:oauth2:v1"
-jwt_expected_audience: "urn:com.networknt"
+portalService.dbUrl: "postgres://postgres:secret@postgres:5432/configserver"
+portalService.hostId: "01964b05-552a-7c4b-9184-6857e7f3dc5f"
+server.httpsPort: 2498
+server.tlsCertPath: "/config/cert.pem"
+server.tlsKeyPath: "/config/key.pem"
+server.serviceId: "com.networknt.reference-1.0.0"
