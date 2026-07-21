@@ -5966,9 +5966,9 @@ COMMIT;
 -- BEGIN INLINED patch_20260719_01_llm_control_plane.sql
 BEGIN;
 
-CREATE TABLE IF NOT EXISTS llm_model_t (
+CREATE TABLE IF NOT EXISTS llm_model_catalog_t (
     host_id UUID NOT NULL,
-    model_id UUID NOT NULL,
+    model_catalog_id UUID NOT NULL,
     provider_type VARCHAR(32) NOT NULL,
     physical_model_id VARCHAR(255) NOT NULL,
     model_family VARCHAR(126) NOT NULL,
@@ -5983,7 +5983,7 @@ CREATE TABLE IF NOT EXISTS llm_model_t (
     active BOOLEAN NOT NULL DEFAULT TRUE,
     update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
-    PRIMARY KEY(host_id, model_id),
+    PRIMARY KEY(host_id, model_catalog_id),
     FOREIGN KEY(host_id) REFERENCES host_t(host_id) ON DELETE CASCADE,
     UNIQUE(host_id, provider_type, physical_model_id),
     CHECK(lifecycle_status IN ('DRAFT','ACTIVE','DEPRECATED','RETIRED'))
@@ -5992,7 +5992,7 @@ CREATE TABLE IF NOT EXISTS llm_model_t (
 CREATE TABLE IF NOT EXISTS llm_model_registration_t (
     host_id UUID NOT NULL,
     model_registration_id UUID NOT NULL,
-    model_id UUID NOT NULL,
+    model_catalog_id UUID NOT NULL,
     environment VARCHAR(32) NOT NULL,
     regions JSONB NOT NULL DEFAULT '[]'::jsonb CHECK(jsonb_typeof(regions) = 'array'),
     data_classifications JSONB NOT NULL DEFAULT '[]'::jsonb CHECK(jsonb_typeof(data_classifications) = 'array'),
@@ -6004,8 +6004,8 @@ CREATE TABLE IF NOT EXISTS llm_model_registration_t (
     update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
     PRIMARY KEY(host_id, model_registration_id),
     FOREIGN KEY(host_id) REFERENCES host_t(host_id) ON DELETE CASCADE,
-    FOREIGN KEY(host_id, model_id) REFERENCES llm_model_t(host_id, model_id) ON DELETE RESTRICT,
-    UNIQUE(host_id, model_id, environment),
+    FOREIGN KEY(host_id, model_catalog_id) REFERENCES llm_model_catalog_t(host_id, model_catalog_id) ON DELETE RESTRICT,
+    UNIQUE(host_id, model_catalog_id, environment),
     CHECK(lifecycle_status IN ('DRAFT','ACTIVE','SUSPENDED','RETIRED'))
 );
 
@@ -6400,6 +6400,126 @@ CREATE INDEX IF NOT EXISTS llm_public_alias_bound_agent_idx
 
 COMMIT;
 -- END INLINED patch_20260719_03_llm_production_integration.sql
+
+-- BEGIN INLINED patch_20260721_01_llm_model_rename.sql
+-- Preserve existing catalog data while adopting the final LLM model naming.
+-- The guards make this safe on a fresh baseline that already has the new names.
+BEGIN;
+
+DO $migration$
+DECLARE
+    constraint_rename record;
+BEGIN
+    IF to_regclass('llm_model_catalog_t') IS NOT NULL THEN
+        IF to_regclass('llm_model_t') IS NOT NULL THEN
+            RAISE EXCEPTION 'cannot rename llm_model_catalog_t: llm_model_t already exists';
+        END IF;
+        ALTER TABLE llm_model_catalog_t RENAME TO llm_model_t;
+    END IF;
+
+    IF to_regclass('llm_model_t') IS NULL THEN
+        RAISE EXCEPTION 'LLM model table is missing';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'llm_model_t'
+           AND column_name = 'model_catalog_id'
+    ) THEN
+        IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+             WHERE table_schema = current_schema()
+               AND table_name = 'llm_model_t'
+               AND column_name = 'model_id'
+        ) THEN
+            RAISE EXCEPTION 'llm_model_t contains both model_catalog_id and model_id';
+        END IF;
+        ALTER TABLE llm_model_t RENAME COLUMN model_catalog_id TO model_id;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'llm_model_registration_t'
+           AND column_name = 'model_catalog_id'
+    ) THEN
+        IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+             WHERE table_schema = current_schema()
+               AND table_name = 'llm_model_registration_t'
+               AND column_name = 'model_id'
+        ) THEN
+            RAISE EXCEPTION 'llm_model_registration_t contains both model_catalog_id and model_id';
+        END IF;
+        ALTER TABLE llm_model_registration_t RENAME COLUMN model_catalog_id TO model_id;
+    END IF;
+
+    FOR constraint_rename IN
+        SELECT * FROM (VALUES
+            ('llm_model_t', 'llm_model_catalog_t_pkey', 'llm_model_t_pkey'),
+            ('llm_model_t', 'llm_model_catalog_t_host_id_fkey', 'llm_model_t_host_id_fkey'),
+            ('llm_model_t', 'llm_model_catalog_t_host_id_provider_type_physical_model_id_key', 'llm_model_t_host_id_provider_type_physical_model_id_key'),
+            ('llm_model_t', 'llm_model_catalog_t_lifecycle_status_check', 'llm_model_t_lifecycle_status_check'),
+            ('llm_model_t', 'llm_model_catalog_t_context_token_limit_check', 'llm_model_t_context_token_limit_check'),
+            ('llm_model_t', 'llm_model_catalog_t_output_token_limit_check', 'llm_model_t_output_token_limit_check'),
+            ('llm_model_t', 'llm_model_catalog_t_modalities_check', 'llm_model_t_modalities_check'),
+            ('llm_model_t', 'llm_model_catalog_t_operations_check', 'llm_model_t_operations_check'),
+            ('llm_model_t', 'llm_model_catalog_t_declared_capabilities_check', 'llm_model_t_declared_capabilities_check'),
+            ('llm_model_t', 'llm_model_catalog_t_aggregate_version_check', 'llm_model_t_aggregate_version_check'),
+            ('llm_model_registration_t', 'llm_model_registration_t_host_id_model_catalog_id_fkey', 'llm_model_registration_t_host_id_model_id_fkey'),
+            ('llm_model_registration_t', 'llm_model_registration_t_host_id_model_catalog_id_environme_key', 'llm_model_registration_t_host_id_model_id_environment_key')
+        ) AS names(table_name, old_name, new_name)
+    LOOP
+        IF EXISTS (
+            SELECT 1
+              FROM pg_constraint constraint_entry
+              JOIN pg_class relation ON relation.oid = constraint_entry.conrelid
+              JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+             WHERE namespace.nspname = current_schema()
+               AND relation.relname = constraint_rename.table_name
+               AND constraint_entry.conname = constraint_rename.old_name
+        ) THEN
+            IF EXISTS (
+                SELECT 1
+                  FROM pg_constraint constraint_entry
+                  JOIN pg_class relation ON relation.oid = constraint_entry.conrelid
+                  JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+                 WHERE namespace.nspname = current_schema()
+                   AND relation.relname = constraint_rename.table_name
+                   AND constraint_entry.conname = constraint_rename.new_name
+            ) THEN
+                RAISE EXCEPTION 'cannot rename constraint %: % already exists',
+                    constraint_rename.old_name, constraint_rename.new_name;
+            END IF;
+            EXECUTE format(
+                'ALTER TABLE %I RENAME CONSTRAINT %I TO %I',
+                constraint_rename.table_name,
+                constraint_rename.old_name,
+                constraint_rename.new_name
+            );
+        END IF;
+    END LOOP;
+
+
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'llm_model_t'
+           AND column_name = 'model_id'
+    ) OR NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'llm_model_registration_t'
+           AND column_name = 'model_id'
+    ) THEN
+        RAISE EXCEPTION 'LLM model rename migration is incomplete';
+    END IF;
+END
+$migration$;
+
+COMMIT;
+-- END INLINED patch_20260721_01_llm_model_rename.sql
 
 
 -- create a view to simplify the foreign key relationship.
