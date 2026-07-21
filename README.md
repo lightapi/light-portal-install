@@ -70,6 +70,39 @@ cd "$HOME/.light-portal"
 ./install.sh stop
 ```
 
+## Refresh runtime assets
+
+To replace the installed hybrid service JARs, portal UI, signin UI, and
+`events.json` with the current assets from the CDN, stop the stack, refresh the
+assets, and start it again:
+
+```bash
+cd "$HOME/.light-portal"
+./install.sh stop
+./install.sh assets
+./install.sh start
+```
+
+The `assets` command downloads and replaces these release archives regardless
+of whether the destination directories already contain files:
+
+```text
+hybrid-command.zip
+hybrid-query.zip
+lightapi.zip
+signin.zip
+events.zip
+```
+
+This procedure preserves the existing Docker volumes and database. For a
+checked-out repository, run the same commands from the repository root. To use
+a different asset host, set `LIGHT_PORTAL_ASSET_BASE_URL` on the `assets`
+command:
+
+```bash
+LIGHT_PORTAL_ASSET_BASE_URL=https://example.com ./install.sh assets
+```
+
 ## Reinstall from scratch
 
 The following procedure permanently deletes the existing PostgreSQL data,
