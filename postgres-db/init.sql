@@ -112,7 +112,7 @@ DROP TABLE IF EXISTS llm_provider_credential_t CASCADE;
 DROP TABLE IF EXISTS llm_provider_deployment_t CASCADE;
 DROP TABLE IF EXISTS llm_provider_account_t CASCADE;
 DROP TABLE IF EXISTS llm_model_registration_t CASCADE;
-DROP TABLE IF EXISTS llm_model_catalog_t CASCADE;
+DROP TABLE IF EXISTS llm_model_t CASCADE;
 
 DROP TABLE IF EXISTS audit_log_t CASCADE;
 
@@ -5966,9 +5966,9 @@ COMMIT;
 -- BEGIN INLINED patch_20260719_01_llm_control_plane.sql
 BEGIN;
 
-CREATE TABLE IF NOT EXISTS llm_model_catalog_t (
+CREATE TABLE IF NOT EXISTS llm_model_t (
     host_id UUID NOT NULL,
-    model_catalog_id UUID NOT NULL,
+    model_id UUID NOT NULL,
     provider_type VARCHAR(32) NOT NULL,
     physical_model_id VARCHAR(255) NOT NULL,
     model_family VARCHAR(126) NOT NULL,
@@ -5983,7 +5983,7 @@ CREATE TABLE IF NOT EXISTS llm_model_catalog_t (
     active BOOLEAN NOT NULL DEFAULT TRUE,
     update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
-    PRIMARY KEY(host_id, model_catalog_id),
+    PRIMARY KEY(host_id, model_id),
     FOREIGN KEY(host_id) REFERENCES host_t(host_id) ON DELETE CASCADE,
     UNIQUE(host_id, provider_type, physical_model_id),
     CHECK(lifecycle_status IN ('DRAFT','ACTIVE','DEPRECATED','RETIRED'))
@@ -5992,7 +5992,7 @@ CREATE TABLE IF NOT EXISTS llm_model_catalog_t (
 CREATE TABLE IF NOT EXISTS llm_model_registration_t (
     host_id UUID NOT NULL,
     model_registration_id UUID NOT NULL,
-    model_catalog_id UUID NOT NULL,
+    model_id UUID NOT NULL,
     environment VARCHAR(32) NOT NULL,
     regions JSONB NOT NULL DEFAULT '[]'::jsonb CHECK(jsonb_typeof(regions) = 'array'),
     data_classifications JSONB NOT NULL DEFAULT '[]'::jsonb CHECK(jsonb_typeof(data_classifications) = 'array'),
@@ -6004,8 +6004,8 @@ CREATE TABLE IF NOT EXISTS llm_model_registration_t (
     update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
     PRIMARY KEY(host_id, model_registration_id),
     FOREIGN KEY(host_id) REFERENCES host_t(host_id) ON DELETE CASCADE,
-    FOREIGN KEY(host_id, model_catalog_id) REFERENCES llm_model_catalog_t(host_id, model_catalog_id) ON DELETE RESTRICT,
-    UNIQUE(host_id, model_catalog_id, environment),
+    FOREIGN KEY(host_id, model_id) REFERENCES llm_model_t(host_id, model_id) ON DELETE RESTRICT,
+    UNIQUE(host_id, model_id, environment),
     CHECK(lifecycle_status IN ('DRAFT','ACTIVE','SUSPENDED','RETIRED'))
 );
 
