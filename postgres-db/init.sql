@@ -5960,8 +5960,10 @@ FOR EACH ROW EXECUTE FUNCTION protect_event_replay_barrier_release_v1();
 
 COMMIT;
 
--- PDB-1 authoritative LLM control-plane schema. Keeping the additive patch as
--- the single definition prevents clean-install and upgrade DDL from drifting.
+-- PDB-1 authoritative LLM control-plane schema. The upgrade patches are
+-- inlined here so fresh-install/container initialization is self-contained.
+-- Keep the marked blocks synchronized with their corresponding upgrade files.
+-- BEGIN INLINED patch_20260719_01_llm_control_plane.sql
 BEGIN;
 
 CREATE TABLE IF NOT EXISTS llm_model_catalog_t (
@@ -6365,6 +6367,9 @@ CREATE INDEX IF NOT EXISTS llm_publication_current_idx
     WHERE active IS TRUE;
 
 COMMIT;
+-- END INLINED patch_20260719_01_llm_control_plane.sql
+
+-- BEGIN INLINED patch_20260719_03_llm_production_integration.sql
 -- DIST-1 / LA-1: distinguish public aliases from operator-approved,
 -- agent-bound compatibility aliases. Additive and idempotent.
 BEGIN;
@@ -6394,6 +6399,7 @@ CREATE INDEX IF NOT EXISTS llm_public_alias_bound_agent_idx
     WHERE alias_visibility = 'INTERNAL_LEGACY' AND active IS TRUE;
 
 COMMIT;
+-- END INLINED patch_20260719_03_llm_production_integration.sql
 
 
 -- create a view to simplify the foreign key relationship.
