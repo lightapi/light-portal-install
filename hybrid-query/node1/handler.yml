@@ -55,6 +55,7 @@ handlers:
   # - com.example.validator.CustomizedValidator@custvalidator
   # Framework endpoint handlers
   - com.networknt.health.HealthGetHandler@health
+  - net.lightapi.portal.db.replay.EventReplayStatusGetHandler@eventReplayStatus
   - com.networknt.info.ServerInfoGetHandler@info
   # - com.networknt.metrics.prometheus.PrometheusGetHandler@getprometheus
 
@@ -82,6 +83,11 @@ paths:
     method: 'get'
     exec:
       - health
+
+  - path: '/adm/event-replay/status'
+    method: 'get'
+    exec:
+      - eventReplayStatus
 
   # In most case, the /server/info endpoint shouldn't be exposed. If it is, then it must be protected by OAuth 2.0 or Basic Auth
   - path: '/server/info'
