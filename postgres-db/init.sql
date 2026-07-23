@@ -6494,6 +6494,10 @@ CREATE INDEX IF NOT EXISTS event_failure_open_scope_v2_idx
     ON event_failure_scope_t(
         host_id, projection_name, consumer_group, scope_type, scope_key
     ) WHERE status = 'OPEN';
+CREATE INDEX IF NOT EXISTS event_failure_open_command_scope_v2_idx
+    ON event_failure_scope_t(
+        host_id, scope_type, scope_key, projection_name, consumer_group, failure_id
+    ) WHERE status = 'OPEN';
 CREATE INDEX IF NOT EXISTS event_repair_failure_v2_idx
     ON event_repair_t(host_id, failure_id, status, requested_ts DESC);
 CREATE INDEX IF NOT EXISTS event_repair_status_v2_idx
