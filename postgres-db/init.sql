@@ -5958,6 +5958,560 @@ CREATE TRIGGER event_replay_barrier_release_guard_v1
 BEFORE UPDATE ON event_replay_barrier_t
 FOR EACH ROW EXECUTE FUNCTION protect_event_replay_barrier_release_v1();
 
+
+-- Event replay redesign R1: additive repair persistence and immutable
+-- database-plain payload bytes. Existing encrypted/object rows remain valid.
+
+ALTER TABLE event_store_t
+    ADD COLUMN IF NOT EXISTS policy_registry_version VARCHAR(64)
+        NOT NULL DEFAULT 'event-replay-policy-v1',
+    ADD COLUMN IF NOT EXISTS repair_schema_version VARCHAR(64);
+ALTER TABLE event_store_t
+    DROP CONSTRAINT IF EXISTS event_store_replay_versions_v2_ck,
+    ADD CONSTRAINT event_store_replay_versions_v2_ck CHECK(
+        length(btrim(policy_registry_version)) > 0
+        AND (repair_schema_version IS NULL OR length(btrim(repair_schema_version)) > 0)
+    ) NOT VALID;
+
+ALTER TABLE outbox_message_t
+    ADD COLUMN IF NOT EXISTS policy_registry_version VARCHAR(64)
+        NOT NULL DEFAULT 'event-replay-policy-v1',
+    ADD COLUMN IF NOT EXISTS repair_schema_version VARCHAR(64);
+ALTER TABLE outbox_message_t
+    DROP CONSTRAINT IF EXISTS outbox_message_replay_versions_v2_ck,
+    ADD CONSTRAINT outbox_message_replay_versions_v2_ck CHECK(
+        length(btrim(policy_registry_version)) > 0
+        AND (repair_schema_version IS NULL OR length(btrim(repair_schema_version)) > 0)
+    ) NOT VALID;
+
+ALTER TABLE event_store_t VALIDATE CONSTRAINT event_store_replay_versions_v2_ck;
+ALTER TABLE outbox_message_t VALIDATE CONSTRAINT outbox_message_replay_versions_v2_ck;
+
+ALTER TABLE event_failure_transaction_t
+    ADD COLUMN IF NOT EXISTS policy_registry_version VARCHAR(64)
+        NOT NULL DEFAULT 'event-replay-policy-v1',
+    ADD COLUMN IF NOT EXISTS resolution_code VARCHAR(64),
+    ADD COLUMN IF NOT EXISTS resolved_by_repair_id UUID;
+ALTER TABLE event_failure_transaction_t
+    DROP CONSTRAINT IF EXISTS event_failure_transaction_policy_version_v2_ck,
+    DROP CONSTRAINT IF EXISTS event_failure_transaction_resolution_v2_ck,
+    ADD CONSTRAINT event_failure_transaction_policy_version_v2_ck CHECK(
+        length(btrim(policy_registry_version)) > 0
+    ),
+    ADD CONSTRAINT event_failure_transaction_resolution_v2_ck CHECK(
+        (resolution_code IS NULL AND resolved_by_repair_id IS NULL)
+        OR (status = 'RESOLVED'
+            AND resolution_code = 'RESOLVED_BY_EXACT_REPLAY'
+            AND resolved_by_repair_id IS NULL)
+        OR (status = 'RESOLVED'
+            AND resolution_code = 'RESOLVED_BY_REPAIR'
+            AND resolved_by_repair_id IS NOT NULL)
+    );
+
+ALTER TABLE event_failure_event_t
+    ADD COLUMN IF NOT EXISTS payload_plain BYTEA,
+    ADD COLUMN IF NOT EXISTS event_schema_version VARCHAR(64),
+    ADD COLUMN IF NOT EXISTS policy_registry_version VARCHAR(64)
+        NOT NULL DEFAULT 'event-replay-policy-v1',
+    ADD COLUMN IF NOT EXISTS repair_schema_version VARCHAR(64);
+ALTER TABLE event_failure_event_t
+    DROP CONSTRAINT IF EXISTS event_failure_event_payload_storage_ck,
+    DROP CONSTRAINT IF EXISTS event_failure_event_crypto_ck,
+    DROP CONSTRAINT IF EXISTS event_failure_event_bytes_ck,
+    DROP CONSTRAINT IF EXISTS event_failure_event_versions_v2_ck,
+    ADD CONSTRAINT event_failure_event_payload_storage_ck CHECK(
+        (payload_storage = 'DATABASE_PLAIN'
+            AND payload_plain IS NOT NULL
+            AND octet_length(payload_plain) > 0
+            AND payload_digest = encode(sha256(payload_plain), 'hex')
+            AND payload_ciphertext IS NULL
+            AND payload_object_uri IS NULL
+            AND payload_object_version IS NULL
+            AND payload_key_id IS NULL
+            AND payload_wrapped_key IS NULL
+            AND payload_iv IS NULL
+            AND payload_deleted_ts IS NULL
+            AND payload_deleted_reason IS NULL)
+        OR (payload_storage = 'DATABASE'
+            AND payload_plain IS NULL
+            AND payload_ciphertext IS NOT NULL
+            AND payload_object_uri IS NULL
+            AND payload_object_version IS NULL
+            AND payload_key_id IS NOT NULL
+            AND payload_wrapped_key IS NOT NULL
+            AND payload_iv IS NOT NULL
+            AND payload_deleted_ts IS NULL
+            AND payload_deleted_reason IS NULL)
+        OR (payload_storage = 'OBJECT'
+            AND payload_plain IS NULL
+            AND payload_ciphertext IS NULL
+            AND payload_object_uri IS NOT NULL
+            AND payload_object_version IS NOT NULL
+            AND payload_key_id IS NOT NULL
+            AND payload_wrapped_key IS NOT NULL
+            AND payload_iv IS NOT NULL
+            AND payload_deleted_ts IS NULL
+            AND payload_deleted_reason IS NULL)
+        OR (payload_storage = 'DELETED'
+            AND payload_plain IS NULL
+            AND payload_ciphertext IS NULL
+            AND payload_object_uri IS NULL
+            AND payload_object_version IS NULL
+            AND payload_key_id IS NULL
+            AND payload_wrapped_key IS NULL
+            AND payload_iv IS NULL
+            AND payload_deleted_ts IS NOT NULL
+            AND length(btrim(payload_deleted_reason)) > 0)
+    ),
+    ADD CONSTRAINT event_failure_event_crypto_ck CHECK(
+        payload_storage IN ('DATABASE_PLAIN', 'DELETED')
+        OR (octet_length(payload_iv) = 12 AND octet_length(payload_wrapped_key) > 0)
+    ),
+    ADD CONSTRAINT event_failure_event_bytes_ck CHECK(
+        encrypted_payload_bytes >= 0 AND decrypted_payload_bytes >= 0
+        AND (payload_storage <> 'DATABASE_PLAIN'
+             OR (encrypted_payload_bytes = 0
+                 AND decrypted_payload_bytes = octet_length(payload_plain)))
+    ),
+    ADD CONSTRAINT event_failure_event_versions_v2_ck CHECK(
+        length(btrim(policy_registry_version)) > 0
+        AND (event_schema_version IS NULL OR length(btrim(event_schema_version)) > 0)
+        AND (repair_schema_version IS NULL OR length(btrim(repair_schema_version)) > 0)
+    );
+
+ALTER TABLE event_replay_request_t
+    ADD COLUMN IF NOT EXISTS repair_schema_version VARCHAR(64);
+ALTER TABLE event_replay_request_t
+    DROP CONSTRAINT IF EXISTS event_replay_request_repair_schema_v2_ck,
+    ADD CONSTRAINT event_replay_request_repair_schema_v2_ck CHECK(
+        repair_schema_version IS NULL OR length(btrim(repair_schema_version)) > 0
+    );
+
+CREATE OR REPLACE FUNCTION event_replay_changed_fields_valid_v2(fields JSONB)
+RETURNS boolean LANGUAGE sql IMMUTABLE AS '
+    SELECT jsonb_typeof(fields) = ''array''
+       AND jsonb_array_length(fields) BETWEEN 1 AND 64
+       AND NOT EXISTS (
+            SELECT 1
+              FROM jsonb_array_elements(fields) AS entry(value)
+             WHERE jsonb_typeof(value) <> ''string''
+                OR length(btrim(value #>> ''{}'')) NOT BETWEEN 1 AND 255
+       )
+';
+
+CREATE TABLE IF NOT EXISTS event_repair_t (
+    host_id                          UUID NOT NULL,
+    repair_id                        UUID NOT NULL,
+    failure_id                       UUID NOT NULL,
+    status                           VARCHAR(32) NOT NULL DEFAULT 'AWAITING_APPROVAL',
+    reason                           VARCHAR(2048) NOT NULL,
+    policy_registry_version          VARCHAR(64) NOT NULL,
+    repair_schema_version            VARCHAR(64) NOT NULL,
+    original_transaction_fingerprint VARCHAR(64) NOT NULL,
+    corrected_transaction_fingerprint VARCHAR(64) NOT NULL,
+    changed_event_count              INTEGER NOT NULL,
+    requested_by                     VARCHAR(255) NOT NULL,
+    requested_ts                     TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    decision_by                      VARCHAR(255),
+    decision_ts                      TIMESTAMPTZ,
+    approved_by                      VARCHAR(255),
+    approved_ts                      TIMESTAMPTZ,
+    applied_by                       VARCHAR(255),
+    applied_ts                       TIMESTAMPTZ,
+    completed_ts                     TIMESTAMPTZ,
+    created_ts                       TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_ts                       TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT event_repair_pk PRIMARY KEY(host_id, repair_id),
+    CONSTRAINT event_repair_failure_fk FOREIGN KEY(host_id, failure_id)
+        REFERENCES event_failure_transaction_t(host_id, failure_id) ON DELETE RESTRICT,
+    CONSTRAINT event_repair_target_uk UNIQUE(host_id, repair_id, failure_id),
+    CONSTRAINT event_repair_status_ck CHECK(status IN (
+        'AWAITING_APPROVAL', 'APPROVED', 'APPLIED', 'CANCELLED', 'REJECTED'
+    )),
+    CONSTRAINT event_repair_reason_ck CHECK(length(btrim(reason)) > 0),
+    CONSTRAINT event_repair_versions_ck CHECK(
+        length(btrim(policy_registry_version)) > 0
+        AND length(btrim(repair_schema_version)) > 0
+    ),
+    CONSTRAINT event_repair_fingerprints_ck CHECK(
+        original_transaction_fingerprint ~ '^[0-9a-f]{64}$'
+        AND corrected_transaction_fingerprint ~ '^[0-9a-f]{64}$'
+        AND corrected_transaction_fingerprint <> original_transaction_fingerprint
+    ),
+    CONSTRAINT event_repair_count_ck CHECK(changed_event_count > 0),
+    CONSTRAINT event_repair_actor_pairs_ck CHECK(
+        (decision_by IS NULL) = (decision_ts IS NULL)
+        AND (approved_by IS NULL) = (approved_ts IS NULL)
+        AND (applied_by IS NULL) = (applied_ts IS NULL)
+        AND (decision_by IS NULL OR decision_by <> requested_by)
+        AND (approved_by IS NULL OR approved_by <> requested_by)
+    ),
+    CONSTRAINT event_repair_lifecycle_ck CHECK(
+        (status = 'AWAITING_APPROVAL'
+            AND decision_by IS NULL AND approved_by IS NULL
+            AND applied_by IS NULL AND completed_ts IS NULL)
+        OR (status = 'APPROVED'
+            AND decision_by IS NOT NULL AND approved_by = decision_by
+            AND approved_ts = decision_ts
+            AND applied_by IS NULL AND completed_ts IS NULL)
+        OR (status = 'APPLIED'
+            AND decision_by IS NOT NULL AND approved_by = decision_by
+            AND approved_ts = decision_ts
+            AND applied_by IS NOT NULL AND completed_ts = applied_ts)
+        OR (status = 'REJECTED'
+            AND decision_by IS NOT NULL AND approved_by IS NULL
+            AND applied_by IS NULL AND completed_ts = decision_ts)
+        OR (status = 'CANCELLED'
+            AND applied_by IS NULL AND completed_ts IS NOT NULL
+            AND ((decision_by IS NULL AND approved_by IS NULL)
+                 OR (decision_by IS NOT NULL AND approved_by = decision_by
+                     AND approved_ts = decision_ts)))
+    ),
+    CONSTRAINT event_repair_times_ck CHECK(
+        created_ts >= requested_ts
+        AND updated_ts >= requested_ts
+        AND (decision_ts IS NULL OR decision_ts >= requested_ts)
+        AND (approved_ts IS NULL OR approved_ts >= requested_ts)
+        AND (applied_ts IS NULL OR applied_ts >= approved_ts)
+        AND (completed_ts IS NULL OR completed_ts >= requested_ts)
+    )
+);
+
+DO $event_repair_parent_keys_v2$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conrelid = 'event_failure_transaction_t'::regclass
+           AND conname = 'event_failure_transaction_scope_parent_v2_uk'
+    ) THEN
+        ALTER TABLE event_failure_transaction_t
+            ADD CONSTRAINT event_failure_transaction_scope_parent_v2_uk UNIQUE(
+                host_id, failure_id, projection_name, consumer_group, status
+            );
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conrelid = 'event_failure_event_t'::regclass
+           AND conname = 'event_failure_event_repair_member_v2_uk'
+    ) THEN
+        ALTER TABLE event_failure_event_t
+            ADD CONSTRAINT event_failure_event_repair_member_v2_uk UNIQUE(
+                host_id, failure_id, event_ordinal, event_id, payload_digest
+            );
+    END IF;
+END
+$event_repair_parent_keys_v2$;
+
+CREATE TABLE IF NOT EXISTS event_failure_scope_t (
+    host_id          UUID NOT NULL,
+    failure_id       UUID NOT NULL,
+    projection_name  VARCHAR(128) NOT NULL,
+    consumer_group   VARCHAR(255) NOT NULL,
+    scope_type       VARCHAR(32) NOT NULL,
+    scope_key        VARCHAR(1024) NOT NULL,
+    status           VARCHAR(16) NOT NULL,
+    created_ts       TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT event_failure_scope_pk PRIMARY KEY(
+        host_id, failure_id, scope_type, scope_key
+    ),
+    -- Projection and consumer identity are immutable; this cascade is for status only.
+    CONSTRAINT event_failure_scope_parent_fk FOREIGN KEY(
+        host_id, failure_id, projection_name, consumer_group, status
+    ) REFERENCES event_failure_transaction_t(
+        host_id, failure_id, projection_name, consumer_group, status
+    ) ON UPDATE CASCADE ON DELETE RESTRICT,
+    CONSTRAINT event_failure_scope_type_ck CHECK(scope_type IN (
+        'GRAPH_ROOT', 'AGGREGATE', 'HOST', 'DB_PARTITION',
+        'KAFKA_PARTITION', 'PROJECTION'
+    )),
+    CONSTRAINT event_failure_scope_key_ck CHECK(length(btrim(scope_key)) > 0),
+    CONSTRAINT event_failure_scope_status_ck CHECK(status IN ('OPEN', 'RESOLVED', 'WAIVED'))
+);
+
+CREATE TABLE IF NOT EXISTS event_repair_event_t (
+    host_id                    UUID NOT NULL,
+    repair_id                  UUID NOT NULL,
+    failure_id                 UUID NOT NULL,
+    event_ordinal              INTEGER NOT NULL,
+    original_event_id          VARCHAR(255) NOT NULL,
+    original_payload_digest    VARCHAR(64) NOT NULL,
+    corrected_payload_format   VARCHAR(32) NOT NULL,
+    corrected_payload_storage  VARCHAR(32) NOT NULL,
+    corrected_payload_digest   VARCHAR(64) NOT NULL,
+    corrected_payload_plain    BYTEA,
+    corrected_payload_ciphertext BYTEA,
+    corrected_payload_object_uri VARCHAR(2048),
+    corrected_payload_object_version VARCHAR(255),
+    corrected_payload_key_id   VARCHAR(255),
+    corrected_payload_wrapped_key BYTEA,
+    corrected_payload_iv       BYTEA,
+    corrected_payload_bytes    BIGINT NOT NULL,
+    corrected_event_schema_version VARCHAR(64) NOT NULL,
+    changed_field_names        JSONB NOT NULL,
+    created_ts                 TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT event_repair_event_pk PRIMARY KEY(host_id, repair_id, event_ordinal),
+    CONSTRAINT event_repair_event_repair_fk FOREIGN KEY(host_id, repair_id, failure_id)
+        REFERENCES event_repair_t(host_id, repair_id, failure_id) ON DELETE RESTRICT,
+    CONSTRAINT event_repair_event_original_fk FOREIGN KEY(
+        host_id, failure_id, event_ordinal, original_event_id, original_payload_digest
+    ) REFERENCES event_failure_event_t(
+        host_id, failure_id, event_ordinal, event_id, payload_digest
+    ) ON DELETE RESTRICT,
+    CONSTRAINT event_repair_event_ordinal_ck CHECK(event_ordinal >= 0),
+    CONSTRAINT event_repair_event_digests_ck CHECK(
+        original_payload_digest ~ '^[0-9a-f]{64}$'
+        AND corrected_payload_digest ~ '^[0-9a-f]{64}$'
+        AND corrected_payload_digest <> original_payload_digest
+    ),
+    CONSTRAINT event_repair_event_schema_ck CHECK(
+        length(btrim(corrected_event_schema_version)) > 0
+    ),
+    CONSTRAINT event_repair_event_changed_fields_ck CHECK(
+        event_replay_changed_fields_valid_v2(changed_field_names)
+    ),
+    CONSTRAINT event_repair_event_payload_storage_ck CHECK(
+        (corrected_payload_storage = 'DATABASE_PLAIN'
+            AND corrected_payload_plain IS NOT NULL
+            AND octet_length(corrected_payload_plain) = corrected_payload_bytes
+            AND corrected_payload_bytes > 0
+            AND corrected_payload_digest = encode(sha256(corrected_payload_plain), 'hex')
+            AND corrected_payload_ciphertext IS NULL
+            AND corrected_payload_object_uri IS NULL
+            AND corrected_payload_object_version IS NULL
+            AND corrected_payload_key_id IS NULL
+            AND corrected_payload_wrapped_key IS NULL
+            AND corrected_payload_iv IS NULL)
+    )
+);
+
+COMMENT ON COLUMN event_repair_event_t.corrected_payload_storage IS
+    'R1 permits DATABASE_PLAIN only; encrypted/object columns are reserved until stable content and storage digests are modeled separately';
+
+ALTER TABLE event_replay_item_t
+    ADD COLUMN IF NOT EXISTS repair_id UUID;
+ALTER TABLE event_replay_item_t
+    DROP CONSTRAINT IF EXISTS event_replay_item_repair_target_v2_fk,
+    ADD CONSTRAINT event_replay_item_repair_target_v2_fk FOREIGN KEY(
+        host_id, repair_id, failure_id
+    ) REFERENCES event_repair_t(host_id, repair_id, failure_id) ON DELETE RESTRICT;
+
+ALTER TABLE event_failure_transaction_t
+    DROP CONSTRAINT IF EXISTS event_failure_transaction_resolution_repair_v2_fk,
+    ADD CONSTRAINT event_failure_transaction_resolution_repair_v2_fk FOREIGN KEY(
+        host_id, resolved_by_repair_id, failure_id
+    ) REFERENCES event_repair_t(host_id, repair_id, failure_id) ON DELETE RESTRICT;
+
+CREATE OR REPLACE FUNCTION validate_event_repair_members_v2()
+RETURNS trigger LANGUAGE plpgsql AS '
+DECLARE
+    v_host UUID;
+    v_repair UUID;
+    v_expected INTEGER;
+    v_actual INTEGER;
+BEGIN
+    v_host := COALESCE(NEW.host_id, OLD.host_id);
+    v_repair := COALESCE(NEW.repair_id, OLD.repair_id);
+    SELECT changed_event_count INTO v_expected
+      FROM event_repair_t
+     WHERE host_id = v_host AND repair_id = v_repair;
+    IF v_expected IS NULL THEN RETURN NULL; END IF;
+    SELECT count(*) INTO v_actual
+      FROM event_repair_event_t
+     WHERE host_id = v_host AND repair_id = v_repair;
+    IF v_actual <> v_expected THEN
+        RAISE EXCEPTION ''repair % member count %, expected %'', v_repair, v_actual, v_expected;
+    END IF;
+    RETURN NULL;
+END ';
+
+DROP TRIGGER IF EXISTS event_repair_member_count_parent_v2 ON event_repair_t;
+CREATE CONSTRAINT TRIGGER event_repair_member_count_parent_v2
+AFTER INSERT OR UPDATE OF changed_event_count ON event_repair_t
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION validate_event_repair_members_v2();
+DROP TRIGGER IF EXISTS event_repair_member_count_child_v2 ON event_repair_event_t;
+CREATE CONSTRAINT TRIGGER event_repair_member_count_child_v2
+AFTER INSERT OR UPDATE OR DELETE ON event_repair_event_t
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION validate_event_repair_members_v2();
+
+CREATE OR REPLACE FUNCTION protect_event_repair_v2()
+RETURNS trigger LANGUAGE plpgsql AS '
+BEGIN
+    IF TG_OP = ''INSERT'' THEN
+        IF NEW.status <> ''AWAITING_APPROVAL'' THEN
+            RAISE EXCEPTION ''repair must begin awaiting approval'';
+        END IF;
+        RETURN NEW;
+    END IF;
+    IF TG_OP = ''DELETE''
+       OR NEW.host_id IS DISTINCT FROM OLD.host_id
+       OR NEW.repair_id IS DISTINCT FROM OLD.repair_id
+       OR NEW.failure_id IS DISTINCT FROM OLD.failure_id
+       OR NEW.reason IS DISTINCT FROM OLD.reason
+       OR NEW.policy_registry_version IS DISTINCT FROM OLD.policy_registry_version
+       OR NEW.repair_schema_version IS DISTINCT FROM OLD.repair_schema_version
+       OR NEW.original_transaction_fingerprint IS DISTINCT FROM OLD.original_transaction_fingerprint
+       OR NEW.corrected_transaction_fingerprint IS DISTINCT FROM OLD.corrected_transaction_fingerprint
+       OR NEW.changed_event_count IS DISTINCT FROM OLD.changed_event_count
+       OR NEW.requested_by IS DISTINCT FROM OLD.requested_by
+       OR NEW.requested_ts IS DISTINCT FROM OLD.requested_ts
+       OR NEW.created_ts IS DISTINCT FROM OLD.created_ts
+       OR NEW.updated_ts < OLD.updated_ts
+       OR OLD.status IN (''APPLIED'', ''CANCELLED'', ''REJECTED'')
+       OR (OLD.status = ''AWAITING_APPROVAL''
+           AND NEW.status NOT IN (''APPROVED'', ''CANCELLED'', ''REJECTED''))
+       OR (OLD.status = ''APPROVED''
+           AND NEW.status NOT IN (''APPLIED'', ''CANCELLED'')) THEN
+        RAISE EXCEPTION ''repair identity, evidence, and lifecycle are immutable'';
+    END IF;
+    RETURN NEW;
+END ';
+
+DROP TRIGGER IF EXISTS event_repair_guard_v2 ON event_repair_t;
+CREATE TRIGGER event_repair_guard_v2
+BEFORE INSERT OR UPDATE OR DELETE ON event_repair_t
+FOR EACH ROW EXECUTE FUNCTION protect_event_repair_v2();
+
+CREATE OR REPLACE FUNCTION protect_event_repair_event_v2()
+RETURNS trigger LANGUAGE plpgsql AS '
+BEGIN
+    IF TG_OP <> ''INSERT'' THEN
+        RAISE EXCEPTION ''repair event bytes and audit summary are append-only'';
+    END IF;
+    RETURN NEW;
+END ';
+
+DROP TRIGGER IF EXISTS event_repair_event_guard_v2 ON event_repair_event_t;
+CREATE TRIGGER event_repair_event_guard_v2
+BEFORE UPDATE OR DELETE ON event_repair_event_t
+FOR EACH ROW EXECUTE FUNCTION protect_event_repair_event_v2();
+
+CREATE OR REPLACE FUNCTION protect_event_failure_event_v1()
+RETURNS trigger LANGUAGE plpgsql AS '
+BEGIN
+    IF TG_OP = ''DELETE'' AND event_replay_retention_delete_enabled_v1() THEN RETURN OLD; END IF;
+    IF TG_OP = ''DELETE'' THEN
+        RAISE EXCEPTION ''archived failure event rows are immutable'';
+    END IF;
+    IF OLD.payload_storage = ''DELETED''
+       OR NEW.host_id IS DISTINCT FROM OLD.host_id
+       OR NEW.failure_id IS DISTINCT FROM OLD.failure_id
+       OR NEW.event_ordinal IS DISTINCT FROM OLD.event_ordinal
+       OR NEW.event_id IS DISTINCT FROM OLD.event_id
+       OR NEW.event_type IS DISTINCT FROM OLD.event_type
+       OR NEW.aggregate_id IS DISTINCT FROM OLD.aggregate_id
+       OR NEW.aggregate_type IS DISTINCT FROM OLD.aggregate_type
+       OR NEW.aggregate_version IS DISTINCT FROM OLD.aggregate_version
+       OR NEW.root_instance_id IS DISTINCT FROM OLD.root_instance_id
+       OR NEW.graph_revision IS DISTINCT FROM OLD.graph_revision
+       OR NEW.clone_request_id IS DISTINCT FROM OLD.clone_request_id
+       OR NEW.source_processor IS DISTINCT FROM OLD.source_processor
+       OR NEW.source_topic IS DISTINCT FROM OLD.source_topic
+       OR NEW.source_partition IS DISTINCT FROM OLD.source_partition
+       OR NEW.source_offset IS DISTINCT FROM OLD.source_offset
+       OR NEW.source_key IS DISTINCT FROM OLD.source_key
+       OR NEW.source_headers IS DISTINCT FROM OLD.source_headers
+       OR NEW.payload_format IS DISTINCT FROM OLD.payload_format
+       OR NEW.payload_digest IS DISTINCT FROM OLD.payload_digest
+       OR NEW.event_schema_version IS DISTINCT FROM OLD.event_schema_version
+       OR NEW.policy_registry_version IS DISTINCT FROM OLD.policy_registry_version
+       OR NEW.repair_schema_version IS DISTINCT FROM OLD.repair_schema_version
+       OR NEW.encrypted_payload_bytes IS DISTINCT FROM OLD.encrypted_payload_bytes
+       OR NEW.decrypted_payload_bytes IS DISTINCT FROM OLD.decrypted_payload_bytes
+       OR NEW.sensitive_payload IS DISTINCT FROM OLD.sensitive_payload
+       OR NEW.created_ts IS DISTINCT FROM OLD.created_ts
+       OR NEW.payload_storage <> ''DELETED''
+       OR NEW.payload_plain IS NOT NULL
+       OR NEW.payload_ciphertext IS NOT NULL
+       OR NEW.payload_object_uri IS NOT NULL
+       OR NEW.payload_object_version IS NOT NULL
+       OR NEW.payload_key_id IS NOT NULL
+       OR NEW.payload_wrapped_key IS NOT NULL
+       OR NEW.payload_iv IS NOT NULL
+       OR NEW.payload_deleted_ts IS NULL
+       OR NEW.payload_deleted_reason IS NULL
+       OR length(btrim(NEW.payload_deleted_reason)) = 0 THEN
+        RAISE EXCEPTION ''archived failure event rows are immutable except payload deletion'';
+    END IF;
+    RETURN NEW;
+END ';
+
+DROP TRIGGER IF EXISTS event_failure_event_guard_v1 ON event_failure_event_t;
+CREATE TRIGGER event_failure_event_guard_v1
+BEFORE UPDATE OR DELETE ON event_failure_event_t
+FOR EACH ROW EXECUTE FUNCTION protect_event_failure_event_v1();
+
+CREATE OR REPLACE FUNCTION event_replay_reconciliation_enabled_v2()
+RETURNS boolean LANGUAGE sql STABLE AS '
+    SELECT COALESCE(current_setting(''lightapi.event_replay_reconciliation'', TRUE), '''') = ''on''
+';
+
+CREATE OR REPLACE FUNCTION protect_event_failure_identity_v1()
+RETURNS trigger LANGUAGE plpgsql AS '
+BEGIN
+    IF NEW.host_id IS DISTINCT FROM OLD.host_id
+       OR NEW.failure_id IS DISTINCT FROM OLD.failure_id
+       OR NEW.projection_name IS DISTINCT FROM OLD.projection_name
+       OR NEW.consumer_group IS DISTINCT FROM OLD.consumer_group
+       OR NEW.first_source_processor IS DISTINCT FROM OLD.first_source_processor
+       OR NEW.original_transaction_id IS DISTINCT FROM OLD.original_transaction_id
+       OR NEW.content_fingerprint IS DISTINCT FROM OLD.content_fingerprint
+       OR NEW.event_count IS DISTINCT FROM OLD.event_count
+       OR NEW.encrypted_payload_bytes IS DISTINCT FROM OLD.encrypted_payload_bytes
+       OR NEW.decrypted_payload_bytes IS DISTINCT FROM OLD.decrypted_payload_bytes
+       OR NEW.dependency_scopes IS DISTINCT FROM OLD.dependency_scopes
+       OR NEW.policy_registry_version IS DISTINCT FROM OLD.policy_registry_version
+       OR NEW.first_failed_ts IS DISTINCT FROM OLD.first_failed_ts
+       OR NEW.created_ts IS DISTINCT FROM OLD.created_ts
+       OR NEW.failure_count < OLD.failure_count
+       OR NEW.last_failed_ts < OLD.last_failed_ts
+       OR (OLD.status <> ''OPEN'' AND (
+           NEW.status IS DISTINCT FROM OLD.status
+           OR NEW.resolved_ts IS DISTINCT FROM OLD.resolved_ts
+           OR NEW.resolved_by_request_id IS DISTINCT FROM OLD.resolved_by_request_id
+           OR NEW.resolution_code IS DISTINCT FROM OLD.resolution_code
+           OR NEW.resolved_by_repair_id IS DISTINCT FROM OLD.resolved_by_repair_id)
+           AND NOT (
+               OLD.status = ''RESOLVED''
+               AND NEW.status = ''OPEN''
+               AND event_replay_reconciliation_enabled_v2()
+               AND NEW.resolved_ts IS NULL
+               AND NEW.resolved_by_request_id IS NULL
+               AND NEW.resolution_code IS NULL
+               AND NEW.resolved_by_repair_id IS NULL)) THEN
+        RAISE EXCEPTION ''canonical failure identity and terminal resolution are immutable'';
+    END IF;
+    RETURN NEW;
+END ';
+
+DROP TRIGGER IF EXISTS event_failure_identity_guard_v1 ON event_failure_transaction_t;
+CREATE TRIGGER event_failure_identity_guard_v1
+BEFORE UPDATE ON event_failure_transaction_t
+FOR EACH ROW EXECUTE FUNCTION protect_event_failure_identity_v1();
+
+CREATE INDEX IF NOT EXISTS event_failure_open_scope_v2_idx
+    ON event_failure_scope_t(
+        host_id, projection_name, consumer_group, scope_type, scope_key
+    ) WHERE status = 'OPEN';
+CREATE INDEX IF NOT EXISTS event_repair_failure_v2_idx
+    ON event_repair_t(host_id, failure_id, status, requested_ts DESC);
+CREATE INDEX IF NOT EXISTS event_repair_status_v2_idx
+    ON event_repair_t(host_id, status, requested_ts DESC);
+
+REVOKE SELECT (payload_plain) ON event_failure_event_t FROM PUBLIC;
+REVOKE SELECT (corrected_payload_plain, corrected_payload_ciphertext,
+               corrected_payload_wrapped_key, corrected_payload_iv)
+    ON event_repair_event_t FROM PUBLIC;
+
+COMMENT ON COLUMN event_failure_event_t.payload_plain IS
+    'Immutable canonical replay bytes for DATABASE_PLAIN; digest exact stored bytes before parsing';
+COMMENT ON COLUMN event_repair_event_t.corrected_payload_plain IS
+    'Immutable corrected canonical bytes; never exposed by list/query APIs';
+COMMENT ON TABLE event_failure_scope_t IS
+    'Normalized failure scopes maintained by capture for indexed ordered-scope command guards';
+
+
 COMMIT;
 
 -- PDB-1 authoritative LLM control-plane schema. The upgrade patches are
