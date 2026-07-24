@@ -6456,6 +6456,7 @@ CREATE INDEX IF NOT EXISTS event_repair_status_v2_idx
     ON event_repair_t(host_id, status, requested_ts DESC);
 
 REVOKE SELECT (payload_plain) ON event_failure_event_t FROM PUBLIC;
+REVOKE SELECT (payload_plain) ON event_projection_deferred_t FROM PUBLIC;
 REVOKE SELECT (corrected_payload_plain, corrected_payload_ciphertext,
                corrected_payload_wrapped_key, corrected_payload_iv)
     ON event_repair_event_t FROM PUBLIC;
