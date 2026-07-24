@@ -4,9 +4,6 @@ CREATE DATABASE configserver;
 -- Enable pgvector extension
 CREATE EXTENSION IF NOT EXISTS vector;
 
-DROP TABLE IF EXISTS event_replay_rollout_audit_t CASCADE;
-DROP TABLE IF EXISTS event_replay_backfill_issue_t CASCADE;
-DROP TABLE IF EXISTS event_replay_backfill_checkpoint_t CASCADE;
 DROP TABLE IF EXISTS event_replay_retention_log_t CASCADE;
 DROP TABLE IF EXISTS event_replay_audit_t CASCADE;
 DROP TABLE IF EXISTS event_replay_action_request_t CASCADE;
@@ -4777,9 +4774,9 @@ CREATE TABLE IF NOT EXISTS agent_fixed_action_t(host_id UUID NOT NULL,fixed_acti
 
 BEGIN;
 
--- Event replay Phase 1 is additive and remains dormant while every runtime
--- feature gate is disabled. Existing DLQ, notification, outbox, and consumer
--- offset tables are deliberately untouched.
+-- Event replay persistence is active by default. The reloadable enabled flag
+-- pauses execution only; capture, planning, approval, and audit remain active.
+-- Existing DLQ, notification, outbox, and consumer offset tables are retained.
 
 CREATE TABLE IF NOT EXISTS event_failure_transaction_t (
     host_id                  UUID NOT NULL,
@@ -5485,63 +5482,6 @@ CREATE TABLE IF NOT EXISTS event_replay_retention_log_t (
     CONSTRAINT event_replay_retention_log_details_ck CHECK(jsonb_typeof(details) = 'object')
 );
 
-CREATE TABLE IF NOT EXISTS event_replay_backfill_checkpoint_t (
-    job_name VARCHAR(128) NOT NULL, source_processor VARCHAR(16) NOT NULL,
-    cursor_offset BIGINT NOT NULL DEFAULT -1,
-    cursor_host_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
-    cursor_consumer_group VARCHAR(255) NOT NULL DEFAULT '', cursor_transaction_id VARCHAR(255) NOT NULL DEFAULT '',
-    status VARCHAR(16) NOT NULL DEFAULT 'READY', examined_transactions BIGINT NOT NULL DEFAULT 0,
-    indexed_transactions BIGINT NOT NULL DEFAULT 0, unresolved_transactions BIGINT NOT NULL DEFAULT 0,
-    change_ticket VARCHAR(255) NOT NULL, scope_digest CHAR(64) NOT NULL,
-    last_worker_id VARCHAR(255), last_error_code VARCHAR(128),
-    last_error_message VARCHAR(2048), created_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, completed_ts TIMESTAMPTZ,
-    CONSTRAINT event_replay_backfill_checkpoint_pk PRIMARY KEY(job_name),
-    CONSTRAINT event_replay_backfill_checkpoint_source_ck CHECK(source_processor IN ('DATABASE','KAFKA')),
-    CONSTRAINT event_replay_backfill_checkpoint_status_ck CHECK(status IN ('READY','RUNNING','COMPLETED','FAILED')),
-    CONSTRAINT event_replay_backfill_checkpoint_counts_ck CHECK(examined_transactions>=0 AND indexed_transactions>=0 AND unresolved_transactions>=0 AND indexed_transactions+unresolved_transactions<=examined_transactions),
-    CONSTRAINT event_replay_backfill_checkpoint_ticket_ck CHECK(length(btrim(change_ticket))>0),
-    CONSTRAINT event_replay_backfill_checkpoint_scope_ck CHECK(scope_digest~'^[0-9a-f]{64}$'),
-    CONSTRAINT event_replay_backfill_checkpoint_error_ck CHECK((status<>'FAILED' AND last_error_code IS NULL AND last_error_message IS NULL) OR (status='FAILED' AND last_error_code IS NOT NULL AND last_error_message IS NOT NULL))
-);
-CREATE TABLE IF NOT EXISTS event_replay_backfill_issue_t (
-    job_name VARCHAR(128) NOT NULL, issue_id UUID NOT NULL, host_id UUID NOT NULL,
-    source_processor VARCHAR(16) NOT NULL, consumer_group VARCHAR(255) NOT NULL,
-    transaction_id VARCHAR(255) NOT NULL, error_code VARCHAR(128) NOT NULL,
-    error_message VARCHAR(2048) NOT NULL, observation_count INTEGER NOT NULL DEFAULT 1,
-    first_observed_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    last_observed_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    resolved_ts TIMESTAMPTZ, resolution VARCHAR(2048),
-    CONSTRAINT event_replay_backfill_issue_pk PRIMARY KEY(job_name,issue_id),
-    CONSTRAINT event_replay_backfill_issue_job_fk FOREIGN KEY(job_name) REFERENCES event_replay_backfill_checkpoint_t(job_name) ON DELETE RESTRICT,
-    CONSTRAINT event_replay_backfill_issue_host_fk FOREIGN KEY(host_id) REFERENCES host_t(host_id) ON DELETE RESTRICT,
-    CONSTRAINT event_replay_backfill_issue_source_ck CHECK(source_processor IN ('DATABASE','KAFKA')),
-    CONSTRAINT event_replay_backfill_issue_count_ck CHECK(observation_count>0),
-    CONSTRAINT event_replay_backfill_issue_resolution_ck CHECK((resolved_ts IS NULL AND resolution IS NULL) OR (resolved_ts IS NOT NULL AND length(btrim(resolution))>0)),
-    CONSTRAINT event_replay_backfill_issue_uk UNIQUE(job_name,source_processor,host_id,consumer_group,transaction_id,error_code)
-);
-CREATE TABLE IF NOT EXISTS event_replay_rollout_audit_t (
-    host_id UUID, rollout_audit_id UUID NOT NULL, stage VARCHAR(32) NOT NULL,
-    outcome VARCHAR(32) NOT NULL, change_ticket VARCHAR(255) NOT NULL,
-    actor_id VARCHAR(255) NOT NULL, config_digest VARCHAR(64) NOT NULL,
-    evidence JSONB NOT NULL DEFAULT '{}'::jsonb, created_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT event_replay_rollout_audit_pk PRIMARY KEY(rollout_audit_id),
-    CONSTRAINT event_replay_rollout_audit_host_fk FOREIGN KEY(host_id) REFERENCES host_t(host_id) ON DELETE RESTRICT,
-    CONSTRAINT event_replay_rollout_audit_stage_ck CHECK(stage IN ('SCHEMA','DATABASE_CAPTURE','KAFKA_CAPTURE','BACKFILL','READ_ONLY','DRY_RUN','NON_PROD_EXECUTION','PRODUCTION_CANARY','EXPANDED','ROLLBACK')),
-    CONSTRAINT event_replay_rollout_audit_outcome_ck CHECK(outcome IN ('PRECHECK_PASSED','ENABLED','VERIFIED','ROLLED_BACK','FAILED')),
-    CONSTRAINT event_replay_rollout_audit_text_ck CHECK(length(btrim(change_ticket))>0 AND length(btrim(actor_id))>0 AND config_digest ~ '^[0-9a-f]{64}$'),
-    CONSTRAINT event_replay_rollout_audit_evidence_ck CHECK(jsonb_typeof(evidence)='object')
-);
-
-CREATE OR REPLACE FUNCTION protect_event_replay_rollout_audit_v1()
-RETURNS trigger LANGUAGE plpgsql AS $body$
-BEGIN
-    RAISE EXCEPTION 'event replay rollout evidence is append-only';
-END $body$;
-CREATE TRIGGER event_replay_rollout_audit_append_guard_v1
-BEFORE UPDATE OR DELETE ON event_replay_rollout_audit_t
-FOR EACH ROW EXECUTE FUNCTION protect_event_replay_rollout_audit_v1();
-
 CREATE OR REPLACE FUNCTION protect_event_replay_retention_log_v1()
 RETURNS trigger LANGUAGE plpgsql AS $body$
 BEGIN
@@ -5567,12 +5507,6 @@ CREATE INDEX IF NOT EXISTS event_failure_payload_retention_idx
     WHERE status IN ('RESOLVED','WAIVED') AND legal_hold=FALSE;
 CREATE INDEX IF NOT EXISTS event_replay_retention_log_created_idx
     ON event_replay_retention_log_t(created_ts);
-CREATE INDEX IF NOT EXISTS event_replay_backfill_checkpoint_status_idx
-    ON event_replay_backfill_checkpoint_t(status,updated_ts);
-CREATE INDEX IF NOT EXISTS event_replay_backfill_issue_open_idx
-    ON event_replay_backfill_issue_t(job_name,last_observed_ts) WHERE resolved_ts IS NULL;
-CREATE INDEX IF NOT EXISTS event_replay_rollout_audit_ticket_idx
-    ON event_replay_rollout_audit_t(change_ticket,created_ts DESC);
 CREATE INDEX IF NOT EXISTS event_failure_quota_idx
     ON event_failure_transaction_t(host_id, status, encrypted_payload_bytes);
 CREATE INDEX IF NOT EXISTS event_failure_delivery_observed_idx
@@ -6303,7 +6237,7 @@ CREATE TABLE IF NOT EXISTS event_repair_event_t (
 );
 
 COMMENT ON COLUMN event_repair_event_t.corrected_payload_storage IS
-    'R1 permits DATABASE_PLAIN only; encrypted/object columns are reserved until stable content and storage digests are modeled separately';
+    'R8 supports DATABASE_PLAIN only; encrypted/object columns remain solely for non-destructive upgrade and rollback compatibility';
 
 ALTER TABLE event_replay_item_t
     ADD COLUMN IF NOT EXISTS repair_id UUID;
@@ -6528,6 +6462,10 @@ REVOKE SELECT (corrected_payload_plain, corrected_payload_ciphertext,
 
 COMMENT ON COLUMN event_failure_event_t.payload_plain IS
     'Immutable canonical replay bytes for DATABASE_PLAIN; digest exact stored bytes before parsing';
+COMMENT ON COLUMN event_failure_event_t.payload_storage IS
+    'R8 writes DATABASE_PLAIN only; legacy DATABASE/OBJECT columns remain solely for non-destructive upgrade and rollback compatibility';
+COMMENT ON COLUMN event_projection_deferred_t.payload_storage IS
+    'R8 writes DATABASE_PLAIN only; legacy DATABASE/OBJECT columns remain solely for non-destructive upgrade and rollback compatibility';
 COMMENT ON COLUMN event_repair_event_t.corrected_payload_plain IS
     'Immutable corrected canonical bytes; never exposed by list/query APIs';
 COMMENT ON TABLE event_failure_scope_t IS

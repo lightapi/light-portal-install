@@ -72,7 +72,7 @@ service.singletons:
   - com.networknt.rpc.router.RpcStartupHookProvider
   # database startup hook to initialize datasource and cache.
   - com.networknt.db.provider.SqlDbStartupHook
-  # Validate default-disabled event replay configuration before handlers start.
+  # Validate reloadable event replay configuration before handlers start.
   - net.lightapi.portal.db.EventReplayConfigStartupHook
 
 # security.yml
