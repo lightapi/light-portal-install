@@ -5206,12 +5206,13 @@ CREATE TABLE IF NOT EXISTS event_projection_deferred_t (
     dependency_scopes        JSONB NOT NULL DEFAULT '[]'::jsonb,
     payload_digest           VARCHAR(64) NOT NULL,
     payload_storage          VARCHAR(16) NOT NULL,
+    payload_plain            BYTEA,
     payload_ciphertext       BYTEA,
     payload_object_uri       VARCHAR(2048),
     payload_object_version   VARCHAR(255),
-    payload_key_id           VARCHAR(255) NOT NULL,
-    payload_wrapped_key      BYTEA NOT NULL,
-    payload_iv               BYTEA NOT NULL,
+    payload_key_id           VARCHAR(255),
+    payload_wrapped_key      BYTEA,
+    payload_iv               BYTEA,
     status                   VARCHAR(16) NOT NULL DEFAULT 'PENDING',
     attempt_count            INTEGER NOT NULL DEFAULT 0,
     error_code               VARCHAR(128),
@@ -5240,17 +5241,32 @@ CREATE TABLE IF NOT EXISTS event_projection_deferred_t (
         AND jsonb_typeof(dependency_scopes) = 'array'
     ),
     CONSTRAINT event_projection_deferred_payload_storage_ck CHECK(
-        (payload_storage = 'DATABASE'
+        (payload_storage = 'DATABASE_PLAIN'
+            AND payload_plain IS NOT NULL
+            AND payload_digest = encode(sha256(payload_plain), 'hex')
+            AND encrypted_payload_bytes = 0
+            AND decrypted_payload_bytes = octet_length(payload_plain)
+            AND payload_ciphertext IS NULL
+            AND payload_object_uri IS NULL
+            AND payload_object_version IS NULL
+            AND payload_key_id IS NULL
+            AND payload_wrapped_key IS NULL
+            AND payload_iv IS NULL)
+        OR (payload_storage = 'DATABASE'
+            AND payload_plain IS NULL
             AND payload_ciphertext IS NOT NULL
             AND payload_object_uri IS NULL
             AND payload_object_version IS NULL)
         OR (payload_storage = 'OBJECT'
+            AND payload_plain IS NULL
             AND payload_ciphertext IS NULL
             AND payload_object_uri IS NOT NULL
             AND payload_object_version IS NOT NULL)
     ),
     CONSTRAINT event_projection_deferred_crypto_ck CHECK(
-        octet_length(payload_iv) = 12 AND octet_length(payload_wrapped_key) > 0
+        payload_storage = 'DATABASE_PLAIN'
+        OR (octet_length(payload_iv) = 12 AND octet_length(payload_wrapped_key) > 0
+            AND length(btrim(payload_key_id)) > 0)
     ),
     CONSTRAINT event_projection_deferred_status_ck CHECK(
         status IN ('PENDING', 'RUNNING', 'SUCCEEDED', 'FAILED')
@@ -5768,6 +5784,7 @@ BEGIN
            OR NEW.item_ordinal IS DISTINCT FROM OLD.item_ordinal
            OR NEW.failure_id IS DISTINCT FROM OLD.failure_id
            OR NEW.expected_content_fingerprint IS DISTINCT FROM OLD.expected_content_fingerprint
+           OR NEW.repair_id IS DISTINCT FROM OLD.repair_id
            OR NEW.dependency_reason IS DISTINCT FROM OLD.dependency_reason
            OR NEW.added_dependency IS DISTINCT FROM OLD.added_dependency THEN
             RAISE EXCEPTION ''completed replay plan definition is immutable'';
@@ -5793,6 +5810,7 @@ BEGIN
        OR NEW.projection_name IS DISTINCT FROM OLD.projection_name OR NEW.consumer_group IS DISTINCT FROM OLD.consumer_group
        OR NEW.selection_strategy IS DISTINCT FROM OLD.selection_strategy OR NEW.validation_mode IS DISTINCT FROM OLD.validation_mode
        OR NEW.reason IS DISTINCT FROM OLD.reason OR NEW.plan_hash IS DISTINCT FROM OLD.plan_hash
+       OR NEW.repair_schema_version IS DISTINCT FROM OLD.repair_schema_version
        OR NEW.policy_registry_version IS DISTINCT FROM OLD.policy_registry_version OR NEW.plan_metadata IS DISTINCT FROM OLD.plan_metadata
        OR NEW.transaction_count IS DISTINCT FROM OLD.transaction_count OR NEW.event_count IS DISTINCT FROM OLD.event_count
        OR NEW.encrypted_payload_bytes IS DISTINCT FROM OLD.encrypted_payload_bytes OR NEW.decrypted_payload_bytes IS DISTINCT FROM OLD.decrypted_payload_bytes
