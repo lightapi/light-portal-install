@@ -357,6 +357,10 @@ DROP TABLE IF EXISTS message_t CASCADE;
 
 DROP TABLE IF EXISTS config_property_t CASCADE;
 
+DROP TABLE IF EXISTS command_idempotency_t CASCADE;
+DROP TABLE IF EXISTS entity_identity_materialization_t CASCADE;
+DROP TABLE IF EXISTS entity_identity_t CASCADE;
+DROP TABLE IF EXISTS entity_aggregate_t CASCADE;
 DROP TABLE IF EXISTS event_store_t CASCADE;
 DROP TABLE IF EXISTS outbox_message_t CASCADE;
 DROP TABLE IF EXISTS dead_letter_queue CASCADE;
@@ -381,6 +385,92 @@ CREATE TABLE event_store_t (
 
 -- Index for efficient lookup by aggregate
 CREATE INDEX idx_event_store_aggregate ON event_store_t (aggregate_id);
+
+CREATE TABLE entity_aggregate_t (
+    aggregate_type   VARCHAR(255) NOT NULL,
+    aggregate_id     VARCHAR(255) NOT NULL,
+    entity_status    VARCHAR(16)  NOT NULL,
+    created_event_id UUID         NOT NULL,
+    created_ts       TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    retired_ts       TIMESTAMP WITH TIME ZONE,
+    PRIMARY KEY (aggregate_type, aggregate_id),
+    CHECK (entity_status IN ('ACTIVE', 'RETIRED')),
+    CHECK ((entity_status = 'ACTIVE' AND retired_ts IS NULL)
+        OR (entity_status = 'RETIRED' AND retired_ts IS NOT NULL))
+);
+
+CREATE TABLE entity_identity_t (
+    scope_type              VARCHAR(16)  NOT NULL,
+    scope_id                VARCHAR(255) NOT NULL,
+    aggregate_type          VARCHAR(255) NOT NULL,
+    identity_schema_version INTEGER      NOT NULL,
+    identity_hash           BYTEA        NOT NULL,
+    identity_explanation    JSONB,
+    aggregate_id            VARCHAR(255) NOT NULL,
+    binding_status          VARCHAR(16)  NOT NULL,
+    created_event_id        UUID         NOT NULL,
+    created_ts              TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    demoted_ts              TIMESTAMP WITH TIME ZONE,
+    PRIMARY KEY (scope_type, scope_id, aggregate_type, identity_schema_version, identity_hash),
+    FOREIGN KEY (aggregate_type, aggregate_id)
+        REFERENCES entity_aggregate_t (aggregate_type, aggregate_id),
+    CHECK (binding_status IN ('CURRENT', 'ALIAS')),
+    CHECK ((binding_status = 'CURRENT' AND demoted_ts IS NULL)
+        OR (binding_status = 'ALIAS' AND demoted_ts IS NOT NULL))
+);
+
+CREATE UNIQUE INDEX entity_identity_current_aggregate_version_uk
+    ON entity_identity_t (aggregate_type, aggregate_id, identity_schema_version)
+    WHERE binding_status = 'CURRENT';
+
+CREATE TABLE command_idempotency_t (
+    scope_type                  VARCHAR(16)  NOT NULL,
+    scope_id                    VARCHAR(255) NOT NULL,
+    principal_id                VARCHAR(255) NOT NULL,
+    command_type                VARCHAR(255) NOT NULL,
+    idempotency_key             VARCHAR(128) NOT NULL,
+    request_hash                BYTEA        NOT NULL,
+    request_fingerprint_version INTEGER      NOT NULL,
+    aggregate_id                VARCHAR(255) NOT NULL,
+    event_id                    UUID         NOT NULL,
+    completed_ts                TIMESTAMP WITH TIME ZONE NOT NULL,
+    PRIMARY KEY (
+        scope_type, scope_id, principal_id, command_type, idempotency_key
+    ),
+    CHECK (octet_length(request_hash) = 32),
+    CHECK (request_fingerprint_version > 0),
+    CHECK (length(idempotency_key) BETWEEN 1 AND 128)
+);
+
+CREATE INDEX command_idempotency_retention_idx
+    ON command_idempotency_t (command_type, completed_ts);
+
+-- Verified historical coverage gate for semantic-identity enforcement. A
+-- missing or non-VERIFIED row keeps the aggregate group write-fenced.
+CREATE TABLE entity_identity_materialization_t (
+    aggregate_type             VARCHAR(255) NOT NULL,
+    birth_event_type           VARCHAR(255) NOT NULL,
+    policy_registry_version    VARCHAR(64)  NOT NULL,
+    normalizer_version         INTEGER      NOT NULL,
+    covered_event_count        BIGINT       NOT NULL,
+    input_digest               BYTEA        NOT NULL,
+    expected_owner_count       BIGINT       NOT NULL,
+    expected_binding_count     BIGINT       NOT NULL,
+    verification_digest        BYTEA        NOT NULL,
+    scope_attestation_digest   BYTEA        NOT NULL,
+    completion_status          VARCHAR(16)  NOT NULL,
+    completed_by               VARCHAR(255) NOT NULL,
+    completed_ts               TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (aggregate_type),
+    CHECK (normalizer_version > 0),
+    CHECK (covered_event_count >= 0),
+    CHECK (expected_owner_count >= 0),
+    CHECK (expected_binding_count >= 0),
+    CHECK (octet_length(input_digest) = 32),
+    CHECK (octet_length(verification_digest) = 32),
+    CHECK (octet_length(scope_attestation_digest) = 32),
+    CHECK (completion_status IN ('VERIFIED'))
+);
 
 CREATE TABLE outbox_message_t (
     id UUID PRIMARY KEY,                   -- Unique ID for this outbox message
