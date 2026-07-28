@@ -27,6 +27,9 @@ Environment:
                              https://github.com/lightapi/light-portal-install/archive/refs/heads/master.tar.gz
   IMPORT_EVENTS              Default: auto. Use false to skip event import.
   EVENT_IMPORTER_IMAGE       Default: networknt/event-importer:latest
+  EVENT_IMPORT_BOOTSTRAP_OPERATOR_ID
+                             Override the audit operator UUID used for an
+                             automatic empty-database baseline bootstrap.
   LIGHT_PORTAL_CLIENT_REDIRECT_URI
                              Default: https://local.localhost/authorization
   CLEAN_VOLUMES=true         Stop the stack and delete Docker volumes before
@@ -363,6 +366,8 @@ import_events() {
   local event_count=""
   local importer_image
   local import_network
+  local bootstrap_operator_id="${EVENT_IMPORT_BOOTSTRAP_OPERATOR_ID:-01964b05-5532-7c79-8cde-191dcbd421b8}"
+  local extra_args=()
 
   case "$import_mode_lower" in
     false|no|0|"")
@@ -392,6 +397,15 @@ import_events() {
   importer_image="${EVENT_IMPORTER_IMAGE:-networknt/event-importer:latest}"
   import_network="${EVENT_IMPORT_NETWORK:-$(default_event_import_network)}"
 
+  if [[ "$event_count" -eq 0 ]]; then
+    extra_args+=(
+      --bootstrap-import
+      --legacy-write-fenced
+      --bootstrap-operator-id "$bootstrap_operator_id"
+    )
+    log "empty destination detected; enabling guarded baseline bootstrap import"
+  fi
+
   if docker_runtime_is_podman; then
     log "streaming events.json to $importer_image over stdin"
     docker run --rm -i \
@@ -401,7 +415,8 @@ import_events() {
       -e DB_PASSWORD="${EVENT_IMPORT_DB_PASSWORD:-secret}" \
       -e DB_MAXIMUM_POOL_SIZE="${EVENT_IMPORT_DB_MAXIMUM_POOL_SIZE:-3}" \
       "$importer_image" \
-      --filename /dev/stdin < events.json
+      --filename /dev/stdin \
+      "${extra_args[@]}" < events.json
   else
     log "importing events.json with $importer_image"
     docker run --rm \
@@ -412,7 +427,8 @@ import_events() {
       -e DB_PASSWORD="${EVENT_IMPORT_DB_PASSWORD:-secret}" \
       -e DB_MAXIMUM_POOL_SIZE="${EVENT_IMPORT_DB_MAXIMUM_POOL_SIZE:-3}" \
       "$importer_image" \
-      --filename /events/events.json
+      --filename /events/events.json \
+      "${extra_args[@]}"
   fi
 }
 

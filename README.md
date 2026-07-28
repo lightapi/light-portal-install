@@ -38,7 +38,8 @@ archives in the `lightapi` bucket and starts the Rust `all-in-lt` stack with
 
 On install, update, and start, the script first starts Postgres plus
 `hybrid-command` and `hybrid-query`, imports `events.json` when `event_store_t`
-is empty, and then starts the full Compose stack. This avoids the first-run
+is empty, automatically using the importer's guarded bootstrap mode, and then
+starts the full Compose stack. This avoids the first-run
 dependency loop where `light-oauth` cannot serve JWKS until the OAuth key data
 has been imported.
 
@@ -141,7 +142,9 @@ CLEAN_VOLUMES=true ./install.sh start
 ```
 
 Use the same flag with `install` or `update` when you also want to refresh the
-downloaded assets first.
+downloaded assets first. No event-importer command-line switch is required.
+Set `EVENT_IMPORT_BOOTSTRAP_OPERATOR_ID` only when the identity-materialization
+audit record should use a different operator UUID.
 
 By default the script expects public R2 assets under:
 
