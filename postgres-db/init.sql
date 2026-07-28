@@ -940,6 +940,7 @@ CREATE TABLE api_endpoint_t (
     endpoint_path        VARCHAR(1024),
     endpoint_name        VARCHAR(128) NOT NULL,
     tool_schema          TEXT,                    -- The JSON Schema for the tool's input
+    response_schema      TEXT,                    -- Optional JSON Schema for the tool's output
     tool_metadata        TEXT,                    -- JSON tool metadata. {"destructive": true, "read_only": false}
     routing_domain       VARCHAR(128),
     semantic_namespace   VARCHAR(128),
