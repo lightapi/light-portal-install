@@ -97,6 +97,8 @@ DROP TABLE IF EXISTS skill_param_t CASCADE;
 
 DROP TABLE IF EXISTS skill_t CASCADE;
 
+DROP TABLE IF EXISTS llm_gateway_instance_property_ownership_t CASCADE;
+DROP TABLE IF EXISTS llm_gateway_instance_publication_t CASCADE;
 DROP TABLE IF EXISTS llm_gateway_publication_t CASCADE;
 DROP TABLE IF EXISTS llm_projection_resource_t CASCADE;
 DROP TABLE IF EXISTS llm_model_policy_binding_t CASCADE;
@@ -6566,15 +6568,22 @@ COMMENT ON TABLE event_failure_scope_t IS
 
 COMMIT;
 
--- PDB-1 authoritative LLM control-plane schema. The upgrade patches are
--- inlined here so fresh-install/container initialization is self-contained.
--- Keep the marked blocks synchronized with their corresponding upgrade files.
--- BEGIN INLINED patch_20260719_01_llm_control_plane.sql
+-- PDB-1 authoritative LLM control-plane schema for fresh installations.
+-- The historical model rename patch remains separate and is not replayed here.
+-- BEGIN CONSOLIDATED LLM CONTROL-PLANE SCHEMA
 BEGIN;
 
-CREATE TABLE IF NOT EXISTS llm_model_catalog_t (
-    host_id UUID NOT NULL,
-    model_catalog_id UUID NOT NULL,
+DO $legacy_llm_model_guard$
+BEGIN
+    IF to_regclass(format('%I.llm_model_catalog_t', current_schema())) IS NOT NULL THEN
+        RAISE EXCEPTION 'run patch_20260721_01_llm_model_rename.sql before ddl.sql on an existing database';
+    END IF;
+END
+$legacy_llm_model_guard$;
+
+-- Global inventory of canonical provider model identifiers, capabilities, and token limits used by every host.
+CREATE TABLE IF NOT EXISTS llm_model_t (
+    model_id UUID NOT NULL,
     provider_type VARCHAR(32) NOT NULL,
     physical_model_id VARCHAR(255) NOT NULL,
     model_family VARCHAR(126) NOT NULL,
@@ -6589,16 +6598,16 @@ CREATE TABLE IF NOT EXISTS llm_model_catalog_t (
     active BOOLEAN NOT NULL DEFAULT TRUE,
     update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
-    PRIMARY KEY(host_id, model_catalog_id),
-    FOREIGN KEY(host_id) REFERENCES host_t(host_id) ON DELETE CASCADE,
-    UNIQUE(host_id, provider_type, physical_model_id),
+    PRIMARY KEY(model_id),
+    UNIQUE(provider_type, physical_model_id),
     CHECK(lifecycle_status IN ('DRAFT','ACTIVE','DEPRECATED','RETIRED'))
 );
 
+-- Enables a model in an environment and records its regional, data-classification, and capability restrictions.
 CREATE TABLE IF NOT EXISTS llm_model_registration_t (
     host_id UUID NOT NULL,
     model_registration_id UUID NOT NULL,
-    model_catalog_id UUID NOT NULL,
+    model_id UUID NOT NULL,
     environment VARCHAR(32) NOT NULL,
     regions JSONB NOT NULL DEFAULT '[]'::jsonb CHECK(jsonb_typeof(regions) = 'array'),
     data_classifications JSONB NOT NULL DEFAULT '[]'::jsonb CHECK(jsonb_typeof(data_classifications) = 'array'),
@@ -6610,11 +6619,12 @@ CREATE TABLE IF NOT EXISTS llm_model_registration_t (
     update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
     PRIMARY KEY(host_id, model_registration_id),
     FOREIGN KEY(host_id) REFERENCES host_t(host_id) ON DELETE CASCADE,
-    FOREIGN KEY(host_id, model_catalog_id) REFERENCES llm_model_catalog_t(host_id, model_catalog_id) ON DELETE RESTRICT,
-    UNIQUE(host_id, model_catalog_id, environment),
+    FOREIGN KEY(model_id) REFERENCES llm_model_t(model_id) ON DELETE RESTRICT,
+    UNIQUE(host_id, model_id, environment),
     CHECK(lifecycle_status IN ('DRAFT','ACTIVE','SUSPENDED','RETIRED'))
 );
 
+-- Identifies a provider billing and quota account used by deployments; credentials are stored separately as secret references.
 CREATE TABLE IF NOT EXISTS llm_provider_account_t (
     host_id UUID NOT NULL,
     provider_account_id UUID NOT NULL,
@@ -6634,6 +6644,7 @@ CREATE TABLE IF NOT EXISTS llm_provider_account_t (
     CHECK(lifecycle_status IN ('DRAFT','ACTIVE','SUSPENDED','RETIRED'))
 );
 
+-- Defines a callable provider endpoint that binds a registered model to an account, region, and conformance evidence.
 CREATE TABLE IF NOT EXISTS llm_provider_deployment_t (
     host_id UUID NOT NULL,
     provider_deployment_id UUID NOT NULL,
@@ -6645,7 +6656,6 @@ CREATE TABLE IF NOT EXISTS llm_provider_deployment_t (
     base_url TEXT NOT NULL CHECK(base_url ~ '^https://'),
     region VARCHAR(64),
     transport_bounds JSONB NOT NULL DEFAULT '{}'::jsonb CHECK(jsonb_typeof(transport_bounds) = 'object'),
-    quota_group_id VARCHAR(126) NOT NULL,
     conformance_state VARCHAR(16) NOT NULL DEFAULT 'UNKNOWN',
     conformance_digest VARCHAR(71),
     conformance_valid_until TIMESTAMPTZ,
@@ -6716,12 +6726,13 @@ ALTER TABLE llm_provider_deployment_t
         )) IS TRUE
     );
 
+-- Tracks versioned secret references and rotation windows used to authenticate a provider deployment without storing secret material.
 CREATE TABLE IF NOT EXISTS llm_provider_credential_t (
     host_id UUID NOT NULL,
     provider_credential_id UUID NOT NULL,
     provider_deployment_id UUID NOT NULL,
     credential_version INTEGER NOT NULL CHECK(credential_version > 0),
-    secret_reference VARCHAR(1024) NOT NULL CHECK(secret_reference ~ '^[A-Za-z][A-Za-z0-9+.-]*://'),
+    secret_reference VARCHAR(1024) NOT NULL,
     effective_ts TIMESTAMPTZ NOT NULL,
     expires_ts TIMESTAMPTZ,
     lifecycle_status VARCHAR(16) NOT NULL DEFAULT 'PENDING',
@@ -6732,10 +6743,14 @@ CREATE TABLE IF NOT EXISTS llm_provider_credential_t (
     PRIMARY KEY(host_id, provider_credential_id),
     FOREIGN KEY(host_id, provider_deployment_id) REFERENCES llm_provider_deployment_t(host_id, provider_deployment_id) ON DELETE RESTRICT,
     UNIQUE(host_id, provider_deployment_id, credential_version),
+    CONSTRAINT llm_provider_credential_secret_reference_ck CHECK(
+        secret_reference ~ '^env:[A-Za-z_][A-Za-z0-9_]*$'
+        OR secret_reference ~ '^[A-Za-z][A-Za-z0-9+.-]*://'),
     CHECK(expires_ts IS NULL OR expires_ts > effective_ts),
     CHECK(lifecycle_status IN ('PENDING','ACTIVE','ROTATING','REVOKED','EXPIRED'))
 );
 
+-- Provides the stable client-facing model name and request-policy envelope resolved by gateways and agents.
 CREATE TABLE IF NOT EXISTS llm_public_alias_t (
     host_id UUID NOT NULL,
     public_alias_id UUID NOT NULL,
@@ -6765,6 +6780,7 @@ CREATE TABLE IF NOT EXISTS llm_public_alias_t (
     CHECK(replacement_alias_id IS NULL OR replacement_alias_id <> public_alias_id)
 );
 
+-- Maps an alias to ordered provider deployments for primary routing, fallback, and future weighted or canary selection.
 CREATE TABLE IF NOT EXISTS llm_alias_route_t (
     host_id UUID NOT NULL,
     alias_route_id UUID NOT NULL,
@@ -6788,6 +6804,7 @@ CREATE TABLE IF NOT EXISTS llm_alias_route_t (
     CHECK(canary_percent = 0)
 );
 
+-- Stores effective-dated deployment pricing versions used for cost calculation, budgeting, and audit.
 CREATE TABLE IF NOT EXISTS llm_pricing_version_t (
     host_id UUID NOT NULL,
     pricing_version_id UUID NOT NULL,
@@ -6810,6 +6827,7 @@ CREATE TABLE IF NOT EXISTS llm_pricing_version_t (
     CHECK(expires_ts IS NULL OR expires_ts > effective_ts)
 );
 
+-- Defines reusable access, budget, content, cache, PII, and provider-extension policy applied to model use.
 CREATE TABLE IF NOT EXISTS llm_model_policy_t (
     host_id UUID NOT NULL,
     model_policy_id UUID NOT NULL,
@@ -6831,6 +6849,7 @@ CREATE TABLE IF NOT EXISTS llm_model_policy_t (
     CHECK(lifecycle_status IN ('DRAFT','ACTIVE','SUSPENDED','RETIRED'))
 );
 
+-- Assigns a model policy to an agent, client, principal, or product profile, optionally for a specific alias.
 CREATE TABLE IF NOT EXISTS llm_model_policy_binding_t (
     host_id UUID NOT NULL,
     model_policy_binding_id UUID NOT NULL,
@@ -6855,6 +6874,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS llm_policy_binding_agent_default_uk
     ON llm_model_policy_binding_t(host_id, model_policy_id, subject_type, subject_id)
     WHERE active IS TRUE AND agent_default IS TRUE;
 
+-- Stores immutable versioned resources from which runtime gateway configuration projections are assembled.
 CREATE TABLE IF NOT EXISTS llm_projection_resource_t (
     host_id UUID NOT NULL,
     environment VARCHAR(32) NOT NULL,
@@ -6878,6 +6898,7 @@ CREATE TABLE IF NOT EXISTS llm_projection_resource_t (
     CHECK(lifecycle_status IN ('CANDIDATE','PUBLISHED','RETIRED'))
 );
 
+-- Records each validated gateway configuration publication, delivery status, and rollback relationship.
 CREATE TABLE IF NOT EXISTS llm_gateway_publication_t (
     host_id UUID NOT NULL,
     environment VARCHAR(32) NOT NULL,
@@ -6892,6 +6913,10 @@ CREATE TABLE IF NOT EXISTS llm_gateway_publication_t (
     rollback_of_publication_id UUID,
     delivery_state VARCHAR(16) NOT NULL DEFAULT 'PENDING',
     delivery_evidence JSONB,
+    source_digest VARCHAR(71),
+    config_properties JSONB,
+    config_properties_digest VARCHAR(71),
+    delivery_mode VARCHAR(32) NOT NULL DEFAULT 'LEGACY_PROJECTION',
     aggregate_version BIGINT NOT NULL DEFAULT 1 CHECK(aggregate_version > 0),
     active BOOLEAN NOT NULL DEFAULT TRUE,
     update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -6902,8 +6927,63 @@ CREATE TABLE IF NOT EXISTS llm_gateway_publication_t (
     UNIQUE(host_id, environment, publication_version),
     UNIQUE(host_id, environment, manifest_digest),
     CHECK(publication_state IN ('CANDIDATE','VALIDATED','PUBLISHED','FAILED','ROLLED_BACK')),
-    CHECK(delivery_state IN ('PENDING','ACKNOWLEDGED','FAILED'))
+    CHECK(delivery_state IN ('PENDING','ACKNOWLEDGED','FAILED')),
+    CONSTRAINT llm_gateway_publication_source_digest_ck CHECK(
+        source_digest IS NULL OR source_digest ~ '^sha256:[0-9a-f]{64}$'),
+    CONSTRAINT llm_gateway_publication_properties_shape_ck CHECK(
+        config_properties IS NULL OR jsonb_typeof(config_properties)='array'),
+    CONSTRAINT llm_gateway_publication_properties_digest_ck CHECK(
+        config_properties_digest IS NULL OR config_properties_digest ~ '^sha256:[0-9a-f]{64}$'),
+    CONSTRAINT llm_gateway_publication_delivery_mode_ck CHECK(
+        delivery_mode IN ('LEGACY_PROJECTION','INSTANCE_PROPERTIES')
+        AND (delivery_mode <> 'INSTANCE_PROPERTIES' OR
+            (source_digest IS NOT NULL AND config_properties IS NOT NULL AND config_properties_digest IS NOT NULL)))
 );
+
+CREATE TABLE IF NOT EXISTS llm_gateway_instance_publication_t (
+    host_id UUID NOT NULL,
+    instance_publication_id UUID NOT NULL,
+    instance_id UUID NOT NULL,
+    environment VARCHAR(32) NOT NULL,
+    gateway_publication_id UUID NOT NULL,
+    application_version BIGINT NOT NULL CHECK(application_version > 0),
+    property_set_digest VARCHAR(71) NOT NULL CHECK(property_set_digest ~ '^sha256:[0-9a-f]{64}$'),
+    application_state VARCHAR(16) NOT NULL DEFAULT 'APPLIED',
+    rollback_of_instance_publication_id UUID,
+    aggregate_version BIGINT NOT NULL DEFAULT 1 CHECK(aggregate_version > 0),
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
+    PRIMARY KEY(host_id, instance_publication_id),
+    FOREIGN KEY(host_id, instance_id) REFERENCES instance_t(host_id, instance_id) ON DELETE RESTRICT,
+    FOREIGN KEY(host_id, environment, gateway_publication_id)
+        REFERENCES llm_gateway_publication_t(host_id, environment, gateway_publication_id) ON DELETE RESTRICT,
+    FOREIGN KEY(host_id, rollback_of_instance_publication_id)
+        REFERENCES llm_gateway_instance_publication_t(host_id, instance_publication_id) ON DELETE RESTRICT,
+    UNIQUE(host_id, instance_id, application_version),
+    CHECK(application_state IN ('APPLIED','ROLLED_BACK'))
+);
+CREATE INDEX IF NOT EXISTS llm_gateway_instance_publication_history_idx
+    ON llm_gateway_instance_publication_t(host_id, instance_id, application_version DESC)
+    WHERE active IS TRUE;
+
+CREATE TABLE IF NOT EXISTS llm_gateway_instance_property_ownership_t (
+    host_id UUID NOT NULL,
+    instance_id UUID NOT NULL,
+    property_id UUID NOT NULL,
+    instance_publication_id UUID NOT NULL,
+    property_value_digest VARCHAR(71) NOT NULL CHECK(property_value_digest ~ '^sha256:[0-9a-f]{64}$'),
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
+    PRIMARY KEY(host_id, instance_id, property_id),
+    FOREIGN KEY(host_id, instance_id) REFERENCES instance_t(host_id, instance_id) ON DELETE CASCADE,
+    FOREIGN KEY(property_id) REFERENCES config_property_t(property_id) ON DELETE RESTRICT,
+    FOREIGN KEY(host_id, instance_publication_id)
+        REFERENCES llm_gateway_instance_publication_t(host_id, instance_publication_id) ON DELETE RESTRICT
+);
+CREATE INDEX IF NOT EXISTS llm_gateway_instance_property_publication_idx
+    ON llm_gateway_instance_property_ownership_t(host_id, instance_publication_id);
 
 CREATE OR REPLACE FUNCTION llm_reject_published_digest_mutation()
 RETURNS trigger LANGUAGE plpgsql AS $function$
@@ -6925,8 +7005,15 @@ CREATE OR REPLACE FUNCTION llm_reject_published_manifest_mutation()
 RETURNS trigger LANGUAGE plpgsql AS $function$
 BEGIN
     IF OLD.publication_state IN ('PUBLISHED','ROLLED_BACK')
-       AND (NEW.manifest_digest <> OLD.manifest_digest OR NEW.manifest <> OLD.manifest) THEN
-        RAISE EXCEPTION 'published LLM gateway manifests are immutable';
+       AND (
+           NEW.manifest_digest <> OLD.manifest_digest
+           OR NEW.manifest <> OLD.manifest
+           OR NEW.source_digest IS DISTINCT FROM OLD.source_digest
+           OR NEW.config_properties IS DISTINCT FROM OLD.config_properties
+           OR NEW.config_properties_digest IS DISTINCT FROM OLD.config_properties_digest
+           OR NEW.delivery_mode <> OLD.delivery_mode
+       ) THEN
+        RAISE EXCEPTION 'published LLM gateway configurations are immutable';
     END IF;
     RETURN NEW;
 END
@@ -6973,7 +7060,7 @@ CREATE INDEX IF NOT EXISTS llm_publication_current_idx
     WHERE active IS TRUE;
 
 COMMIT;
--- END INLINED patch_20260719_01_llm_control_plane.sql
+-- END CONSOLIDATED LLM CONTROL-PLANE SCHEMA
 
 -- BEGIN INLINED patch_20260719_03_llm_production_integration.sql
 -- DIST-1 / LA-1: distinguish public aliases from operator-approved,
@@ -7006,126 +7093,6 @@ CREATE INDEX IF NOT EXISTS llm_public_alias_bound_agent_idx
 
 COMMIT;
 -- END INLINED patch_20260719_03_llm_production_integration.sql
-
--- BEGIN INLINED patch_20260721_01_llm_model_rename.sql
--- Preserve existing catalog data while adopting the final LLM model naming.
--- The guards make this safe on a fresh baseline that already has the new names.
-BEGIN;
-
-DO $migration$
-DECLARE
-    constraint_rename record;
-BEGIN
-    IF to_regclass('llm_model_catalog_t') IS NOT NULL THEN
-        IF to_regclass('llm_model_t') IS NOT NULL THEN
-            RAISE EXCEPTION 'cannot rename llm_model_catalog_t: llm_model_t already exists';
-        END IF;
-        ALTER TABLE llm_model_catalog_t RENAME TO llm_model_t;
-    END IF;
-
-    IF to_regclass('llm_model_t') IS NULL THEN
-        RAISE EXCEPTION 'LLM model table is missing';
-    END IF;
-
-    IF EXISTS (
-        SELECT 1 FROM information_schema.columns
-         WHERE table_schema = current_schema()
-           AND table_name = 'llm_model_t'
-           AND column_name = 'model_catalog_id'
-    ) THEN
-        IF EXISTS (
-            SELECT 1 FROM information_schema.columns
-             WHERE table_schema = current_schema()
-               AND table_name = 'llm_model_t'
-               AND column_name = 'model_id'
-        ) THEN
-            RAISE EXCEPTION 'llm_model_t contains both model_catalog_id and model_id';
-        END IF;
-        ALTER TABLE llm_model_t RENAME COLUMN model_catalog_id TO model_id;
-    END IF;
-
-    IF EXISTS (
-        SELECT 1 FROM information_schema.columns
-         WHERE table_schema = current_schema()
-           AND table_name = 'llm_model_registration_t'
-           AND column_name = 'model_catalog_id'
-    ) THEN
-        IF EXISTS (
-            SELECT 1 FROM information_schema.columns
-             WHERE table_schema = current_schema()
-               AND table_name = 'llm_model_registration_t'
-               AND column_name = 'model_id'
-        ) THEN
-            RAISE EXCEPTION 'llm_model_registration_t contains both model_catalog_id and model_id';
-        END IF;
-        ALTER TABLE llm_model_registration_t RENAME COLUMN model_catalog_id TO model_id;
-    END IF;
-
-    FOR constraint_rename IN
-        SELECT * FROM (VALUES
-            ('llm_model_t', 'llm_model_catalog_t_pkey', 'llm_model_t_pkey'),
-            ('llm_model_t', 'llm_model_catalog_t_host_id_fkey', 'llm_model_t_host_id_fkey'),
-            ('llm_model_t', 'llm_model_catalog_t_host_id_provider_type_physical_model_id_key', 'llm_model_t_host_id_provider_type_physical_model_id_key'),
-            ('llm_model_t', 'llm_model_catalog_t_lifecycle_status_check', 'llm_model_t_lifecycle_status_check'),
-            ('llm_model_t', 'llm_model_catalog_t_context_token_limit_check', 'llm_model_t_context_token_limit_check'),
-            ('llm_model_t', 'llm_model_catalog_t_output_token_limit_check', 'llm_model_t_output_token_limit_check'),
-            ('llm_model_t', 'llm_model_catalog_t_modalities_check', 'llm_model_t_modalities_check'),
-            ('llm_model_t', 'llm_model_catalog_t_operations_check', 'llm_model_t_operations_check'),
-            ('llm_model_t', 'llm_model_catalog_t_declared_capabilities_check', 'llm_model_t_declared_capabilities_check'),
-            ('llm_model_t', 'llm_model_catalog_t_aggregate_version_check', 'llm_model_t_aggregate_version_check'),
-            ('llm_model_registration_t', 'llm_model_registration_t_host_id_model_catalog_id_fkey', 'llm_model_registration_t_host_id_model_id_fkey'),
-            ('llm_model_registration_t', 'llm_model_registration_t_host_id_model_catalog_id_environme_key', 'llm_model_registration_t_host_id_model_id_environment_key')
-        ) AS names(table_name, old_name, new_name)
-    LOOP
-        IF EXISTS (
-            SELECT 1
-              FROM pg_constraint constraint_entry
-              JOIN pg_class relation ON relation.oid = constraint_entry.conrelid
-              JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
-             WHERE namespace.nspname = current_schema()
-               AND relation.relname = constraint_rename.table_name
-               AND constraint_entry.conname = constraint_rename.old_name
-        ) THEN
-            IF EXISTS (
-                SELECT 1
-                  FROM pg_constraint constraint_entry
-                  JOIN pg_class relation ON relation.oid = constraint_entry.conrelid
-                  JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
-                 WHERE namespace.nspname = current_schema()
-                   AND relation.relname = constraint_rename.table_name
-                   AND constraint_entry.conname = constraint_rename.new_name
-            ) THEN
-                RAISE EXCEPTION 'cannot rename constraint %: % already exists',
-                    constraint_rename.old_name, constraint_rename.new_name;
-            END IF;
-            EXECUTE format(
-                'ALTER TABLE %I RENAME CONSTRAINT %I TO %I',
-                constraint_rename.table_name,
-                constraint_rename.old_name,
-                constraint_rename.new_name
-            );
-        END IF;
-    END LOOP;
-
-
-    IF NOT EXISTS (
-        SELECT 1 FROM information_schema.columns
-         WHERE table_schema = current_schema()
-           AND table_name = 'llm_model_t'
-           AND column_name = 'model_id'
-    ) OR NOT EXISTS (
-        SELECT 1 FROM information_schema.columns
-         WHERE table_schema = current_schema()
-           AND table_name = 'llm_model_registration_t'
-           AND column_name = 'model_id'
-    ) THEN
-        RAISE EXCEPTION 'LLM model rename migration is incomplete';
-    END IF;
-END
-$migration$;
-
-COMMIT;
--- END INLINED patch_20260721_01_llm_model_rename.sql
 
 
 -- create a view to simplify the foreign key relationship.
