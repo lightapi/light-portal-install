@@ -23,6 +23,8 @@ Environment:
                              Default: $LIGHT_PORTAL_ASSET_BASE_URL/light-portal/releases
   LIGHT_PORTAL_INSTALL_DIR   Optional target directory. If set, the script
                              copies repo files there before running.
+  LIGHT_PORTAL_ENV_FILE      Optional Compose env file. Default:
+                             ~/.config/lightapi/light-portal.env
   LIGHT_PORTAL_REPO_ARCHIVE  Default:
                              https://github.com/lightapi/light-portal-install/archive/refs/heads/master.tar.gz
   IMPORT_EVENTS              Default: auto. Use false to skip event import.
@@ -98,12 +100,19 @@ asset_base_url="${LIGHT_PORTAL_ASSET_BASE_URL:-https://cdn.networknt.com}"
 asset_base_url="${asset_base_url%/}"
 release_base_url="${LIGHT_PORTAL_RELEASE_BASE_URL:-$asset_base_url/light-portal/releases}"
 release_base_url="${release_base_url%/}"
+light_portal_env_file="${LIGHT_PORTAL_ENV_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/lightapi/light-portal.env}"
 compose() {
+  local env_args=(--env-file .env)
+
   if [[ -f docker-images.env ]]; then
-    docker compose --env-file docker-images.env --env-file .env "$@"
-  else
-    docker compose --env-file .env "$@"
+    env_args=(--env-file docker-images.env "${env_args[@]}")
   fi
+
+  if [[ -f "$light_portal_env_file" ]]; then
+    env_args+=(--env-file "$light_portal_env_file")
+  fi
+
+  docker compose "${env_args[@]}" "$@"
 }
 
 load_env_file_var() {
