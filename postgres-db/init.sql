@@ -7721,7 +7721,7 @@ BEGIN
         SELECT 
             ip.property_id,
             CASE cp.value_type
-                WHEN 'list' THEN (
+                WHEN 'list' THEN COALESCE((
                     -- Explode arrays from all matching rows and re-aggregate into one list
                     -- Handles non-JSON strings gracefully by treating them as single-item lists
                     SELECT jsonb_agg(elem ORDER BY sub.update_ts ASC)
@@ -7735,8 +7735,12 @@ BEGIN
                           AND sub.property_value != ''
                     ) q
                     WHERE sub.property_id = ip.property_id
-                )::text
-                WHEN 'map' THEN (
+                ), (
+                    SELECT '[]'::jsonb FROM InstancePool empty_source
+                    WHERE empty_source.property_id = ip.property_id AND empty_source.property_value ~ '^\s*\[\s*\]\s*$'
+                    LIMIT 1
+                ))::text
+                WHEN 'map' THEN COALESCE((
                     -- Explode objects from all matching rows and re-aggregate into one map
                     -- Ignores non-JSON strings to avoid crashing
                     SELECT jsonb_object_agg(kv.key, kv.value)
@@ -7749,7 +7753,11 @@ BEGIN
                         WHERE sub.property_value !~ '^\s*\{.*\}\s*$' OR sub.property_value IS NULL
                     ) kv
                     WHERE sub.property_id = ip.property_id AND kv.key IS NOT NULL
-                )::text
+                ), (
+                    SELECT '{}'::jsonb FROM InstancePool empty_source
+                    WHERE empty_source.property_id = ip.property_id AND empty_source.property_value ~ '^\s*\{\s*\}\s*$'
+                    LIMIT 1
+                ))::text
                 ELSE (
                     -- For simple types (e.g. boolean/string), the latest update wins
                     SELECT sub.property_value
