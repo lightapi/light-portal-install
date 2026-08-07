@@ -330,6 +330,8 @@ services:
         condition: service_healthy
 
   llm-gateway:
+    profiles:
+      - llm-gateway
     image: ${LLM_GATEWAY_IMAGE:-${LIGHT_GATEWAY_IMAGE:-networknt/light-gateway:latest}}
     ports:
       - "${LLM_GATEWAY_HOST_PORT:-8444}:8443"

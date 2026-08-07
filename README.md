@@ -38,8 +38,8 @@ archives in the `lightapi` bucket and starts the Rust `all-in-lt` stack with
 
 ## Dedicated LLM Gateway
 
-The installation also runs a dedicated `llm-gateway` from the
-`networknt/light-gateway` image. It uses
+When both provider keys below are configured, the installation runs a
+dedicated `llm-gateway` from the `networknt/light-gateway` image. It uses
 `serviceId=com.networknt.llm.gateway-1.0.0` with `envTag=dev`, sharing the
 same development instance configuration as `portal-config-loc` and
 `portal-config-dev`. The deployment remains identifiable as the demo install;
@@ -62,8 +62,9 @@ with `LLM_GATEWAY_IMAGE`. `LLM_GATEWAY_RUST_LOG` overrides the shared
 `RUST_LOG` setting for this service.
 
 An authenticated `GET https://localhost:8444/v1/models` lists the configured
-models. Provider requests require the corresponding provider key; leaving a key
-empty keeps the installation bootable but that provider cannot serve requests.
+models. The provider keys are optional for the overall Portal installation. If
+either key is missing, `install.sh` leaves the dedicated LLM gateway disabled
+while starting the remaining services normally.
 
 On install, update, and start, the script first starts Postgres plus
 `hybrid-command` and `hybrid-query`, imports `events.json` when `event_store_t`

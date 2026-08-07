@@ -110,6 +110,37 @@ asset_base_url="${asset_base_url%/}"
 release_base_url="${LIGHT_PORTAL_RELEASE_BASE_URL:-$asset_base_url/light-portal/releases}"
 release_base_url="${release_base_url%/}"
 light_portal_env_file="${LIGHT_PORTAL_ENV_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/lightapi/light-portal.env}"
+
+env_file_var_is_set() {
+  local file="$1"
+  local name="$2"
+
+  [[ -f "$file" ]] || return 1
+  awk -F= -v key="$name" '
+    $1 == key {
+      sub(/^[^=]*=/, "")
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+      if ($0 != "" && $0 != "\"\"" && $0 != "\047\047") {
+        found = 1
+      }
+    }
+    END { exit(found ? 0 : 1) }
+  ' "$file"
+}
+
+llm_gateway_var_is_set() {
+  local name="$1"
+
+  [[ -n "${!name:-}" ]] ||
+    env_file_var_is_set "$light_portal_env_file" "$name" ||
+    env_file_var_is_set .env "$name"
+}
+
+llm_gateway_enabled() {
+  llm_gateway_var_is_set GROQ_API_KEY &&
+    llm_gateway_var_is_set GEMINI_API_KEY
+}
+
 compose() {
   local env_args=(--env-file .env)
 
@@ -119,6 +150,10 @@ compose() {
 
   if [[ -f "$light_portal_env_file" ]]; then
     env_args+=(--env-file "$light_portal_env_file")
+  fi
+
+  if llm_gateway_enabled; then
+    env_args+=(--profile llm-gateway)
   fi
 
   docker compose "${env_args[@]}" "$@"
@@ -273,14 +308,16 @@ start_stack() {
 validate_compose_config() {
   local required_file
 
-  for required_file in \
-    llm-gateway-rust/config/startup.yml \
-    llm-gateway-rust/config/ca.pem \
-    llm-gateway-rust/config/cert.pem \
-    llm-gateway-rust/config/key.pem; do
-    [[ -f "$required_file" ]] ||
-      die "required llm-gateway config file is missing: $required_file"
-  done
+  if llm_gateway_enabled; then
+    for required_file in \
+      llm-gateway-rust/config/startup.yml \
+      llm-gateway-rust/config/ca.pem \
+      llm-gateway-rust/config/cert.pem \
+      llm-gateway-rust/config/key.pem; do
+      [[ -f "$required_file" ]] ||
+        die "required llm-gateway config file is missing: $required_file"
+    done
+  fi
 
   log "validating Docker Compose configuration"
   compose config --quiet || die "Docker Compose configuration validation failed"
@@ -625,7 +662,11 @@ case "$command_name" in
     else
       log "portal should be available at https://local.localhost:${LIGHT_GATEWAY_HOST_PORT}"
     fi
-    log "LLM gateway should be available at https://localhost:${LLM_GATEWAY_HOST_PORT:-8444}"
+    if llm_gateway_enabled; then
+      log "LLM gateway should be available at https://localhost:${LLM_GATEWAY_HOST_PORT:-8444}"
+    else
+      log "LLM provider keys are not configured; dedicated LLM gateway is disabled"
+    fi
     ;;
   update)
     download_assets
