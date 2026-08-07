@@ -564,8 +564,34 @@ SQL
   done
 }
 
+verify_event_delta_applied() {
+  local delta="$1"
+  local verify_delta_sql="$2"
+  local expected_json
+
+  expected_json="$(<"$delta")"
+
+  [[ -f "$verify_delta_sql" ]] || die "event delta verification SQL is missing: $verify_delta_sql"
+  psql_exec -v "expected_json=$expected_json" < "$verify_delta_sql"
+}
+
+is_superseded_event_delta() {
+  local delta_id="$1"
+  local superseded_delta_file="$2"
+
+  [[ -f "$superseded_delta_file" ]] || return 1
+  awk '
+    /^[[:space:]]*(#|$)/ { next }
+    { sub(/^[[:space:]]+/, ""); sub(/[[:space:]]+$/, "") }
+    $0 == target { found = 1 }
+    END { exit(found ? 0 : 1) }
+  ' target="$delta_id" "$superseded_delta_file"
+}
+
 import_event_deltas() {
   local delta_dir="${EVENT_DELTA_DIR:-events/deltas}"
+  local superseded_delta_file="${EVENT_SUPERSEDED_DELTA_FILE:-$delta_dir/superseded-deltas.list}"
+  local verify_delta_sql="${EVENT_DELTA_VERIFY_SQL:-$delta_dir/verify-event-delta.sql}"
   local deltas=()
   local delta
   local delta_id
@@ -612,6 +638,12 @@ SQL
       continue
     fi
 
+    if is_superseded_event_delta "$delta_id" "$superseded_delta_file"; then
+      log "skipping superseded event delta $delta_id"
+      psql_exec -c "INSERT INTO portal_event_delta_t (delta_id, checksum) VALUES ('$delta_id', '$checksum');"
+      continue
+    fi
+
     log "importing event delta $delta_id with $importer_image"
     if ! docker run --rm -i \
       --network "$import_network" \
@@ -620,9 +652,15 @@ SQL
       -e DB_PASSWORD="${EVENT_IMPORT_DB_PASSWORD:-secret}" \
       -e DB_MAXIMUM_POOL_SIZE="${EVENT_IMPORT_DB_MAXIMUM_POOL_SIZE:-3}" \
       "$importer_image" \
-      --filename /dev/stdin < "$delta"; then
+      --filename /dev/stdin \
+      --fail-on-error < "$delta"; then
       die "failed to import event delta $delta_id"
     fi
+
+    if ! verify_event_delta_applied "$delta" "$verify_delta_sql"; then
+      die "event importer exited successfully but $delta_id was not fully applied"
+    fi
+    log "verified event effects for event delta $delta_id"
 
     psql_exec -c "INSERT INTO portal_event_delta_t (delta_id, checksum) VALUES ('$delta_id', '$checksum');"
   done

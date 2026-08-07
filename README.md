@@ -212,6 +212,13 @@ upgrade path when you want to keep the existing database. Use
 `CLEAN_VOLUMES=true` only when you intentionally want to recreate the database
 and re-import the full baseline `events.json`.
 
+New event deltas are recorded only after their requested aggregate versions
+are represented by the exact event or an equivalent payload effect at that or
+a later version. Release packages can also list an immutable broken delta in
+`events/deltas/superseded-deltas.list` and supply a later replacement. The
+replacement must reproduce the complete intended effect so preserved
+installations and fresh rebuilds converge.
+
 Override these if the public R2 custom domain changes:
 
 ```bash
