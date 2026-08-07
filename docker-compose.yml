@@ -329,6 +329,34 @@ services:
       controller:
         condition: service_healthy
 
+  llm-gateway:
+    image: ${LLM_GATEWAY_IMAGE:-${LIGHT_GATEWAY_IMAGE:-networknt/light-gateway:latest}}
+    ports:
+      - "${LLM_GATEWAY_HOST_PORT:-8444}:8443"
+    volumes:
+      - ./llm-gateway-rust/config:/config:ro,Z
+    environment:
+      LIGHT_RS_CONFIG_DIR: /config
+      LLM_GATEWAY_ENVIRONMENT: "${LLM_GATEWAY_ENVIRONMENT:-dev}"
+      GROQ_API_KEY: "${GROQ_API_KEY:-}"
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
+      CLIENT_VERIFYHOSTNAME: "false"
+      CLIENT_CACERTPATH: /config/ca.pem
+      LIGHT_PORTAL_AUTHORIZATION: "${LLM_GATEWAY_LIGHT_PORTAL_AUTHORIZATION:-Bearer eyJhbGciOiJSUzI1NiIsImtpZCI6IkFacDAyTUN1Y3J1WmZGSmJ5eUZ3dWcifQ.eyJpc3MiOiJ1cm46Y29tOm5ldHdvcmtudDpvYXV0aDI6djEiLCJhdWQiOiJ1cm46Y29tLm5ldHdvcmtudCIsInN1YiI6IjAxOWZkOWUzLWExMjgtN2UzOS1iNDZjLTNmMDQyOTJjNDAwNyIsImV4cCI6MjEwMTQyNzEwNSwianRpIjoiVXV3bm9CQ1NSVGlTelBJQmVwUHZBQSIsImlhdCI6MTc4NjA2NzEwNSwibmJmIjoxNzg2MDY2OTg1LCJ2ZXIiOiIxLjAiLCJjaWQiOiIwMTlmZDllMy1hMTI4LTdlMzktYjQ2Yy0zZjA0MjkyYzQwMDciLCJzY3AiOlsicG9ydGFsLnciLCJwb3J0YWwuciJdLCJjbGllbnRfaWQiOiIwMTlmZDllMy1hMTI4LTdlMzktYjQ2Yy0zZjA0MjkyYzQwMDciLCJzY29wZSI6InBvcnRhbC53IHBvcnRhbC5yIiwiZW52IjoiZGV2IiwiaG9zdCI6IjAxOTY0YjA1LTU1MmEtN2M0Yi05MTg0LTY4NTdlN2YzZGM1ZiIsInNpZCI6ImNvbS5uZXR3b3JrbnQubGxtLmdhdGV3YXktMS4wLjAifQ.ZXhlp0_pvMwDNS-Pws54jvCUFVwtXnyKwBD96V8FEWgWDf0RHovUtwhAYCvBM1OzpwCjIMhmzIQIsTQGcjl0iVK8khsX_VOXUVVVWHRX_u_XTkv05MOT0ywe1c-6ZIJHk-TOK9YCPt8CWE_QZVmbIyK44N8XIZIMhYybNBO_1ffKCyfzo2fJxr8fQwNIyhlHqKO4WF-WhSl4wdrkh879tSf1eELwxuIXPcXQqlbHrZT3WM85ICq1Z6nf6jt6Bp0qsxCEX2I-14PRFTYV7Q_1FBHh5YdWjDaKrvSfF_lsNfi1B-UWrH6nptkawaGhhM14enqDMzHM2kcRIti5nDvajQ}"
+      RUST_LOG: "${LLM_GATEWAY_RUST_LOG:-${RUST_LOG:-info}}"
+      GATEWAY_LOG_ANSI: "false"
+    hostname: llm-gateway
+    container_name: llm-gateway
+    depends_on:
+      postgres:
+        condition: service_healthy
+      controller:
+        condition: service_healthy
+      config-server:
+        condition: service_healthy
+      light-oauth:
+        condition: service_healthy
+
   light-agent:
     image: ${LIGHT_AGENT_IMAGE:-networknt/light-agent:latest}
     ports:

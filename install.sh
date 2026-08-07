@@ -27,6 +27,15 @@ Environment:
                              ~/.config/lightapi/light-portal.env
   LIGHT_PORTAL_REPO_ARCHIVE  Default:
                              https://github.com/lightapi/light-portal-install/archive/refs/heads/master.tar.gz
+  LLM_GATEWAY_HOST_PORT      Dedicated LLM gateway port. Default: 8444.
+  LLM_GATEWAY_IMAGE          Optional dedicated llm-gateway image override.
+  LLM_GATEWAY_ENVIRONMENT    Config snapshot tag. Default: dev.
+  LLM_GATEWAY_RUST_LOG       Optional llm-gateway log filter override.
+  GROQ_API_KEY               Optional Groq provider key for llm-gateway.
+  GEMINI_API_KEY             Optional Gemini provider key for llm-gateway.
+  LLM_GATEWAY_LIGHT_PORTAL_AUTHORIZATION
+                             Optional override for the bundled development
+                             llm-gateway Portal service token.
   IMPORT_EVENTS              Default: auto. Use false to skip event import.
   EVENT_IMPORTER_IMAGE       Default: networknt/event-importer:latest
   EVENT_IMPORT_BOOTSTRAP_OPERATOR_ID
@@ -259,6 +268,22 @@ start_stack() {
   require_command docker
   [[ -f .env ]] || cp .env.example .env
   compose up -d
+}
+
+validate_compose_config() {
+  local required_file
+
+  for required_file in \
+    llm-gateway-rust/config/startup.yml \
+    llm-gateway-rust/config/ca.pem \
+    llm-gateway-rust/config/cert.pem \
+    llm-gateway-rust/config/key.pem; do
+    [[ -f "$required_file" ]] ||
+      die "required llm-gateway config file is missing: $required_file"
+  done
+
+  log "validating Docker Compose configuration"
+  compose config --quiet || die "Docker Compose configuration validation failed"
 }
 
 clean_volumes_if_requested() {
@@ -583,6 +608,7 @@ apply_release_deltas() {
 bootstrap_events() {
   require_command docker
   [[ -f .env ]] || cp .env.example .env
+  validate_compose_config
   start_event_processors
   import_events
   start_light_oauth
@@ -599,6 +625,7 @@ case "$command_name" in
     else
       log "portal should be available at https://local.localhost:${LIGHT_GATEWAY_HOST_PORT}"
     fi
+    log "LLM gateway should be available at https://localhost:${LLM_GATEWAY_HOST_PORT:-8444}"
     ;;
   update)
     download_assets

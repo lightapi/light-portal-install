@@ -36,6 +36,35 @@ The installer downloads refreshed service assets from compressed Cloudflare R2
 archives in the `lightapi` bucket and starts the Rust `all-in-lt` stack with
 `light-agent`, the local demo REST APIs, and the insurance claim MCP server.
 
+## Dedicated LLM Gateway
+
+The installation also runs a dedicated `llm-gateway` from the
+`networknt/light-gateway` image. It uses
+`serviceId=com.networknt.llm.gateway-1.0.0` with `envTag=dev`, sharing the
+same development instance configuration as `portal-config-loc` and
+`portal-config-dev`. The deployment remains identifiable as the demo install;
+only the LLM configuration tag is shared.
+
+The gateway listens at `https://localhost:8444` by default. Copy
+`.env.example` to `.env` and add the provider keys you want to exercise:
+
+```dotenv
+GROQ_API_KEY=...
+GEMINI_API_KEY=...
+```
+
+The bundled development service token is suitable only for this local
+evaluation stack. Override it through
+`LLM_GATEWAY_LIGHT_PORTAL_AUTHORIZATION` when needed; the token must carry
+`sid=com.networknt.llm.gateway-1.0.0`. The port can be changed with
+`LLM_GATEWAY_HOST_PORT`, and the service image can be overridden independently
+with `LLM_GATEWAY_IMAGE`. `LLM_GATEWAY_RUST_LOG` overrides the shared
+`RUST_LOG` setting for this service.
+
+An authenticated `GET https://localhost:8444/v1/models` lists the configured
+models. Provider requests require the corresponding provider key; leaving a key
+empty keeps the installation bootable but that provider cannot serve requests.
+
 On install, update, and start, the script first starts Postgres plus
 `hybrid-command` and `hybrid-query`, imports `events.json` when `event_store_t`
 is empty, automatically using the importer's guarded bootstrap mode, and then
