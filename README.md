@@ -36,6 +36,32 @@ The installer downloads refreshed service assets from compressed Cloudflare R2
 archives in the `lightapi` bucket and starts the Rust `all-in-lt` stack with
 `light-agent`, the local demo REST APIs, and the insurance claim MCP server.
 
+## Light Knowledge profile
+
+The installer includes the Phase 1a `light-knowledge` API, projector, and full
+BASE builder as an optional Compose profile. Fresh PostgreSQL volumes apply the
+bundled embedding-space/profile prerequisites and the Phase 0 and Phase 1a
+schema scripts after the main Portal schema.
+
+Before enabling the profile, populate the runtime-only files listed in
+`light-knowledge/secrets/README.md`. Set `LIGHT_AGENT_DELEGATION_SECRET` to the
+same value stored in `light-knowledge/secrets/agent-delegation-secret`. The
+three database URLs must use login identities that inherit the API, worker,
+and Portal-projector roles created by the Phase 1a schema.
+
+Start the profile with the rest of the installer stack:
+
+```bash
+COMPOSE_PROFILES=knowledge ./install.sh start
+```
+
+The deterministic pilot configuration is enabled by default. Production
+qualification must replace it with separate protected `kb_index` and
+`kb_query` credentials and the qualified embedding-space contract. Existing
+volumes must receive the same schema through the normal versioned release-patch
+process; the `postgres-db/zy-*.sql` and `postgres-db/zz-*.sql` files run only
+during PostgreSQL initialization of a fresh volume.
+
 ## Dedicated LLM Gateway
 
 When both provider keys below are configured, the installation runs a

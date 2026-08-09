@@ -25,6 +25,7 @@ services:
       NOREPLAY_EMAIL_PASSWORD: ${NOREPLAY_EMAIL_PASSWORD:-}
       INSTANCE_CLONE_PLAN_HMAC_KEY: ${INSTANCE_CLONE_PLAN_HMAC_KEY:-light-portal-development-only-instance-clone-hmac-key-v1}
       INSTANCE_CLONE_PLAN_HMAC_KEY_ID: ${INSTANCE_CLONE_PLAN_HMAC_KEY_ID:-v1}
+      KNOWLEDGE_WORKLOAD_PRINCIPALS: ${KNOWLEDGE_WORKLOAD_PRINCIPALS:-light-knowledge-worker}
     volumes:
       - ./hybrid-command/config:/config:Z
       - ./hybrid-command/service:/service:Z
@@ -377,6 +378,8 @@ services:
       CODEX_REASONING_EFFORT: ${CODEX_REASONING_EFFORT:-low}
       LIGHT_AGENT_MODEL: ${LIGHT_AGENT_MODEL:-gpt-5.5}
       LIGHT_AGENT_TEMPERATURE: ${LIGHT_AGENT_TEMPERATURE:-0.7}
+      LIGHT_AGENT_DELEGATION_SECRET: ${LIGHT_AGENT_DELEGATION_SECRET:-}
+      LIGHT_AGENT_KNOWLEDGE_URL: http://light-knowledge:8092/
       RUST_LOG: ${LIGHT_AGENT_RUST_LOG:-info}
       AGENT_LOG_ANSI: "false"
     hostname: light-agent
@@ -400,6 +403,49 @@ services:
       timeout: 5s
       retries: 10
       start_period: 10s
+
+  light-knowledge:
+    profiles: ["knowledge"]
+    image: ${LIGHT_KNOWLEDGE_IMAGE:-networknt/light-knowledge:latest}
+    ports:
+      - "${LIGHT_KNOWLEDGE_PORT:-8092}:8092"
+    volumes:
+      - ./light-knowledge/config:/config:ro,Z
+      - ./light-knowledge/secrets:/run/secrets:ro,Z
+      - ./light-knowledge/objects:/var/lib/light-knowledge/objects:Z
+    environment:
+      LIGHT_KNOWLEDGE_CONFIG_FILE: /config/knowledge.yml
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  light-knowledge-projector:
+    profiles: ["knowledge"]
+    image: ${LIGHT_KNOWLEDGE_WORKER_IMAGE:-networknt/light-knowledge-worker:latest}
+    command: ["project-loop"]
+    volumes:
+      - ./light-knowledge/config:/config:ro,Z
+      - ./light-knowledge/secrets:/run/secrets:ro,Z
+    environment:
+      LIGHT_KNOWLEDGE_WORKER_CONFIG_FILE: /config/worker.yml
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  light-knowledge-builder:
+    profiles: ["knowledge"]
+    image: ${LIGHT_KNOWLEDGE_WORKER_IMAGE:-networknt/light-knowledge-worker:latest}
+    command: ["build-loop"]
+    volumes:
+      - ./light-knowledge/config:/config:ro,Z
+      - ./light-knowledge/secrets:/run/secrets:ro,Z
+      - ./light-knowledge/objects:/var/lib/light-knowledge/objects:Z
+      - ./light-knowledge/checkouts:/var/lib/light-knowledge/checkouts:Z
+    environment:
+      LIGHT_KNOWLEDGE_WORKER_CONFIG_FILE: /config/worker.yml
+    depends_on:
+      postgres:
+        condition: service_healthy
 
 volumes:
   postgres-data:
