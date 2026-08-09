@@ -38,16 +38,25 @@ archives in the `lightapi` bucket and starts the Rust `all-in-lt` stack with
 
 ## Light Knowledge profile
 
-The installer includes the Phase 1a `light-knowledge` API, projector, and full
-BASE builder as an optional Compose profile. Fresh PostgreSQL volumes apply the
-bundled embedding-space/profile prerequisites and the Phase 0 and Phase 1a
-schema scripts after the main Portal schema.
+The installer includes the Phase 2 `light-knowledge` API, projector, and
+BASE/DELTA builder as an optional Compose profile, including bounded uploads,
+multi-KB retrieval, and the MCP adapter. Fresh PostgreSQL volumes apply the
+bundled embedding-space/profile prerequisites and the Phase 0 through Phase 2
+schema scripts after the main Portal schema. Production promotion still
+requires the environment-dependent Phase 2 qualification evidence;
+these local/development feature flags do not waive that gate.
 
 Before enabling the profile, populate the runtime-only files listed in
 `light-knowledge/secrets/README.md`. Set `LIGHT_AGENT_DELEGATION_SECRET` to the
 same value stored in `light-knowledge/secrets/agent-delegation-secret`. The
 three database URLs must use login identities that inherit the API, worker,
-and Portal-projector roles created by the Phase 1a schema.
+and Portal-projector roles extended by the Phase 2 schema. SharePoint and
+Confluence workers use a source-scoped `enterpriseConnectorPageUrl`, an
+external bearer secret, and the provider `enterpriseConnectorApprovedOrigin`.
+Notifications enqueue independent priority ACL and bulk content reconciliation;
+they never authorize retrieval or advance a cursor by themselves. The bundled
+operational migration adds transition audit, ACL-mode fencing, sustainable
+FULL/DELTA freshness, and atomic cursor/promotion enforcement.
 
 Start the profile with the rest of the installer stack:
 

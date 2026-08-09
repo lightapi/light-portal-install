@@ -18,8 +18,9 @@ queryCacheMaximumEntries: 2048
 queryCacheMaximumBytes: 67108864
 queryCacheTtlSeconds: 300
 features:
-  deltaSegments: false
-  uploads: false
+  deltaSegments: true
+  uploads: true
   contextExpansion: false
-  multiKnowledgeBase: false
+  multiKnowledgeBase: true
   graphAssisted: false
+  enterpriseSourceAcls: false

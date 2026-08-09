@@ -6,6 +6,7 @@ Provide these runtime-only files before enabling the `knowledge` Compose profile
 - `agent-delegation-secret`
 - `knowledge-heartbeat-secret`
 - `knowledge-portal-authorization`
+- `knowledge-connector-authorization` (only for a Phase 2 enterprise source)
 
 Protected embedding qualification also requires separate `kb_index` and
 `kb_query` workload credentials. Point `embeddingAuthorizationFile` in the
@@ -13,7 +14,12 @@ worker and API configs at their respective runtime-only files when
 `deterministicPilot` is set to `false`; do not reuse a standard model lane.
 
 Do not commit their values. The three database identities must use the API,
-worker, and projector roles created by the Phase 1a schema.
+worker, and projector roles created by the Phase 2 schema.
+
+The connector credential is source-scoped and least privilege. For SharePoint,
+prefer selected-site access where supported; Confluence credentials must be
+restricted to the approved site and spaces. Never reuse Portal, delegation,
+embedding, or connector credentials across purposes.
 
 The `agent-delegation-secret` value must match
 `LIGHT_AGENT_DELEGATION_SECRET`. The bearer token stored in
