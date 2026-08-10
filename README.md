@@ -38,12 +38,12 @@ archives in the `lightapi` bucket and starts the Rust `all-in-lt` stack with
 
 ## Light Knowledge profile
 
-The installer includes the Phase 2 `light-knowledge` API, projector, and
+The installer includes the Phase 3 `light-knowledge` API, projector, and
 BASE/DELTA builder as an optional Compose profile, including bounded uploads,
 multi-KB retrieval, and the MCP adapter. Fresh PostgreSQL volumes apply the
-bundled embedding-space/profile prerequisites and the Phase 0 through Phase 2
+bundled embedding-space/profile prerequisites and the Phase 0 through Phase 3
 schema scripts after the main Portal schema. Production promotion still
-requires the environment-dependent Phase 2 qualification evidence;
+requires the environment-dependent Phase 2 and Phase 3 qualification evidence;
 these local/development feature flags do not waive that gate.
 
 Before enabling the profile, populate the runtime-only files listed in
@@ -57,6 +57,11 @@ Notifications enqueue independent priority ACL and bulk content reconciliation;
 they never authorize retrieval or advance a cursor by themselves. The bundled
 operational migration adds transition audit, ACL-mode fencing, sustainable
 FULL/DELTA freshness, and atomic cursor/promotion enforcement.
+The Phase 3 migration adds budgeted embedding migration, candidate isolation,
+watermark fencing, retention/legal-hold accounting, scheduled anti-entropy and
+checkpoint requests, restore-verification metadata, and purge evidence. Its
+feature switches remain disabled until live migration, backup/restore,
+large-corpus, and horizontal-worker qualification passes.
 
 Start the profile with the rest of the installer stack:
 

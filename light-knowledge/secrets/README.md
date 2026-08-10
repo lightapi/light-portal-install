@@ -12,6 +12,10 @@ Protected embedding qualification also requires separate `kb_index` and
 `kb_query` workload credentials. Point `embeddingAuthorizationFile` in the
 worker and API configs at their respective runtime-only files when
 `deterministicPilot` is set to `false`; do not reuse a standard model lane.
+Embedding migrations additionally keep `migrationDeterministicPilot: false`.
+The `kb_index` lane must enforce `x-light-maximum-billed-cost-micros` and return
+`x-light-billed-cost-micros`; a response without bounded cost evidence is
+rejected after the worker has reserved the approved budget.
 
 Do not commit their values. The three database identities must use the API,
 worker, and projector roles created by the Phase 2 schema.
