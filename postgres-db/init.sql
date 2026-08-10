@@ -7904,6 +7904,110 @@ END;
 $$ LANGUAGE plpgsql;
 
 
+-- BEGIN patch_20260810_01_llm_remove_conformance_lifecycle.sql
+BEGIN;
+
+-- Preserve the immutable embedding-space contract before retiring live
+-- conformance. Existing deployments that route to one exact Alias space can
+-- inherit that operator-declared space into the global model declaration.
+WITH model_spaces AS (
+    SELECT registration.model_id,
+           (jsonb_agg(DISTINCT alias.required_capabilities->'embeddingSpace'))->0 AS space
+      FROM llm_public_alias_t alias
+      JOIN llm_alias_route_t route ON route.host_id=alias.host_id
+       AND route.public_alias_id=alias.public_alias_id AND route.active IS TRUE
+      JOIN llm_provider_deployment_t deployment ON deployment.host_id=route.host_id
+       AND deployment.provider_deployment_id=route.provider_deployment_id
+       AND deployment.active IS TRUE AND deployment.provider_protocol='openai_embeddings'
+      JOIN llm_model_registration_t registration ON registration.host_id=deployment.host_id
+       AND registration.model_registration_id=deployment.model_registration_id
+     WHERE alias.active IS TRUE
+       AND jsonb_typeof(alias.required_capabilities->'embeddingSpace')='object'
+     GROUP BY registration.model_id
+    HAVING count(DISTINCT alias.required_capabilities->'embeddingSpace')=1
+)
+UPDATE llm_model_t model
+   SET declared_capabilities=jsonb_set(
+       model.declared_capabilities,
+       '{embedding}',
+       COALESCE(model.declared_capabilities->'embedding','{}'::jsonb)
+           || jsonb_build_object('space',spaces.space),
+       TRUE)
+  FROM model_spaces spaces
+ WHERE model.model_id=spaces.model_id
+   AND model.operations ? 'embed'
+   AND NOT (model.declared_capabilities->'embedding' ? 'space');
+
+-- Lifecycle is no longer an authoring workflow, but terminal historical states
+-- still express an operator's intent that a resource must not be published.
+-- Preserve that intent through the existing soft-delete flag before dropping
+-- the lifecycle columns. Draft/pending/validating rows remain active by design.
+UPDATE llm_model_t SET active=FALSE WHERE lifecycle_status IN ('DEPRECATED','RETIRED');
+UPDATE llm_model_registration_t SET active=FALSE WHERE lifecycle_status IN ('SUSPENDED','RETIRED');
+UPDATE llm_provider_account_t SET active=FALSE WHERE lifecycle_status IN ('SUSPENDED','RETIRED');
+UPDATE llm_network_zone_t SET active=FALSE WHERE lifecycle_status IN ('SUSPENDED','RETIRED');
+UPDATE llm_provider_endpoint_t SET active=FALSE WHERE lifecycle_status IN ('SUSPENDED','RETIRED');
+UPDATE llm_provider_credential_t SET active=FALSE WHERE lifecycle_status IN ('REVOKED','EXPIRED');
+UPDATE llm_public_alias_t SET active=FALSE WHERE lifecycle_status IN ('DEPRECATED','RETIRED');
+UPDATE llm_model_policy_t SET active=FALSE WHERE lifecycle_status IN ('SUSPENDED','RETIRED');
+UPDATE llm_provider_deployment_t SET active=FALSE WHERE lifecycle_status IN ('SUSPENDED','RETIRED');
+
+DROP VIEW IF EXISTS knowledge_qualified_embedding_alias_v;
+DROP INDEX IF EXISTS llm_deployment_conformance_due_idx;
+
+ALTER TABLE llm_model_t DROP COLUMN IF EXISTS lifecycle_status;
+ALTER TABLE llm_model_registration_t DROP COLUMN IF EXISTS lifecycle_status;
+ALTER TABLE llm_provider_account_t DROP COLUMN IF EXISTS lifecycle_status;
+ALTER TABLE llm_network_zone_t DROP COLUMN IF EXISTS lifecycle_status;
+ALTER TABLE llm_provider_endpoint_t DROP COLUMN IF EXISTS lifecycle_status;
+ALTER TABLE llm_provider_credential_t DROP COLUMN IF EXISTS lifecycle_status;
+ALTER TABLE llm_public_alias_t DROP COLUMN IF EXISTS lifecycle_status;
+ALTER TABLE llm_model_policy_t DROP COLUMN IF EXISTS lifecycle_status;
+ALTER TABLE llm_provider_deployment_t
+    DROP COLUMN IF EXISTS lifecycle_status,
+    DROP COLUMN IF EXISTS conformance_state,
+    DROP COLUMN IF EXISTS conformance_digest,
+    DROP COLUMN IF EXISTS conformance_valid_until,
+    DROP COLUMN IF EXISTS conformance_result,
+    DROP COLUMN IF EXISTS qualification_contract,
+    DROP COLUMN IF EXISTS refresh_before_seconds;
+
+CREATE VIEW knowledge_qualified_embedding_alias_v AS
+SELECT alias.host_id,alias.host_id AS alias_owner_host_id,alias.public_alias_id,alias.alias_name,
+       alias.required_capabilities->'embeddingSpace' AS embedding_space,
+       TRUE AS active,alias.update_ts,count(*) AS eligible_route_count
+  FROM llm_public_alias_t alias
+  JOIN llm_alias_route_t route ON route.host_id=alias.host_id
+   AND route.public_alias_id=alias.public_alias_id AND route.active IS TRUE
+  JOIN llm_provider_deployment_t deployment ON deployment.host_id=route.host_id
+   AND deployment.provider_deployment_id=route.provider_deployment_id
+   AND deployment.active IS TRUE AND deployment.provider_protocol='openai_embeddings'
+  JOIN llm_model_registration_t registration ON registration.host_id=deployment.host_id
+   AND registration.model_registration_id=deployment.model_registration_id AND registration.active IS TRUE
+  JOIN llm_model_t model ON model.model_id=registration.model_id AND model.active IS TRUE
+ WHERE alias.active IS TRUE AND alias.operations ? 'embed'
+   AND alias.require_expected_embedding_space IS TRUE
+   AND (model.declared_capabilities || registration.capability_restrictions)
+       ->'embedding'->'space'=alias.required_capabilities->'embeddingSpace'
+ GROUP BY alias.host_id,alias.public_alias_id,alias.alias_name,
+          alias.required_capabilities->'embeddingSpace',alias.update_ts
+HAVING bool_and(
+    jsonb_array_length(COALESCE(
+        (model.declared_capabilities || registration.capability_restrictions)
+            ->'embedding'->'supportedDimensions',
+        (model.declared_capabilities || registration.capability_restrictions)
+            ->'embedding'->'dimensions'))=1
+    AND COALESCE(
+        (model.declared_capabilities || registration.capability_restrictions)
+            ->'embedding'->'supportedDimensions',
+        (model.declared_capabilities || registration.capability_restrictions)
+            ->'embedding'->'dimensions')
+        @> jsonb_build_array((alias.required_capabilities->'embeddingSpace'->>'dimension')::integer)
+);
+
+COMMIT;
+-- END patch_20260810_01_llm_remove_conformance_lifecycle.sql
+
 INSERT INTO user_t (user_id, language, first_name, last_name, email, user_type, verified, password)
 VALUES ('01964b05-5532-7c79-8cde-191dcbd421b8', 'en', 'Steve', 'Hu', 'steve.hu@lightapi.net', 'E', true, '1000:5b39342c202d37372c203132302c202d3132302c2034372c2032332c2034352c202d34342c202d31362c2034372c202d35392c202d35362c2039302c202d352c202d38322c202d32385d:949e6fcf9c4bb8a3d6a8c141a3a9182a572fb95fe8ccdc93b54ba53df8ef2e930f7b0348590df0d53f242ccceeae03aef6d273a34638b49c559ada110ec06992');
 
