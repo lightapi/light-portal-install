@@ -414,7 +414,7 @@ services:
       - ./light-knowledge/secrets:/run/secrets:ro,Z
       - ./light-knowledge/objects:/var/lib/light-knowledge/objects:Z
     environment:
-      LIGHT_KNOWLEDGE_CONFIG_FILE: /config/knowledge.yml
+      LIGHT_KNOWLEDGE_CONFIG_FILE: ${LIGHT_KNOWLEDGE_CONFIG_FILE:-/config/knowledge.yml}
     depends_on:
       postgres:
         condition: service_healthy
@@ -427,7 +427,7 @@ services:
       - ./light-knowledge/config:/config:ro,Z
       - ./light-knowledge/secrets:/run/secrets:ro,Z
     environment:
-      LIGHT_KNOWLEDGE_WORKER_CONFIG_FILE: /config/worker.yml
+      LIGHT_KNOWLEDGE_WORKER_CONFIG_FILE: ${LIGHT_KNOWLEDGE_WORKER_CONFIG_FILE:-/config/worker.yml}
     depends_on:
       postgres:
         condition: service_healthy
@@ -442,7 +442,7 @@ services:
       - ./light-knowledge/objects:/var/lib/light-knowledge/objects:Z
       - ./light-knowledge/checkouts:/var/lib/light-knowledge/checkouts:Z
     environment:
-      LIGHT_KNOWLEDGE_WORKER_CONFIG_FILE: /config/worker.yml
+      LIGHT_KNOWLEDGE_WORKER_CONFIG_FILE: ${LIGHT_KNOWLEDGE_WORKER_CONFIG_FILE:-/config/worker.yml}
     depends_on:
       postgres:
         condition: service_healthy
