@@ -18,3 +18,6 @@ light-gateway-rust/signin/dist/*
 .claude/
 AGENTS.md
 CLAUDE.md
+
+light-knowledge/secrets/*
+!light-knowledge/secrets/README.md

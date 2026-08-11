@@ -302,7 +302,83 @@ download_assets() {
 start_stack() {
   require_command docker
   [[ -f .env ]] || cp .env.example .env
+  ensure_knowledge_runtime
   compose up -d
+}
+
+knowledge_profile_enabled() {
+  local profiles="${COMPOSE_PROFILES:-}"
+  if [[ -z "$profiles" && -f .env ]]; then
+    profiles="$(awk -F= '$1 == "COMPOSE_PROFILES" { sub(/^[^=]*=/, ""); print; exit }' .env)"
+  fi
+  [[ ",$profiles," == *,knowledge,* ]]
+}
+
+env_value() {
+  local name="$1"
+  local value="${!name:-}"
+  if [[ -z "$value" && -f .env ]]; then
+    value="$(awk -F= -v key="$name" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' .env)"
+  fi
+  printf '%s' "$value"
+}
+
+write_secret_once() {
+  local path="$1"
+  local value="$2"
+  if [[ ! -s "$path" ]]; then
+    printf '%s' "$value" > "$path"
+    chmod 600 "$path"
+  fi
+}
+
+write_secret() {
+  local path="$1"
+  local value="$2"
+  printf '%s' "$value" > "$path"
+  chmod 600 "$path"
+}
+
+ensure_knowledge_runtime() {
+  knowledge_profile_enabled || return 0
+  require_command openssl
+  local secret_dir="light-knowledge/secrets"
+  local api_password worker_password projector_password delegation_secret
+  local portal_token query_embedding_token index_embedding_token
+  mkdir -p "$secret_dir"
+
+  api_password="$(openssl rand -hex 32)"
+  worker_password="$(openssl rand -hex 32)"
+  projector_password="$(openssl rand -hex 32)"
+  [[ -s "$secret_dir/.api-db-password" ]] && api_password="$(<"$secret_dir/.api-db-password")"
+  [[ -s "$secret_dir/.worker-db-password" ]] && worker_password="$(<"$secret_dir/.worker-db-password")"
+  [[ -s "$secret_dir/.projector-db-password" ]] && projector_password="$(<"$secret_dir/.projector-db-password")"
+  write_secret_once "$secret_dir/.api-db-password" "$api_password"
+  write_secret_once "$secret_dir/.worker-db-password" "$worker_password"
+  write_secret_once "$secret_dir/.projector-db-password" "$projector_password"
+
+  docker exec postgres psql -U postgres -d configserver -v ON_ERROR_STOP=1 \
+    -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='light_knowledge_api') THEN CREATE ROLE light_knowledge_api LOGIN; END IF; IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='light_knowledge_worker') THEN CREATE ROLE light_knowledge_worker LOGIN; END IF; IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='light_knowledge_projector') THEN CREATE ROLE light_knowledge_projector LOGIN; END IF; END \$\$; ALTER ROLE light_knowledge_api PASSWORD '$api_password'; ALTER ROLE light_knowledge_worker PASSWORD '$worker_password'; ALTER ROLE light_knowledge_projector PASSWORD '$projector_password'; GRANT light_knowledge_api_role TO light_knowledge_api; GRANT light_knowledge_worker_role TO light_knowledge_worker; GRANT light_knowledge_portal_projector_role TO light_knowledge_projector;" >/dev/null
+
+  write_secret_once "$secret_dir/knowledge-database-url" "postgres://light_knowledge_api:$api_password@postgres:5432/configserver"
+  write_secret_once "$secret_dir/knowledge-worker-database-url" "postgres://light_knowledge_worker:$worker_password@postgres:5432/configserver"
+  write_secret_once "$secret_dir/knowledge-projector-database-url" "postgres://light_knowledge_projector:$projector_password@postgres:5432/configserver"
+  write_secret_once "$secret_dir/knowledge-query-cache-key" "$(openssl rand -hex 48)"
+  write_secret_once "$secret_dir/knowledge-heartbeat-secret" "$(openssl rand -hex 48)"
+
+  delegation_secret="$(env_value LIGHT_AGENT_DELEGATION_SECRET)"
+  [[ -n "$delegation_secret" ]] || die "COMPOSE_PROFILES=knowledge requires LIGHT_AGENT_DELEGATION_SECRET in .env"
+  write_secret "$secret_dir/agent-delegation-secret" "$delegation_secret"
+  portal_token="$(env_value KNOWLEDGE_PORTAL_AUTHORIZATION)"
+  query_embedding_token="$(env_value KNOWLEDGE_QUERY_EMBEDDING_AUTHORIZATION)"
+  index_embedding_token="$(env_value KNOWLEDGE_INDEX_EMBEDDING_AUTHORIZATION)"
+  [[ -n "$portal_token" ]] || die "knowledge profile requires KNOWLEDGE_PORTAL_AUTHORIZATION"
+  [[ -n "$query_embedding_token" ]] || die "knowledge profile requires KNOWLEDGE_QUERY_EMBEDDING_AUTHORIZATION"
+  [[ -n "$index_embedding_token" ]] || die "knowledge profile requires KNOWLEDGE_INDEX_EMBEDDING_AUTHORIZATION"
+  write_secret "$secret_dir/knowledge-portal-authorization" "$portal_token"
+  write_secret "$secret_dir/knowledge-query-embedding-authorization" "$query_embedding_token"
+  write_secret "$secret_dir/knowledge-index-embedding-authorization" "$index_embedding_token"
+  log "Knowledge API, projector, and worker identities and runtime secret files are ready"
 }
 
 validate_compose_config() {

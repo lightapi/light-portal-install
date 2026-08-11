@@ -1,4 +1,9 @@
-Provide these runtime-only files before enabling the `knowledge` Compose profile:
+When the `knowledge` Compose profile is enabled, `install.sh` creates separate
+local PostgreSQL login identities for the API, projector, and builder and
+materializes their URL files. It also generates the cache and heartbeat keys.
+Provide the externally issued delegation and workload tokens through `.env`;
+the installer copies them into mode-0600 runtime-only files. The complete file
+set is:
 
 - `knowledge-database-url`
 - `knowledge-worker-database-url`
@@ -12,10 +17,11 @@ Provide these runtime-only files before enabling the `knowledge` Compose profile
 - `knowledge-connector-authorization` (only for a Phase 2 enterprise source)
 
 The installer defaults to protected embeddings and separate `kb_index` and
-`kb_query` workload credentials. Replace the operator-assigned embedding-space
-identifier, revision, and dimension in both configs with one qualified gateway
-contract before starting the profile. The service rejects a gateway response
-whose selected space does not match. Do not reuse a standard model lane.
+`kb_query` workload credentials. Repository, immutable commit, ingestion
+policy, Knowledge Base, and embedding-space values are resolved from the
+projected Portal control plane for each claimed job; they are not worker
+configuration. The service rejects a gateway response whose selected space
+does not match the selected qualified profile. Do not reuse a standard model lane.
 Embedding migrations additionally keep `migrationDeterministicPilot: false`.
 The `kb_index` lane must enforce `x-light-maximum-billed-cost-micros` and return
 `x-light-billed-cost-micros`; a response without bounded cost evidence is
@@ -44,9 +50,11 @@ operation.
 
 The checked-in `portal-config-dev` and `portal-config-loc` fixtures remain
 explicit deterministic pilots. Do not copy their fake 32-dimensional space
-into this installer. A builder instance is a declared shard for the configured
-`knowledgeBaseId` and `sourceId`; run one shard per identity pair. Job leases
-are renewed while work is running and expired claims are safely requeued.
+into this installer. Builders form a shared job pool: a claimed job resolves a
+versioned source/policy/profile snapshot from PostgreSQL, enforces the policy
+concurrency ceiling, and rebuilds one complete BASE across every active Git
+source in the Knowledge Base. Job leases are renewed while work is running and
+expired claims are safely requeued.
 
 Start the protected installer with both `knowledge` and `llm-gateway` Compose
 profiles. For a deliberately local deterministic exercise only, set

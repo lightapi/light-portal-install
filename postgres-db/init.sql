@@ -7942,37 +7942,69 @@ UPDATE llm_model_t model
 -- still express an operator's intent that a resource must not be published.
 -- Preserve that intent through the existing soft-delete flag before dropping
 -- the lifecycle columns. Draft/pending/validating rows remain active by design.
-UPDATE llm_model_t SET active=FALSE WHERE lifecycle_status IN ('DEPRECATED','RETIRED');
-UPDATE llm_model_registration_t SET active=FALSE WHERE lifecycle_status IN ('SUSPENDED','RETIRED');
-UPDATE llm_provider_account_t SET active=FALSE WHERE lifecycle_status IN ('SUSPENDED','RETIRED');
-UPDATE llm_network_zone_t SET active=FALSE WHERE lifecycle_status IN ('SUSPENDED','RETIRED');
-UPDATE llm_provider_endpoint_t SET active=FALSE WHERE lifecycle_status IN ('SUSPENDED','RETIRED');
-UPDATE llm_provider_credential_t SET active=FALSE WHERE lifecycle_status IN ('REVOKED','EXPIRED');
-UPDATE llm_public_alias_t SET active=FALSE WHERE lifecycle_status IN ('DEPRECATED','RETIRED');
-UPDATE llm_model_policy_t SET active=FALSE WHERE lifecycle_status IN ('SUSPENDED','RETIRED');
-UPDATE llm_provider_deployment_t SET active=FALSE WHERE lifecycle_status IN ('SUSPENDED','RETIRED');
+DO $preserve_terminal_lifecycle$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_attribute
+                WHERE attrelid='llm_model_t'::regclass
+                  AND attname='lifecycle_status' AND NOT attisdropped) THEN
+        EXECUTE $sql$UPDATE llm_model_t SET active=FALSE
+                     WHERE lifecycle_status IN ('DEPRECATED','RETIRED')$sql$;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_attribute
+                WHERE attrelid='llm_model_registration_t'::regclass
+                  AND attname='lifecycle_status' AND NOT attisdropped) THEN
+        EXECUTE $sql$UPDATE llm_model_registration_t SET active=FALSE
+                     WHERE lifecycle_status IN ('SUSPENDED','RETIRED')$sql$;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_attribute
+                WHERE attrelid='llm_provider_account_t'::regclass
+                  AND attname='lifecycle_status' AND NOT attisdropped) THEN
+        EXECUTE $sql$UPDATE llm_provider_account_t SET active=FALSE
+                     WHERE lifecycle_status IN ('SUSPENDED','RETIRED')$sql$;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_attribute
+                WHERE attrelid='llm_network_zone_t'::regclass
+                  AND attname='lifecycle_status' AND NOT attisdropped) THEN
+        EXECUTE $sql$UPDATE llm_network_zone_t SET active=FALSE
+                     WHERE lifecycle_status IN ('SUSPENDED','RETIRED')$sql$;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_attribute
+                WHERE attrelid='llm_provider_endpoint_t'::regclass
+                  AND attname='lifecycle_status' AND NOT attisdropped) THEN
+        EXECUTE $sql$UPDATE llm_provider_endpoint_t SET active=FALSE
+                     WHERE lifecycle_status IN ('SUSPENDED','RETIRED')$sql$;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_attribute
+                WHERE attrelid='llm_provider_credential_t'::regclass
+                  AND attname='lifecycle_status' AND NOT attisdropped) THEN
+        EXECUTE $sql$UPDATE llm_provider_credential_t SET active=FALSE
+                     WHERE lifecycle_status IN ('REVOKED','EXPIRED')$sql$;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_attribute
+                WHERE attrelid='llm_public_alias_t'::regclass
+                  AND attname='lifecycle_status' AND NOT attisdropped) THEN
+        EXECUTE $sql$UPDATE llm_public_alias_t SET active=FALSE
+                     WHERE lifecycle_status IN ('DEPRECATED','RETIRED')$sql$;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_attribute
+                WHERE attrelid='llm_model_policy_t'::regclass
+                  AND attname='lifecycle_status' AND NOT attisdropped) THEN
+        EXECUTE $sql$UPDATE llm_model_policy_t SET active=FALSE
+                     WHERE lifecycle_status IN ('SUSPENDED','RETIRED')$sql$;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_attribute
+                WHERE attrelid='llm_provider_deployment_t'::regclass
+                  AND attname='lifecycle_status' AND NOT attisdropped) THEN
+        EXECUTE $sql$UPDATE llm_provider_deployment_t SET active=FALSE
+                     WHERE lifecycle_status IN ('SUSPENDED','RETIRED')$sql$;
+    END IF;
+END
+$preserve_terminal_lifecycle$;
 
-DROP VIEW IF EXISTS knowledge_qualified_embedding_alias_v;
-DROP INDEX IF EXISTS llm_deployment_conformance_due_idx;
-
-ALTER TABLE llm_model_t DROP COLUMN IF EXISTS lifecycle_status;
-ALTER TABLE llm_model_registration_t DROP COLUMN IF EXISTS lifecycle_status;
-ALTER TABLE llm_provider_account_t DROP COLUMN IF EXISTS lifecycle_status;
-ALTER TABLE llm_network_zone_t DROP COLUMN IF EXISTS lifecycle_status;
-ALTER TABLE llm_provider_endpoint_t DROP COLUMN IF EXISTS lifecycle_status;
-ALTER TABLE llm_provider_credential_t DROP COLUMN IF EXISTS lifecycle_status;
-ALTER TABLE llm_public_alias_t DROP COLUMN IF EXISTS lifecycle_status;
-ALTER TABLE llm_model_policy_t DROP COLUMN IF EXISTS lifecycle_status;
-ALTER TABLE llm_provider_deployment_t
-    DROP COLUMN IF EXISTS lifecycle_status,
-    DROP COLUMN IF EXISTS conformance_state,
-    DROP COLUMN IF EXISTS conformance_digest,
-    DROP COLUMN IF EXISTS conformance_valid_until,
-    DROP COLUMN IF EXISTS conformance_result,
-    DROP COLUMN IF EXISTS qualification_contract,
-    DROP COLUMN IF EXISTS refresh_before_seconds;
-
-CREATE VIEW knowledge_qualified_embedding_alias_v AS
+-- Preserve dependent views such as knowledge_embedding_profile_runtime_v.
+-- The replacement exposes the same columns while releasing its dependencies
+-- on the lifecycle and conformance columns before those columns are dropped.
+CREATE OR REPLACE VIEW knowledge_qualified_embedding_alias_v AS
 SELECT alias.host_id,alias.host_id AS alias_owner_host_id,alias.public_alias_id,alias.alias_name,
        alias.required_capabilities->'embeddingSpace' AS embedding_space,
        TRUE AS active,alias.update_ts,count(*) AS eligible_route_count
@@ -8004,6 +8036,25 @@ HAVING bool_and(
             ->'embedding'->'dimensions')
         @> jsonb_build_array((alias.required_capabilities->'embeddingSpace'->>'dimension')::integer)
 );
+
+DROP INDEX IF EXISTS llm_deployment_conformance_due_idx;
+
+ALTER TABLE llm_model_t DROP COLUMN IF EXISTS lifecycle_status;
+ALTER TABLE llm_model_registration_t DROP COLUMN IF EXISTS lifecycle_status;
+ALTER TABLE llm_provider_account_t DROP COLUMN IF EXISTS lifecycle_status;
+ALTER TABLE llm_network_zone_t DROP COLUMN IF EXISTS lifecycle_status;
+ALTER TABLE llm_provider_endpoint_t DROP COLUMN IF EXISTS lifecycle_status;
+ALTER TABLE llm_provider_credential_t DROP COLUMN IF EXISTS lifecycle_status;
+ALTER TABLE llm_public_alias_t DROP COLUMN IF EXISTS lifecycle_status;
+ALTER TABLE llm_model_policy_t DROP COLUMN IF EXISTS lifecycle_status;
+ALTER TABLE llm_provider_deployment_t
+    DROP COLUMN IF EXISTS lifecycle_status,
+    DROP COLUMN IF EXISTS conformance_state,
+    DROP COLUMN IF EXISTS conformance_digest,
+    DROP COLUMN IF EXISTS conformance_valid_until,
+    DROP COLUMN IF EXISTS conformance_result,
+    DROP COLUMN IF EXISTS qualification_contract,
+    DROP COLUMN IF EXISTS refresh_before_seconds;
 
 COMMIT;
 -- END patch_20260810_01_llm_remove_conformance_lifecycle.sql

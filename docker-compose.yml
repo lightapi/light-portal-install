@@ -427,7 +427,7 @@ services:
       - ./light-knowledge/config:/config:ro,Z
       - ./light-knowledge/secrets:/run/secrets:ro,Z
     environment:
-      LIGHT_KNOWLEDGE_WORKER_CONFIG_FILE: ${LIGHT_KNOWLEDGE_WORKER_CONFIG_FILE:-/config/worker.yml}
+      LIGHT_KNOWLEDGE_WORKER_CONFIG_FILE: ${LIGHT_KNOWLEDGE_PROJECTOR_CONFIG_FILE:-/config/projector.yml}
     depends_on:
       postgres:
         condition: service_healthy
