@@ -53,6 +53,7 @@ DROP TABLE IF EXISTS runner_backend_t CASCADE;
 DROP TABLE IF EXISTS runner_session_t CASCADE;
 DROP TABLE IF EXISTS workflow_execution_policy_t CASCADE;
 
+-- Unsupported flat-memory table cleanup. These tables are intentionally not recreated.
 DROP TABLE IF EXISTS session_memory_t CASCADE;
 
 DROP TABLE IF EXISTS user_memory_t CASCADE;
@@ -98,8 +99,13 @@ DROP TABLE IF EXISTS skill_param_t CASCADE;
 DROP TABLE IF EXISTS skill_t CASCADE;
 
 DROP TABLE IF EXISTS llm_gateway_instance_property_ownership_t CASCADE;
+DROP TABLE IF EXISTS gateway_tool_binding_t CASCADE;
+DROP TABLE IF EXISTS gateway_tool_publication_t CASCADE;
 DROP TABLE IF EXISTS llm_gateway_instance_publication_t CASCADE;
+DROP TABLE IF EXISTS llm_gateway_publication_ack_t CASCADE;
 DROP TABLE IF EXISTS llm_gateway_publication_t CASCADE;
+DROP TABLE IF EXISTS llm_gateway_replica_inventory_member_t CASCADE;
+DROP TABLE IF EXISTS llm_gateway_replica_inventory_t CASCADE;
 DROP TABLE IF EXISTS llm_projection_resource_t CASCADE;
 DROP TABLE IF EXISTS llm_model_policy_binding_t CASCADE;
 DROP TABLE IF EXISTS agent_definition_t CASCADE;
@@ -109,6 +115,8 @@ DROP TABLE IF EXISTS llm_alias_route_t CASCADE;
 DROP TABLE IF EXISTS llm_public_alias_t CASCADE;
 DROP TABLE IF EXISTS llm_provider_credential_t CASCADE;
 DROP TABLE IF EXISTS llm_provider_deployment_t CASCADE;
+DROP TABLE IF EXISTS llm_provider_endpoint_t CASCADE;
+DROP TABLE IF EXISTS llm_network_zone_t CASCADE;
 DROP TABLE IF EXISTS llm_provider_account_t CASCADE;
 DROP TABLE IF EXISTS llm_model_registration_t CASCADE;
 DROP TABLE IF EXISTS llm_model_t CASCADE;
@@ -3114,6 +3122,7 @@ CREATE TABLE wf_definition_t (
     name                VARCHAR(126) NOT NULL,
     version             VARCHAR(20) NOT NULL,
     definition          TEXT NOT NULL, -- The Agentic Workflow DSL in YAML
+    lifecycle_status    VARCHAR(16) DEFAULT 'DRAFT' NOT NULL CHECK(lifecycle_status IN ('DRAFT','PUBLISHED','DEPRECATED')),
     catalog_visible     BOOLEAN,
     owner_user_id       UUID,
     owner_position_id   VARCHAR(128),
@@ -3124,6 +3133,29 @@ CREATE TABLE wf_definition_t (
     PRIMARY KEY(host_id, wf_def_id),
     UNIQUE(host_id, namespace, name, version)
 );
+
+CREATE TABLE wf_definition_version_t (
+    host_id UUID NOT NULL,
+    wf_def_id UUID NOT NULL,
+    namespace VARCHAR(126) NOT NULL,
+    name VARCHAR(126) NOT NULL,
+    version VARCHAR(20) NOT NULL,
+    definition TEXT NOT NULL,
+    lifecycle_status VARCHAR(16) NOT NULL DEFAULT 'DRAFT' CHECK(lifecycle_status IN ('DRAFT','PUBLISHED','DEPRECATED')),
+    published_by VARCHAR(126),
+    published_ts TIMESTAMPTZ,
+    aggregate_version BIGINT NOT NULL DEFAULT 1 CHECK(aggregate_version > 0),
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(host_id,wf_def_id,version),
+    UNIQUE(host_id,namespace,name,version),
+    FOREIGN KEY(host_id,wf_def_id) REFERENCES wf_definition_t(host_id,wf_def_id) ON DELETE RESTRICT,
+    CHECK((lifecycle_status='PUBLISHED')=(published_ts IS NOT NULL)),
+    CHECK((lifecycle_status='PUBLISHED')=(published_by IS NOT NULL))
+);
+CREATE INDEX wf_definition_version_status_idx
+    ON wf_definition_version_t(host_id,wf_def_id,lifecycle_status,version);
 
 CREATE TABLE worklist_t (
   host_id              UUID NOT NULL,
@@ -6652,7 +6684,7 @@ CREATE TABLE IF NOT EXISTS llm_provider_deployment_t (
     provider_account_id UUID NOT NULL,
     deployment_name VARCHAR(126) NOT NULL,
     provider_type VARCHAR(32) NOT NULL,
-    provider_protocol VARCHAR(16) NOT NULL DEFAULT 'openai',
+    provider_protocol VARCHAR(32) NOT NULL,
     physical_model_id VARCHAR(255) NOT NULL,
     base_url TEXT NOT NULL CHECK(base_url ~ '^https://'),
     region VARCHAR(64),
@@ -6672,7 +6704,7 @@ CREATE TABLE IF NOT EXISTS llm_provider_deployment_t (
     FOREIGN KEY(host_id, provider_account_id) REFERENCES llm_provider_account_t(host_id, provider_account_id) ON DELETE RESTRICT,
     UNIQUE(host_id, deployment_name),
     CONSTRAINT llm_provider_deployment_provider_protocol_ck
-        CHECK(provider_protocol IN ('openai','anthropic')),
+        CHECK(provider_protocol IN ('openai_chat','openai_responses','openai_embeddings','anthropic_messages')),
     CHECK(conformance_state IN ('UNKNOWN','PENDING','PASS','FAIL','EXPIRED','QUARANTINED')),
     CHECK(lifecycle_status IN ('DRAFT','VALIDATING','ACTIVE','SUSPENDED','RETIRED')),
     CHECK(conformance_valid_until IS NULL OR conformance_digest IS NOT NULL)
@@ -6694,7 +6726,7 @@ UPDATE llm_provider_deployment_t
        AND conformance_result->>'schemaVersion' = '1'
        AND conformance_result->>'state' = 'pass'
        AND conformance_result->>'digest' = conformance_digest
-       AND conformance_result->>'provider' = provider_type
+       AND conformance_result->>'provider' = provider_protocol
        AND conformance_result->>'physicalModel' = physical_model_id
        AND CASE
            WHEN conformance_result->>'validUntil' ~ '^\d{4}-\d{2}-\d{2}T'
@@ -6721,12 +6753,27 @@ ALTER TABLE llm_provider_deployment_t
             AND conformance_result->>'schemaVersion' = '1'
             AND conformance_result->>'state' = 'pass'
             AND conformance_result->>'digest' = conformance_digest
-            AND conformance_result->>'provider' = provider_type
+            AND conformance_result->>'provider' = provider_protocol
             AND conformance_result->>'physicalModel' = physical_model_id
             AND (conformance_result->>'validUntil')::timestamptz = conformance_valid_until
             AND jsonb_typeof(conformance_result->'capabilities') = 'object'
             AND jsonb_typeof(conformance_result->'capabilityEvidence') = 'object'
         )) IS TRUE
+    );
+ALTER TABLE llm_provider_deployment_t
+    ADD CONSTRAINT llm_provider_deployment_embedding_space_evidence_ck CHECK(
+        provider_protocol <> 'openai_embeddings' OR conformance_state <> 'PASS' OR (
+            jsonb_typeof(conformance_result->'capabilities'->'embedding'->'space') = 'object'
+            AND length(conformance_result->'capabilities'->'embedding'->'space'->>'spaceId') BETWEEN 1 AND 255
+            AND (conformance_result->'capabilities'->'embedding'->'space'->>'revision') ~ '^[1-9][0-9]*$'
+            AND (conformance_result->'capabilities'->'embedding'->'space'->>'dimension') ~ '^[1-9][0-9]*$'
+            AND conformance_result->'capabilities'->'embedding'->'space'->>'normalization' IN ('none','l2')
+            AND conformance_result->'capabilities'->'embedding'->'space'->>'distanceMetric' IN ('cosine','inner_product','l2')
+            AND length(conformance_result->'capabilities'->'embedding'->'space'->>'documentInputTransformVersion') BETWEEN 1 AND 255
+            AND ((conformance_result->'capabilities'->'embedding'->'space') - ARRAY[
+                'spaceId','revision','dimension','normalization','distanceMetric',
+                'documentInputTransformVersion']::text[]) = '{}'::jsonb
+        )
     );
 
 -- Tracks versioned secret references and rotation windows used to authenticate a provider deployment without storing secret material.
@@ -6759,8 +6806,14 @@ CREATE TABLE IF NOT EXISTS llm_public_alias_t (
     public_alias_id UUID NOT NULL,
     environment VARCHAR(32) NOT NULL,
     alias_name VARCHAR(126) NOT NULL,
-    operations JSONB NOT NULL DEFAULT '[]'::jsonb CHECK(jsonb_typeof(operations) = 'array'),
+    operations JSONB NOT NULL CHECK(
+        jsonb_typeof(operations) = 'array'
+        AND jsonb_array_length(operations) > 0
+        AND operations <@ '["generate", "embed"]'::jsonb
+    ),
     required_capabilities JSONB NOT NULL DEFAULT '{}'::jsonb CHECK(jsonb_typeof(required_capabilities) = 'object'),
+    require_expected_embedding_space BOOLEAN NOT NULL DEFAULT FALSE,
+    embedding_workload_lane VARCHAR(16) NOT NULL DEFAULT 'standard',
     max_input_tokens BIGINT CHECK(max_input_tokens IS NULL OR max_input_tokens > 0),
     max_output_tokens BIGINT CHECK(max_output_tokens IS NULL OR max_output_tokens > 0),
     max_request_bytes BIGINT CHECK(max_request_bytes IS NULL OR max_request_bytes > 0),
@@ -6780,6 +6833,29 @@ CREATE TABLE IF NOT EXISTS llm_public_alias_t (
     CHECK(logging_mode IN ('NONE','METADATA','REDACTED')),
     CHECK(pii_mode IN ('DENY','REDACT','TOKENIZE','ALLOW')),
     CHECK(lifecycle_status IN ('DRAFT','ACTIVE','DEPRECATED','RETIRED')),
+    CONSTRAINT llm_public_alias_embedding_space_ck CHECK(
+        (operations ? 'embed' AND (
+            jsonb_typeof(required_capabilities->'embeddingSpace') = 'object'
+            AND length(required_capabilities->'embeddingSpace'->>'spaceId') BETWEEN 1 AND 255
+            AND (required_capabilities->'embeddingSpace'->>'revision') ~ '^[1-9][0-9]*$'
+            AND (required_capabilities->'embeddingSpace'->>'dimension') ~ '^[1-9][0-9]*$'
+            AND required_capabilities->'embeddingSpace'->>'normalization' IN ('none','l2')
+            AND required_capabilities->'embeddingSpace'->>'distanceMetric' IN ('cosine','inner_product','l2')
+            AND length(required_capabilities->'embeddingSpace'->>'documentInputTransformVersion') BETWEEN 1 AND 255
+            AND ((required_capabilities->'embeddingSpace') - ARRAY[
+                'spaceId','revision','dimension','normalization','distanceMetric',
+                'documentInputTransformVersion']::text[]) = '{}'::jsonb
+        )) OR (NOT (operations ? 'embed') AND NOT (required_capabilities ? 'embeddingSpace'))
+    ),
+    CONSTRAINT llm_public_alias_expected_space_required_ck
+        CHECK(NOT require_expected_embedding_space OR operations ? 'embed'),
+    CONSTRAINT llm_public_alias_embedding_workload_lane_ck
+        CHECK(embedding_workload_lane IN ('standard','kb_query','kb_index')),
+    CONSTRAINT llm_public_alias_embedding_lane_shape_ck
+        CHECK(embedding_workload_lane = 'standard' OR (
+        operations = '["embed"]'::jsonb
+        AND require_expected_embedding_space
+    )),
     CHECK(replacement_alias_id IS NULL OR replacement_alias_id <> public_alias_id)
 );
 
@@ -6813,8 +6889,9 @@ CREATE TABLE IF NOT EXISTS llm_pricing_version_t (
     pricing_version_id UUID NOT NULL,
     provider_deployment_id UUID NOT NULL,
     pricing_version INTEGER NOT NULL CHECK(pricing_version > 0),
+    operation VARCHAR(16) NOT NULL CHECK(operation IN ('generate','embed')),
     input_micros_per_million BIGINT NOT NULL CHECK(input_micros_per_million >= 0),
-    output_micros_per_million BIGINT NOT NULL CHECK(output_micros_per_million >= 0),
+    output_micros_per_million BIGINT CHECK(output_micros_per_million IS NULL OR output_micros_per_million >= 0),
     cached_input_micros_per_million BIGINT CHECK(cached_input_micros_per_million IS NULL OR cached_input_micros_per_million >= 0),
     effective_ts TIMESTAMPTZ NOT NULL,
     expires_ts TIMESTAMPTZ,
@@ -6826,7 +6903,9 @@ CREATE TABLE IF NOT EXISTS llm_pricing_version_t (
     update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
     PRIMARY KEY(host_id, pricing_version_id),
     FOREIGN KEY(host_id, provider_deployment_id) REFERENCES llm_provider_deployment_t(host_id, provider_deployment_id) ON DELETE RESTRICT,
-    UNIQUE(host_id, provider_deployment_id, pricing_version),
+    UNIQUE(host_id, provider_deployment_id, operation, pricing_version),
+    CHECK((operation = 'generate' AND output_micros_per_million IS NOT NULL)
+       OR (operation = 'embed' AND output_micros_per_million IS NULL)),
     CHECK(expires_ts IS NULL OR expires_ts > effective_ts)
 );
 
@@ -7074,13 +7153,17 @@ ALTER TABLE llm_public_alias_t
     ADD COLUMN IF NOT EXISTS alias_visibility VARCHAR(24) NOT NULL DEFAULT 'PUBLIC';
 ALTER TABLE llm_public_alias_t
     ADD COLUMN IF NOT EXISTS bound_agent_def_id UUID;
+ALTER TABLE llm_public_alias_t
+    ADD COLUMN IF NOT EXISTS bound_workload_principal VARCHAR(255);
 
 ALTER TABLE llm_public_alias_t
     DROP CONSTRAINT IF EXISTS llm_public_alias_visibility_ck;
 ALTER TABLE llm_public_alias_t
     ADD CONSTRAINT llm_public_alias_visibility_ck CHECK (
-        (alias_visibility = 'PUBLIC' AND bound_agent_def_id IS NULL)
-        OR (alias_visibility = 'INTERNAL_LEGACY' AND bound_agent_def_id IS NOT NULL)
+        (alias_visibility = 'PUBLIC' AND bound_agent_def_id IS NULL AND bound_workload_principal IS NULL)
+        OR (alias_visibility = 'INTERNAL_LEGACY' AND bound_agent_def_id IS NOT NULL AND bound_workload_principal IS NULL)
+        OR (alias_visibility = 'INTERNAL_WORKLOAD' AND bound_agent_def_id IS NULL
+            AND length(bound_workload_principal) BETWEEN 1 AND 255)
     );
 
 ALTER TABLE llm_public_alias_t
@@ -7094,8 +7177,4726 @@ CREATE INDEX IF NOT EXISTS llm_public_alias_bound_agent_idx
     ON llm_public_alias_t(host_id, bound_agent_def_id)
     WHERE alias_visibility = 'INTERNAL_LEGACY' AND active IS TRUE;
 
+CREATE OR REPLACE FUNCTION enforce_llm_public_alias_embedding_space_immutable()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.operations IS DISTINCT FROM OLD.operations
+     OR NEW.required_capabilities->'embeddingSpace'
+        IS DISTINCT FROM OLD.required_capabilities->'embeddingSpace'
+     OR NEW.require_expected_embedding_space IS DISTINCT FROM OLD.require_expected_embedding_space
+     OR NEW.embedding_workload_lane IS DISTINCT FROM OLD.embedding_workload_lane THEN
+    RAISE EXCEPTION 'Alias operation and embedding-space identity are immutable; create a new Alias revision';
+  END IF;
+  RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS llm_public_alias_embedding_space_immutable_trg ON llm_public_alias_t;
+CREATE TRIGGER llm_public_alias_embedding_space_immutable_trg
+BEFORE UPDATE ON llm_public_alias_t FOR EACH ROW
+EXECUTE FUNCTION enforce_llm_public_alias_embedding_space_immutable();
+
 COMMIT;
 -- END INLINED patch_20260719_03_llm_production_integration.sql
+
+ALTER TABLE llm_public_alias_t
+    DROP CONSTRAINT IF EXISTS llm_public_alias_embedding_lane_shape_ck,
+    ADD CONSTRAINT llm_public_alias_embedding_lane_shape_ck CHECK (
+        embedding_workload_lane = 'standard' OR (
+            operations = '["embed"]'::jsonb
+            AND require_expected_embedding_space
+            AND alias_visibility = 'INTERNAL_WORKLOAD'
+        )
+    );
+
+-- BEGIN KNOWLEDGE EMBEDDING STABILITY SCHEMA
+CREATE TABLE IF NOT EXISTS knowledge_embedding_profile_t (
+    profile_id UUID NOT NULL, profile_revision BIGINT NOT NULL CHECK(profile_revision > 0),
+    host_id UUID, alias_owner_host_id UUID NOT NULL, public_alias_id UUID NOT NULL,
+    expected_space_id VARCHAR(255) NOT NULL CHECK(length(expected_space_id) > 0),
+    expected_space_revision BIGINT NOT NULL CHECK(expected_space_revision > 0),
+    dimension INTEGER NOT NULL CHECK(dimension > 0),
+    normalization VARCHAR(16) NOT NULL CHECK(normalization IN ('none','l2')),
+    distance_metric VARCHAR(24) NOT NULL CHECK(distance_metric IN ('cosine','inner_product','l2')),
+    document_input_transform_version VARCHAR(255) NOT NULL CHECK(length(document_input_transform_version) > 0),
+    query_input_transform_version VARCHAR(255) NOT NULL CHECK(length(query_input_transform_version) > 0),
+    qualification_digest VARCHAR(128) NOT NULL CHECK(length(qualification_digest) >= 64),
+    active BOOLEAN NOT NULL DEFAULT TRUE, update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
+    PRIMARY KEY(profile_id, profile_revision),
+    FOREIGN KEY(host_id) REFERENCES host_t(host_id) ON DELETE RESTRICT,
+    FOREIGN KEY(alias_owner_host_id, public_alias_id) REFERENCES llm_public_alias_t(host_id, public_alias_id) ON DELETE RESTRICT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS knowledge_embedding_profile_global_space_uq
+    ON knowledge_embedding_profile_t(expected_space_id,expected_space_revision,query_input_transform_version)
+    WHERE host_id IS NULL AND active IS TRUE;
+CREATE UNIQUE INDEX IF NOT EXISTS knowledge_embedding_profile_tenant_space_uq
+    ON knowledge_embedding_profile_t(host_id,expected_space_id,expected_space_revision,query_input_transform_version)
+    WHERE host_id IS NOT NULL AND active IS TRUE;
+CREATE OR REPLACE VIEW knowledge_qualified_embedding_alias_v AS
+SELECT a.host_id,a.host_id alias_owner_host_id,a.public_alias_id,a.alias_name,
+       a.required_capabilities->'embeddingSpace' embedding_space,TRUE active,a.update_ts,
+       count(*) eligible_route_count
+FROM llm_public_alias_t a JOIN llm_alias_route_t r ON r.host_id=a.host_id AND r.public_alias_id=a.public_alias_id AND r.active
+JOIN llm_provider_deployment_t d ON d.host_id=r.host_id AND d.provider_deployment_id=r.provider_deployment_id
+WHERE a.active AND a.lifecycle_status='ACTIVE' AND a.operations ? 'embed' AND a.require_expected_embedding_space
+  AND d.active AND d.lifecycle_status='ACTIVE' AND d.provider_protocol='openai_embeddings'
+  AND d.conformance_state='PASS' AND d.conformance_valid_until>CURRENT_TIMESTAMP
+  AND d.conformance_result->'capabilities'->'embedding'->'space'=a.required_capabilities->'embeddingSpace'
+GROUP BY a.host_id,a.public_alias_id,a.alias_name,a.required_capabilities->'embeddingSpace',a.update_ts
+HAVING bool_and(jsonb_array_length(d.conformance_result->'capabilities'->'embedding'->'supportedDimensions')=1
+ AND d.conformance_result->'capabilities'->'embedding'->'supportedDimensions'
+ @> jsonb_build_array((a.required_capabilities->'embeddingSpace'->>'dimension')::integer));
+CREATE OR REPLACE FUNCTION qualify_knowledge_embedding_profile() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF NOT EXISTS (SELECT 1 FROM knowledge_qualified_embedding_alias_v q
+  WHERE q.alias_owner_host_id=NEW.alias_owner_host_id AND q.public_alias_id=NEW.public_alias_id
+  AND q.embedding_space->>'spaceId'=NEW.expected_space_id
+  AND (q.embedding_space->>'revision')::bigint=NEW.expected_space_revision
+  AND (q.embedding_space->>'dimension')::integer=NEW.dimension
+  AND q.embedding_space->>'normalization'=NEW.normalization
+  AND q.embedding_space->>'distanceMetric'=NEW.distance_metric
+  AND q.embedding_space->>'documentInputTransformVersion'=NEW.document_input_transform_version) THEN
+  RAISE EXCEPTION 'embedding profile must reference a currently qualified immutable Alias space';
+ END IF; RETURN NEW;
+END; $$;
+DROP TRIGGER IF EXISTS knowledge_embedding_profile_qualification_trg ON knowledge_embedding_profile_t;
+CREATE TRIGGER knowledge_embedding_profile_qualification_trg BEFORE INSERT ON knowledge_embedding_profile_t
+FOR EACH ROW EXECUTE FUNCTION qualify_knowledge_embedding_profile();
+CREATE TABLE IF NOT EXISTS knowledge_retrieval_profile_t (
+    profile_id UUID PRIMARY KEY, host_id UUID,
+    strategy VARCHAR(16) NOT NULL DEFAULT 'HYBRID' CHECK(strategy IN ('LEXICAL','VECTOR','HYBRID')),
+    lexical_candidates INTEGER NOT NULL CHECK(lexical_candidates > 0),
+    vector_candidates INTEGER NOT NULL CHECK(vector_candidates > 0),
+    top_k INTEGER NOT NULL CHECK(top_k > 0 AND top_k <= lexical_candidates + vector_candidates),
+    token_budget INTEGER NOT NULL CHECK(token_budget > 0),
+    fusion_method VARCHAR(16) NOT NULL DEFAULT 'RRF' CHECK(fusion_method='RRF'),
+    version BIGINT NOT NULL DEFAULT 1 CHECK(version > 0), active BOOLEAN NOT NULL DEFAULT TRUE,
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
+    FOREIGN KEY(host_id) REFERENCES host_t(host_id) ON DELETE RESTRICT
+);
+CREATE TABLE IF NOT EXISTS knowledge_base_t (
+    knowledge_base_id UUID PRIMARY KEY, host_id UUID, name VARCHAR(255) NOT NULL, description TEXT,
+    environment VARCHAR(32) NOT NULL, status VARCHAR(24) NOT NULL DEFAULT 'DRAFT'
+        CHECK(status IN ('DRAFT','ACTIVE','DISABLED','RETIRED')),
+    acl_mode VARCHAR(24) NOT NULL DEFAULT 'UNIFORM_SCOPE' CHECK(acl_mode IN ('UNIFORM_SCOPE','MIRROR_SOURCE_ACL')),
+    embedding_profile_id UUID NOT NULL, embedding_profile_revision BIGINT NOT NULL,
+    version BIGINT NOT NULL DEFAULT 1 CHECK(version > 0), active BOOLEAN NOT NULL DEFAULT TRUE,
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
+    FOREIGN KEY(host_id) REFERENCES host_t(host_id) ON DELETE RESTRICT,
+    FOREIGN KEY(embedding_profile_id,embedding_profile_revision)
+        REFERENCES knowledge_embedding_profile_t(profile_id,profile_revision) ON DELETE RESTRICT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS knowledge_base_global_name_uq
+    ON knowledge_base_t(environment,name) WHERE host_id IS NULL AND active IS TRUE;
+CREATE UNIQUE INDEX IF NOT EXISTS knowledge_base_tenant_name_uq
+    ON knowledge_base_t(host_id,environment,name) WHERE host_id IS NOT NULL AND active IS TRUE;
+CREATE TABLE IF NOT EXISTS knowledge_index_generation_t (
+    index_generation_id UUID PRIMARY KEY, knowledge_base_id UUID NOT NULL,
+    embedding_profile_id UUID NOT NULL, embedding_profile_revision BIGINT NOT NULL,
+    space_id VARCHAR(255) NOT NULL, space_revision BIGINT NOT NULL CHECK(space_revision > 0),
+    dimension INTEGER NOT NULL CHECK(dimension > 0), parser_version VARCHAR(255) NOT NULL,
+    chunker_version VARCHAR(255) NOT NULL, query_input_transform_version VARCHAR(255) NOT NULL,
+    state VARCHAR(16) NOT NULL CHECK(state IN ('BUILDING','VALIDATING','PROMOTED','FAILED','SUPERSEDED','PURGED')),
+    evidence JSONB NOT NULL DEFAULT '{}'::jsonb CHECK(jsonb_typeof(evidence)='object'),
+    created_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, promoted_ts TIMESTAMPTZ,
+    FOREIGN KEY(knowledge_base_id) REFERENCES knowledge_base_t(knowledge_base_id) ON DELETE RESTRICT,
+    FOREIGN KEY(embedding_profile_id,embedding_profile_revision)
+        REFERENCES knowledge_embedding_profile_t(profile_id,profile_revision) ON DELETE RESTRICT
+);
+CREATE OR REPLACE FUNCTION validate_knowledge_index_generation_profile() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF NOT EXISTS (SELECT 1 FROM knowledge_embedding_profile_t p
+  WHERE p.profile_id=NEW.embedding_profile_id AND p.profile_revision=NEW.embedding_profile_revision
+  AND p.expected_space_id=NEW.space_id AND p.expected_space_revision=NEW.space_revision
+  AND p.dimension=NEW.dimension AND p.query_input_transform_version=NEW.query_input_transform_version) THEN
+  RAISE EXCEPTION 'index generation must preserve its immutable embedding profile contract';
+ END IF; RETURN NEW;
+END; $$;
+DROP TRIGGER IF EXISTS knowledge_index_generation_profile_trg ON knowledge_index_generation_t;
+CREATE TRIGGER knowledge_index_generation_profile_trg BEFORE INSERT OR UPDATE ON knowledge_index_generation_t
+FOR EACH ROW EXECUTE FUNCTION validate_knowledge_index_generation_profile();
+CREATE TABLE IF NOT EXISTS knowledge_index_pointer_t (
+    knowledge_base_id UUID NOT NULL, embedding_profile_id UUID NOT NULL,
+    embedding_profile_revision BIGINT NOT NULL, index_generation_id UUID NOT NULL,
+    pointer_version BIGINT NOT NULL CHECK(pointer_version > 0),
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
+    PRIMARY KEY(knowledge_base_id,embedding_profile_id,embedding_profile_revision),
+    FOREIGN KEY(knowledge_base_id) REFERENCES knowledge_base_t(knowledge_base_id) ON DELETE CASCADE,
+    FOREIGN KEY(index_generation_id) REFERENCES knowledge_index_generation_t(index_generation_id) ON DELETE RESTRICT
+);
+CREATE OR REPLACE FUNCTION validate_knowledge_index_pointer() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF NOT EXISTS (SELECT 1 FROM knowledge_index_generation_t g
+  WHERE g.index_generation_id=NEW.index_generation_id AND g.knowledge_base_id=NEW.knowledge_base_id
+  AND g.embedding_profile_id=NEW.embedding_profile_id
+  AND g.embedding_profile_revision=NEW.embedding_profile_revision AND g.state='PROMOTED') THEN
+  RAISE EXCEPTION 'index pointer must select one matching promoted generation';
+ END IF; RETURN NEW;
+END; $$;
+DROP TRIGGER IF EXISTS knowledge_index_pointer_valid_trg ON knowledge_index_pointer_t;
+CREATE TRIGGER knowledge_index_pointer_valid_trg BEFORE INSERT OR UPDATE ON knowledge_index_pointer_t
+FOR EACH ROW EXECUTE FUNCTION validate_knowledge_index_pointer();
+CREATE TABLE IF NOT EXISTS knowledge_consumer_quota_t (
+    knowledge_base_id UUID NOT NULL, consumer_host_id UUID NOT NULL,
+    max_concurrency INTEGER NOT NULL CHECK(max_concurrency > 0),
+    requests_per_minute INTEGER NOT NULL CHECK(requests_per_minute > 0),
+    max_cost_micros_per_day BIGINT NOT NULL CHECK(max_cost_micros_per_day > 0), active BOOLEAN NOT NULL DEFAULT TRUE,
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(knowledge_base_id,consumer_host_id),
+    FOREIGN KEY(knowledge_base_id) REFERENCES knowledge_base_t(knowledge_base_id) ON DELETE CASCADE,
+    FOREIGN KEY(consumer_host_id) REFERENCES host_t(host_id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS knowledge_query_usage_t (
+    usage_id UUID PRIMARY KEY, knowledge_base_id UUID NOT NULL, consumer_host_id UUID NOT NULL,
+    request_id VARCHAR(255) NOT NULL, request_day DATE NOT NULL,
+    charged_micros BIGINT NOT NULL CHECK(charged_micros >= 0), status VARCHAR(24) NOT NULL,
+    created_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(knowledge_base_id,consumer_host_id)
+        REFERENCES knowledge_consumer_quota_t(knowledge_base_id,consumer_host_id) ON DELETE RESTRICT,
+    UNIQUE(knowledge_base_id,consumer_host_id,request_id)
+);
+CREATE OR REPLACE FUNCTION enforce_knowledge_embedding_profile_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF ROW(NEW.host_id,NEW.alias_owner_host_id,NEW.public_alias_id,NEW.expected_space_id,
+        NEW.expected_space_revision,NEW.dimension,NEW.normalization,NEW.distance_metric,
+        NEW.document_input_transform_version,NEW.query_input_transform_version,NEW.qualification_digest)
+       IS DISTINCT FROM ROW(OLD.host_id,OLD.alias_owner_host_id,OLD.public_alias_id,OLD.expected_space_id,
+        OLD.expected_space_revision,OLD.dimension,OLD.normalization,OLD.distance_metric,
+        OLD.document_input_transform_version,OLD.query_input_transform_version,OLD.qualification_digest) THEN
+        RAISE EXCEPTION 'knowledge embedding profiles are immutable; create a new revision';
+    END IF;
+    RETURN NEW;
+END; $$;
+DROP TRIGGER IF EXISTS knowledge_embedding_profile_immutable_trg ON knowledge_embedding_profile_t;
+CREATE TRIGGER knowledge_embedding_profile_immutable_trg BEFORE UPDATE ON knowledge_embedding_profile_t
+FOR EACH ROW EXECUTE FUNCTION enforce_knowledge_embedding_profile_immutable();
+-- END KNOWLEDGE EMBEDDING STABILITY SCHEMA
+-- BEGIN INLINED patch_20260808_03_llm_local_provider_transport.sql
+BEGIN;
+
+-- Some installations reached the S1 embedding-space schema without taking the
+-- destructive Wave 1 clean cutover. Bridge those retained projections to the
+-- exact protocol/operation contract before creating endpoint projections.
+DO $legacy_wave1_precondition$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM llm_provider_deployment_t
+         WHERE lower(provider_protocol) NOT IN (
+             'openai','anthropic','openai_chat','openai_responses',
+             'openai_embeddings','anthropic_messages')) THEN
+        RAISE EXCEPTION USING MESSAGE =
+            'legacy LLM transport migration found an unsupported provider protocol';
+    END IF;
+    IF EXISTS (
+        SELECT 1
+          FROM llm_public_alias_t alias_row
+          CROSS JOIN LATERAL jsonb_array_elements_text(alias_row.operations) operation(value)
+         WHERE operation.value NOT IN ('chat_completions','embeddings','generate','embed')) THEN
+        RAISE EXCEPTION USING MESSAGE =
+            'legacy LLM transport migration found an unsupported alias operation';
+    END IF;
+    IF EXISTS (
+        SELECT 1
+          FROM llm_public_alias_t
+         WHERE operations ? 'embeddings'
+           AND NOT (
+               jsonb_typeof(required_capabilities->'embeddingSpace') = 'object'
+               AND length(required_capabilities->'embeddingSpace'->>'spaceId') BETWEEN 1 AND 255
+               AND (required_capabilities->'embeddingSpace'->>'revision') ~ '^[1-9][0-9]*$'
+               AND (required_capabilities->'embeddingSpace'->>'dimension') ~ '^[1-9][0-9]*$'
+               AND required_capabilities->'embeddingSpace'->>'normalization' IN ('none','l2')
+               AND required_capabilities->'embeddingSpace'->>'distanceMetric' IN ('cosine','inner_product','l2')
+               AND length(required_capabilities->'embeddingSpace'->>'documentInputTransformVersion') BETWEEN 1 AND 255
+           )) THEN
+        RAISE EXCEPTION USING MESSAGE =
+            'legacy embedding aliases require an operator-approved requiredCapabilities.embeddingSpace before transport migration';
+    END IF;
+END
+$legacy_wave1_precondition$;
+
+CREATE TEMP TABLE llm_transport_runtime_view_restore_t(
+    view_schema name NOT NULL,
+    view_name name NOT NULL,
+    view_owner name NOT NULL,
+    view_options text,
+    view_definition text NOT NULL
+) ON COMMIT DROP;
+INSERT INTO llm_transport_runtime_view_restore_t
+SELECT namespace.nspname,relation.relname,pg_get_userbyid(relation.relowner),
+       array_to_string(relation.reloptions,', '),pg_get_viewdef(relation.oid,TRUE)
+  FROM pg_class relation
+  JOIN pg_namespace namespace ON namespace.oid=relation.relnamespace
+ WHERE relation.oid=to_regclass('knowledge_embedding_profile_runtime_v');
+CREATE TEMP TABLE llm_transport_runtime_view_grant_restore_t(
+    grantee name NOT NULL,
+    privilege_type text NOT NULL,
+    is_grantable boolean NOT NULL
+) ON COMMIT DROP;
+INSERT INTO llm_transport_runtime_view_grant_restore_t
+SELECT CASE WHEN privilege.grantee=0 THEN 'PUBLIC'::name
+            ELSE pg_get_userbyid(privilege.grantee)::name END,
+       privilege.privilege_type,privilege.is_grantable
+  FROM pg_class relation
+  CROSS JOIN LATERAL aclexplode(
+      COALESCE(relation.relacl,acldefault('r',relation.relowner))) privilege
+ WHERE relation.oid=to_regclass('knowledge_embedding_profile_runtime_v')
+   AND privilege.grantee<>relation.relowner;
+DROP VIEW IF EXISTS knowledge_embedding_profile_runtime_v;
+DROP VIEW IF EXISTS knowledge_qualified_embedding_alias_v;
+
+ALTER TABLE llm_provider_deployment_t
+    DROP CONSTRAINT IF EXISTS llm_provider_deployment_provider_protocol_ck;
+ALTER TABLE llm_provider_deployment_t
+    ALTER COLUMN provider_protocol DROP DEFAULT,
+    ALTER COLUMN provider_protocol TYPE VARCHAR(32);
+UPDATE llm_provider_deployment_t deployment
+   SET provider_protocol = CASE lower(deployment.provider_protocol)
+       WHEN 'openai' THEN CASE WHEN EXISTS (
+           SELECT 1
+             FROM llm_model_registration_t registration
+             JOIN llm_model_t model ON model.model_id=registration.model_id
+            WHERE registration.host_id=deployment.host_id
+              AND registration.model_registration_id=deployment.model_registration_id
+              AND (model.operations ? 'embed' OR model.operations ? 'embeddings')
+              AND NOT (model.operations ? 'generate' OR model.operations ? 'chat_completions')
+       ) THEN 'openai_embeddings' ELSE 'openai_chat' END
+       WHEN 'anthropic' THEN 'anthropic_messages'
+       ELSE lower(deployment.provider_protocol)
+   END;
+ALTER TABLE llm_provider_deployment_t
+    ADD CONSTRAINT llm_provider_deployment_provider_protocol_ck CHECK(
+        provider_protocol IN (
+            'openai_chat','openai_responses','openai_embeddings','anthropic_messages'));
+
+-- Existing PASS evidence names the legacy protocol and cannot attest to the
+-- exact protocol contract. Preserve the row but require requalification.
+UPDATE llm_provider_deployment_t
+   SET conformance_state='QUARANTINED'
+ WHERE conformance_state='PASS'
+   AND NOT (conformance_result IS NOT NULL
+       AND conformance_result->>'provider'=provider_protocol);
+
+DROP TRIGGER IF EXISTS llm_public_alias_embedding_space_immutable_trg
+    ON llm_public_alias_t;
+ALTER TABLE llm_public_alias_t
+    ALTER COLUMN operations DROP DEFAULT,
+    DROP CONSTRAINT IF EXISTS llm_public_alias_operations_ck,
+    DROP CONSTRAINT IF EXISTS llm_public_alias_t_operations_check;
+UPDATE llm_public_alias_t alias_row
+   SET operations = (
+       SELECT jsonb_agg(mapped.value ORDER BY mapped.first_ordinality)
+         FROM (
+             SELECT CASE operation.value
+                        WHEN 'chat_completions' THEN 'generate'
+                        WHEN 'embeddings' THEN 'embed'
+                        ELSE operation.value
+                    END AS value,
+                    min(operation.ordinality) AS first_ordinality
+               FROM jsonb_array_elements_text(alias_row.operations)
+                    WITH ORDINALITY AS operation(value, ordinality)
+              GROUP BY CASE operation.value
+                           WHEN 'chat_completions' THEN 'generate'
+                           WHEN 'embeddings' THEN 'embed'
+                           ELSE operation.value
+                       END
+         ) mapped)
+ WHERE operations ?| ARRAY['chat_completions','embeddings'];
+ALTER TABLE llm_public_alias_t
+    ADD CHECK(
+        jsonb_typeof(operations)='array'
+        AND jsonb_array_length(operations)>0
+        AND operations <@ '["generate","embed"]'::jsonb);
+CREATE TRIGGER llm_public_alias_embedding_space_immutable_trg
+BEFORE UPDATE ON llm_public_alias_t FOR EACH ROW
+EXECUTE FUNCTION enforce_llm_public_alias_embedding_space_immutable();
+
+CREATE OR REPLACE VIEW knowledge_qualified_embedding_alias_v AS
+SELECT a.host_id,a.host_id AS alias_owner_host_id,a.public_alias_id,a.alias_name,
+       a.required_capabilities->'embeddingSpace' AS embedding_space,
+       TRUE AS active,a.update_ts,count(*) AS eligible_route_count
+  FROM llm_public_alias_t a
+  JOIN llm_alias_route_t r ON r.host_id=a.host_id AND r.public_alias_id=a.public_alias_id
+                          AND r.active IS TRUE
+  JOIN llm_provider_deployment_t d ON d.host_id=r.host_id
+                                  AND d.provider_deployment_id=r.provider_deployment_id
+                                  AND d.active IS TRUE AND d.lifecycle_status='ACTIVE'
+ WHERE a.active IS TRUE AND a.lifecycle_status='ACTIVE' AND a.operations ? 'embed'
+   AND a.require_expected_embedding_space IS TRUE
+   AND d.provider_protocol='openai_embeddings' AND d.conformance_state='PASS'
+   AND d.conformance_valid_until>CURRENT_TIMESTAMP
+   AND d.conformance_result->'capabilities'->'embedding'->'space'=
+       a.required_capabilities->'embeddingSpace'
+ GROUP BY a.host_id,a.public_alias_id,a.alias_name,
+          a.required_capabilities->'embeddingSpace',a.update_ts
+HAVING bool_and(
+    jsonb_array_length(d.conformance_result->'capabilities'->'embedding'->'supportedDimensions')=1
+    AND d.conformance_result->'capabilities'->'embedding'->'supportedDimensions'
+        @> jsonb_build_array((a.required_capabilities->'embeddingSpace'->>'dimension')::integer)
+);
+
+DO $restore_runtime_view$
+DECLARE
+    saved_view record;
+    saved_grant record;
+BEGIN
+    SELECT * INTO saved_view FROM llm_transport_runtime_view_restore_t;
+    IF FOUND THEN
+        EXECUTE format('CREATE VIEW %I.%I%s AS %s',
+            saved_view.view_schema,saved_view.view_name,
+            CASE WHEN saved_view.view_options IS NULL THEN ''
+                 ELSE ' WITH (' || saved_view.view_options || ')' END,
+            saved_view.view_definition);
+        EXECUTE format('ALTER VIEW %I.%I OWNER TO %I',
+            saved_view.view_schema,saved_view.view_name,saved_view.view_owner);
+        FOR saved_grant IN SELECT * FROM llm_transport_runtime_view_grant_restore_t LOOP
+            EXECUTE format('GRANT %s ON TABLE %I.%I TO %s%s',
+                saved_grant.privilege_type,saved_view.view_schema,saved_view.view_name,
+                CASE WHEN saved_grant.grantee='PUBLIC' THEN 'PUBLIC'
+                     ELSE quote_ident(saved_grant.grantee) END,
+                CASE WHEN saved_grant.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END);
+        END LOOP;
+    END IF;
+END
+$restore_runtime_view$;
+
+ALTER TABLE llm_pricing_version_t
+    ADD COLUMN IF NOT EXISTS operation VARCHAR(16);
+UPDATE llm_pricing_version_t pricing
+   SET operation = CASE WHEN deployment.provider_protocol='openai_embeddings'
+                        THEN 'embed' ELSE 'generate' END,
+       output_micros_per_million = CASE
+           WHEN deployment.provider_protocol='openai_embeddings' THEN NULL
+           ELSE pricing.output_micros_per_million END
+  FROM llm_provider_deployment_t deployment
+ WHERE pricing.host_id=deployment.host_id
+   AND pricing.provider_deployment_id=deployment.provider_deployment_id
+   AND pricing.operation IS NULL;
+ALTER TABLE llm_pricing_version_t
+    ALTER COLUMN operation SET NOT NULL,
+    ALTER COLUMN output_micros_per_million DROP NOT NULL;
+DO $drop_legacy_pricing_unique$
+DECLARE
+    legacy_constraint name;
+BEGIN
+    FOR legacy_constraint IN
+        SELECT constraint_row.conname
+          FROM pg_constraint constraint_row
+         WHERE constraint_row.conrelid='llm_pricing_version_t'::regclass
+           AND constraint_row.contype='u'
+           AND (
+               SELECT array_agg(attribute_row.attname::text ORDER BY attribute_row.attname)
+                 FROM unnest(constraint_row.conkey) AS key_column(attnum)
+                 JOIN pg_attribute attribute_row
+                   ON attribute_row.attrelid=constraint_row.conrelid
+                  AND attribute_row.attnum=key_column.attnum
+           ) IN (
+               ARRAY['host_id','pricing_version','provider_deployment_id']::text[],
+               ARRAY['host_id','operation','pricing_version','provider_deployment_id']::text[])
+    LOOP
+        EXECUTE format('ALTER TABLE llm_pricing_version_t DROP CONSTRAINT %I',
+                       legacy_constraint);
+    END LOOP;
+END
+$drop_legacy_pricing_unique$;
+ALTER TABLE llm_pricing_version_t
+    DROP CONSTRAINT IF EXISTS llm_pricing_version_t_output_micros_per_million_check,
+    DROP CONSTRAINT IF EXISTS llm_pricing_version_t_check,
+    DROP CONSTRAINT IF EXISTS llm_pricing_version_t_check1,
+    DROP CONSTRAINT IF EXISTS llm_pricing_version_t_check2,
+    DROP CONSTRAINT IF EXISTS llm_pricing_version_t_operation_check,
+    DROP CONSTRAINT IF EXISTS llm_pricing_version_t_operation_check1,
+    DROP CONSTRAINT IF EXISTS llm_pricing_version_operation_ck,
+    DROP CONSTRAINT IF EXISTS llm_pricing_version_rates_ck,
+    DROP CONSTRAINT IF EXISTS llm_pricing_version_deployment_operation_version_uq;
+ALTER TABLE llm_pricing_version_t
+    ADD CHECK(operation IN ('generate','embed')),
+    ADD CHECK(output_micros_per_million IS NULL OR output_micros_per_million>=0),
+    ADD UNIQUE(host_id,provider_deployment_id,operation,pricing_version),
+    ADD CHECK((operation='generate' AND output_micros_per_million IS NOT NULL)
+           OR (operation='embed' AND output_micros_per_million IS NULL)),
+    ADD CHECK(expires_ts IS NULL OR expires_ts>effective_ts);
+
+CREATE TABLE IF NOT EXISTS llm_network_zone_t (
+    host_id UUID NOT NULL,
+    network_zone_id UUID NOT NULL,
+    zone_name VARCHAR(126) NOT NULL,
+    dns_names JSONB NOT NULL DEFAULT '[]'::jsonb,
+    cidrs JSONB NOT NULL DEFAULT '[]'::jsonb,
+    allowed_ports JSONB NOT NULL DEFAULT '[]'::jsonb,
+    allow_private_tls BOOLEAN NOT NULL DEFAULT FALSE,
+    allow_private_plaintext BOOLEAN NOT NULL DEFAULT FALSE,
+    lifecycle_status VARCHAR(16) NOT NULL DEFAULT 'DRAFT',
+    aggregate_version BIGINT NOT NULL DEFAULT 1 CHECK(aggregate_version > 0),
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
+    PRIMARY KEY(host_id, network_zone_id),
+    FOREIGN KEY(host_id) REFERENCES host_t(host_id) ON DELETE CASCADE,
+    UNIQUE(host_id, zone_name),
+    CHECK(jsonb_typeof(dns_names) = 'array'),
+    CHECK(jsonb_typeof(cidrs) = 'array'),
+    CHECK(jsonb_typeof(allowed_ports) = 'array'),
+    CHECK(lifecycle_status IN ('DRAFT','ACTIVE','SUSPENDED','RETIRED'))
+);
+
+CREATE TABLE IF NOT EXISTS llm_provider_endpoint_t (
+    host_id UUID NOT NULL,
+    provider_endpoint_id UUID NOT NULL,
+    provider_account_id UUID NOT NULL,
+    endpoint_name VARCHAR(126) NOT NULL,
+    provider_protocol VARCHAR(32) NOT NULL,
+    base_url TEXT NOT NULL,
+    headers JSONB NOT NULL DEFAULT '{}'::jsonb CHECK(jsonb_typeof(headers) = 'object'),
+    endpoint_auth_mode VARCHAR(16) NOT NULL DEFAULT 'BEARER',
+    api_key_header VARCHAR(32),
+    network_profile_mode VARCHAR(24) NOT NULL DEFAULT 'PUBLIC_TLS',
+    network_termination VARCHAR(32) NOT NULL DEFAULT 'NATIVE',
+    network_zone_id UUID,
+    trust_bundle_reference VARCHAR(1024),
+    trust_bundle_sha256 VARCHAR(64),
+    pool_idle_timeout_ms BIGINT NOT NULL DEFAULT 30000,
+    client_refresh_interval_ms BIGINT NOT NULL DEFAULT 300000,
+    lifecycle_status VARCHAR(16) NOT NULL DEFAULT 'DRAFT',
+    aggregate_version BIGINT NOT NULL DEFAULT 1 CHECK(aggregate_version > 0),
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
+    PRIMARY KEY(host_id, provider_endpoint_id),
+    FOREIGN KEY(host_id, provider_account_id)
+        REFERENCES llm_provider_account_t(host_id, provider_account_id) ON DELETE RESTRICT,
+    FOREIGN KEY(host_id, network_zone_id)
+        REFERENCES llm_network_zone_t(host_id, network_zone_id) ON DELETE RESTRICT,
+    UNIQUE(host_id, endpoint_name),
+    CONSTRAINT llm_provider_endpoint_protocol_ck CHECK(
+        provider_protocol IN ('openai_chat','openai_responses','openai_embeddings','anthropic_messages')),
+    CONSTRAINT llm_provider_endpoint_auth_ck CHECK(
+        endpoint_auth_mode IN ('NONE','BEARER','API_KEY')
+        AND (endpoint_auth_mode = 'API_KEY') = (api_key_header IS NOT NULL)
+        AND (api_key_header IS NULL OR api_key_header IN ('authorization','x-api-key'))),
+    CONSTRAINT llm_provider_endpoint_profile_ck CHECK(
+        network_profile_mode IN ('PUBLIC_TLS','PRIVATE_TLS','PRIVATE_PLAINTEXT')
+        AND network_termination IN ('NATIVE','LIGHT_GATEWAY_SIDECAR')
+        AND ((network_profile_mode = 'PUBLIC_TLS' AND base_url ~ '^https://' AND network_zone_id IS NULL)
+          OR (network_profile_mode = 'PRIVATE_TLS' AND base_url ~ '^https://' AND network_zone_id IS NOT NULL)
+          OR (network_profile_mode = 'PRIVATE_PLAINTEXT' AND base_url ~ '^http://' AND network_zone_id IS NOT NULL
+              AND endpoint_auth_mode = 'NONE'))),
+    CONSTRAINT llm_provider_endpoint_trust_ck CHECK(
+        (network_profile_mode = 'PRIVATE_TLS') =
+        (trust_bundle_reference IS NOT NULL AND trust_bundle_sha256 IS NOT NULL)
+        AND (trust_bundle_sha256 IS NULL OR trust_bundle_sha256 ~ '^[0-9a-f]{64}$')),
+    CONSTRAINT llm_provider_endpoint_pool_ck CHECK(
+        pool_idle_timeout_ms > 0 AND client_refresh_interval_ms >= pool_idle_timeout_ms),
+    CHECK(lifecycle_status IN ('DRAFT','VALIDATING','ACTIVE','SUSPENDED','RETIRED'))
+);
+
+ALTER TABLE llm_provider_deployment_t
+    ADD COLUMN IF NOT EXISTS provider_endpoint_id UUID,
+    ADD COLUMN IF NOT EXISTS deployment_revision_id VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS physical_runtime_id VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS capacity_domain_id VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS runtime_capacity JSONB,
+    ADD COLUMN IF NOT EXISTS readiness_policy VARCHAR(32),
+    ADD COLUMN IF NOT EXISTS expected_sidecar JSONB,
+    ADD COLUMN IF NOT EXISTS qualification_contract JSONB;
+
+INSERT INTO llm_provider_endpoint_t(
+    host_id, provider_endpoint_id, provider_account_id, endpoint_name,
+    provider_protocol, base_url, endpoint_auth_mode, network_profile_mode,
+    network_termination, lifecycle_status, active, update_ts, update_user)
+SELECT d.host_id,
+       d.provider_deployment_id,
+       d.provider_account_id,
+       'backfill-' || d.provider_deployment_id::text,
+       d.provider_protocol, rtrim(d.base_url, '/'), 'BEARER', 'PUBLIC_TLS', 'NATIVE',
+       CASE WHEN d.lifecycle_status = 'ACTIVE' THEN 'ACTIVE' ELSE 'DRAFT' END,
+       d.active, d.update_ts, d.update_user
+  FROM llm_provider_deployment_t d
+ON CONFLICT(host_id, provider_endpoint_id) DO NOTHING;
+
+UPDATE llm_provider_deployment_t d
+   SET provider_endpoint_id = d.provider_deployment_id,
+       deployment_revision_id = COALESCE(d.deployment_revision_id,
+           d.provider_deployment_id::text || '/r' || d.aggregate_version::text),
+       physical_runtime_id = COALESCE(d.physical_runtime_id, 'external/' || d.provider_deployment_id::text),
+       capacity_domain_id = COALESCE(d.capacity_domain_id, 'external-account/' || d.provider_account_id::text),
+       runtime_capacity = COALESCE(d.runtime_capacity, jsonb_build_object(
+           'maxParallelRequests', CASE
+               WHEN jsonb_typeof(d.transport_bounds->'concurrency') = 'number'
+               THEN GREATEST(32, (d.transport_bounds->>'concurrency')::bigint)
+               ELSE 32
+           END,
+           'maxQueuedRequests', 32,
+           'coldStartTimeoutMs', 30000, 'streamSetupTimeoutMs', 10000,
+           'requestTimeoutMs', 30000)),
+       readiness_policy = COALESCE(d.readiness_policy, 'IMMEDIATE')
+ WHERE d.provider_endpoint_id IS NULL;
+
+ALTER TABLE llm_provider_deployment_t
+    ALTER COLUMN provider_endpoint_id SET NOT NULL,
+    ALTER COLUMN deployment_revision_id SET NOT NULL,
+    ALTER COLUMN physical_runtime_id SET NOT NULL,
+    ALTER COLUMN capacity_domain_id SET NOT NULL,
+    ALTER COLUMN runtime_capacity SET NOT NULL,
+    ALTER COLUMN readiness_policy SET NOT NULL;
+ALTER TABLE llm_provider_deployment_t
+    DROP CONSTRAINT IF EXISTS llm_provider_deployment_endpoint_fk,
+    DROP CONSTRAINT IF EXISTS llm_provider_deployment_runtime_capacity_ck,
+    DROP CONSTRAINT IF EXISTS llm_provider_deployment_readiness_ck,
+    DROP CONSTRAINT IF EXISTS llm_provider_deployment_sidecar_shape_ck;
+ALTER TABLE llm_provider_deployment_t
+    DROP CONSTRAINT IF EXISTS llm_provider_deployment_qualification_shape_ck;
+ALTER TABLE llm_provider_deployment_t
+    ADD CONSTRAINT llm_provider_deployment_endpoint_fk
+        FOREIGN KEY(host_id, provider_endpoint_id)
+        REFERENCES llm_provider_endpoint_t(host_id, provider_endpoint_id) ON DELETE RESTRICT,
+    ADD CONSTRAINT llm_provider_deployment_runtime_capacity_ck CHECK(
+        jsonb_typeof(runtime_capacity) = 'object'
+        AND (runtime_capacity->>'maxParallelRequests') ~ '^[1-9][0-9]*$'
+        AND (runtime_capacity->>'maxQueuedRequests') ~ '^[1-9][0-9]*$'
+        AND (runtime_capacity->>'coldStartTimeoutMs') ~ '^[1-9][0-9]*$'
+        AND (runtime_capacity->>'streamSetupTimeoutMs') ~ '^[1-9][0-9]*$'
+        AND (runtime_capacity->>'requestTimeoutMs') ~ '^[1-9][0-9]*$'),
+    ADD CONSTRAINT llm_provider_deployment_readiness_ck CHECK(
+        readiness_policy IN ('IMMEDIATE','WARM_BEFORE_ELIGIBLE')),
+    ADD CONSTRAINT llm_provider_deployment_sidecar_shape_ck CHECK(
+        expected_sidecar IS NULL OR jsonb_typeof(expected_sidecar) = 'object'),
+    ADD CONSTRAINT llm_provider_deployment_qualification_shape_ck CHECK(
+        qualification_contract IS NULL OR jsonb_typeof(qualification_contract) = 'object');
+
+ALTER TABLE llm_provider_credential_t
+    ALTER COLUMN provider_deployment_id DROP NOT NULL,
+    ADD COLUMN IF NOT EXISTS provider_endpoint_id UUID,
+    ADD COLUMN IF NOT EXISTS credential_purpose VARCHAR(24) NOT NULL DEFAULT 'ENDPOINT';
+UPDATE llm_provider_credential_t c
+   SET provider_endpoint_id = d.provider_endpoint_id
+  FROM llm_provider_deployment_t d
+ WHERE c.host_id=d.host_id AND c.provider_deployment_id=d.provider_deployment_id
+   AND c.provider_endpoint_id IS NULL;
+ALTER TABLE llm_provider_credential_t
+    DROP CONSTRAINT IF EXISTS llm_provider_credential_endpoint_fk,
+    DROP CONSTRAINT IF EXISTS llm_provider_credential_purpose_ck,
+    DROP CONSTRAINT IF EXISTS llm_provider_credential_owner_ck;
+ALTER TABLE llm_provider_credential_t
+    ADD CONSTRAINT llm_provider_credential_endpoint_fk
+        FOREIGN KEY(host_id, provider_endpoint_id)
+        REFERENCES llm_provider_endpoint_t(host_id, provider_endpoint_id) ON DELETE RESTRICT,
+    ADD CONSTRAINT llm_provider_credential_purpose_ck CHECK(
+        credential_purpose IN ('ENDPOINT','SIDECAR_RUNTIME')),
+    ADD CONSTRAINT llm_provider_credential_owner_ck CHECK(
+        (credential_purpose = 'ENDPOINT' AND provider_endpoint_id IS NOT NULL)
+        OR (credential_purpose = 'SIDECAR_RUNTIME' AND provider_deployment_id IS NOT NULL));
+CREATE UNIQUE INDEX IF NOT EXISTS llm_provider_credential_endpoint_version_uq
+    ON llm_provider_credential_t(host_id, provider_endpoint_id, credential_version)
+    WHERE provider_endpoint_id IS NOT NULL;
+
+ALTER TABLE llm_pricing_version_t
+    ADD COLUMN IF NOT EXISTS pricing_basis VARCHAR(24) NOT NULL DEFAULT 'EXTERNAL_PROVIDER';
+ALTER TABLE llm_pricing_version_t
+    DROP CONSTRAINT IF EXISTS llm_pricing_version_basis_ck;
+ALTER TABLE llm_pricing_version_t
+    ADD CONSTRAINT llm_pricing_version_basis_ck CHECK(
+        pricing_basis IN ('EXTERNAL_PROVIDER','ZERO_MARGINAL','AMORTIZED_INTERNAL')
+        AND (pricing_basis <> 'ZERO_MARGINAL' OR
+             (input_micros_per_million = 0 AND COALESCE(output_micros_per_million, 0) = 0))
+        AND (pricing_basis <> 'AMORTIZED_INTERNAL' OR
+             (input_micros_per_million > 0 OR COALESCE(output_micros_per_million, 0) > 0)));
+
+ALTER TABLE llm_provider_deployment_t
+    DROP CONSTRAINT IF EXISTS llm_provider_deployment_pass_result_ck;
+ALTER TABLE llm_provider_deployment_t
+    ADD CONSTRAINT llm_provider_deployment_pass_result_ck CHECK(
+        conformance_state <> 'PASS' OR (
+            conformance_result IS NOT NULL
+            AND conformance_digest IS NOT NULL
+            AND conformance_valid_until IS NOT NULL
+            AND conformance_result->>'state' = 'pass'
+            AND conformance_result->>'digest' = conformance_digest
+            AND conformance_result->>'provider' = provider_protocol
+            AND conformance_result->>'physicalModel' = physical_model_id
+            AND (conformance_result->>'validUntil')::timestamptz = conformance_valid_until
+            AND jsonb_typeof(conformance_result->'capabilities') = 'object'
+            AND jsonb_typeof(conformance_result->'capabilityEvidence') = 'object'
+            AND ((conformance_result->>'schemaVersion' = '1') OR (
+                conformance_result->>'schemaVersion' = '2'
+                AND conformance_result->>'evidenceKind' = 'live_endpoint'
+                AND length(conformance_result->>'signerKeyId') BETWEEN 1 AND 255
+                AND conformance_result->>'signature' ~ '^base64:[A-Za-z0-9+/]+={0,2}$'
+                AND jsonb_typeof(conformance_result->'liveEvidence') = 'object'
+            ))
+        ));
+
+CREATE TABLE IF NOT EXISTS llm_gateway_replica_inventory_t (
+    host_id UUID NOT NULL,
+    environment VARCHAR(32) NOT NULL,
+    replica_inventory_id UUID NOT NULL,
+    inventory_generation BIGINT NOT NULL CHECK(inventory_generation > 0),
+    inventory_digest VARCHAR(64) NOT NULL CHECK(inventory_digest ~ '^[0-9a-f]{64}$'),
+    desired_count INTEGER NOT NULL CHECK(desired_count > 0),
+    workload_kind VARCHAR(64) NOT NULL,
+    workload_name VARCHAR(255) NOT NULL,
+    workload_uid VARCHAR(255) NOT NULL,
+    workload_resource_version VARCHAR(255) NOT NULL,
+    valid_from TIMESTAMPTZ NOT NULL,
+    valid_until TIMESTAMPTZ NOT NULL,
+    lifecycle_status VARCHAR(16) NOT NULL DEFAULT 'FROZEN',
+    frozen_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    aggregate_version BIGINT NOT NULL DEFAULT 1 CHECK(aggregate_version > 0),
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
+    PRIMARY KEY(host_id, environment, replica_inventory_id, inventory_generation),
+    FOREIGN KEY(host_id) REFERENCES host_t(host_id) ON DELETE CASCADE,
+    UNIQUE(host_id, environment, replica_inventory_id, inventory_generation, inventory_digest),
+    CHECK(valid_until > valid_from),
+    CHECK(lifecycle_status IN ('FROZEN','INVALIDATED','RETIRED'))
+);
+
+CREATE TABLE IF NOT EXISTS llm_gateway_replica_inventory_member_t (
+    host_id UUID NOT NULL,
+    environment VARCHAR(32) NOT NULL,
+    replica_inventory_id UUID NOT NULL,
+    inventory_generation BIGINT NOT NULL,
+    gateway_instance VARCHAR(255) NOT NULL CHECK(length(gateway_instance) > 0 AND gateway_instance <> 'gateway-local'),
+    namespace VARCHAR(255) NOT NULL,
+    service_account VARCHAR(255) NOT NULL,
+    pod_uid VARCHAR(255) NOT NULL,
+    required BOOLEAN NOT NULL DEFAULT TRUE,
+    PRIMARY KEY(host_id, environment, replica_inventory_id, inventory_generation, gateway_instance),
+    FOREIGN KEY(host_id, environment, replica_inventory_id, inventory_generation)
+        REFERENCES llm_gateway_replica_inventory_t(
+            host_id, environment, replica_inventory_id, inventory_generation) ON DELETE RESTRICT,
+    UNIQUE(host_id, environment, replica_inventory_id, inventory_generation, pod_uid),
+    UNIQUE(host_id, environment, replica_inventory_id, inventory_generation, gateway_instance, pod_uid)
+);
+
+ALTER TABLE llm_gateway_publication_t
+    ADD COLUMN IF NOT EXISTS projection_schema_version INTEGER NOT NULL DEFAULT 2,
+    ADD COLUMN IF NOT EXISTS replica_inventory_id UUID,
+    ADD COLUMN IF NOT EXISTS replica_inventory_generation BIGINT,
+    ADD COLUMN IF NOT EXISTS replica_inventory_digest VARCHAR(64),
+    ADD COLUMN IF NOT EXISTS evidence_key_set_version VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS evidence_key_set_digest VARCHAR(64);
+ALTER TABLE llm_gateway_publication_t
+    DROP CONSTRAINT IF EXISTS llm_gateway_publication_delivery_mode_ck,
+    DROP CONSTRAINT IF EXISTS llm_gateway_publication_schema_version_ck,
+    DROP CONSTRAINT IF EXISTS llm_gateway_publication_inventory_shape_ck,
+    DROP CONSTRAINT IF EXISTS llm_gateway_publication_inventory_fk;
+ALTER TABLE llm_gateway_publication_t
+    ADD CONSTRAINT llm_gateway_publication_schema_version_ck CHECK(projection_schema_version IN (2,3)),
+    ADD CONSTRAINT llm_gateway_publication_inventory_shape_ck CHECK(
+        (projection_schema_version = 2 AND replica_inventory_id IS NULL
+            AND replica_inventory_generation IS NULL AND replica_inventory_digest IS NULL)
+        OR (projection_schema_version = 3 AND replica_inventory_id IS NOT NULL
+            AND replica_inventory_generation IS NOT NULL
+            AND replica_inventory_digest ~ '^[0-9a-f]{64}$'
+            AND evidence_key_set_version IS NOT NULL
+            AND evidence_key_set_digest ~ '^[0-9a-f]{64}$')),
+    ADD CONSTRAINT llm_gateway_publication_inventory_fk
+        FOREIGN KEY(host_id, environment, replica_inventory_id,
+                    replica_inventory_generation, replica_inventory_digest)
+        REFERENCES llm_gateway_replica_inventory_t(
+                    host_id, environment, replica_inventory_id,
+                    inventory_generation, inventory_digest) ON DELETE RESTRICT;
+ALTER TABLE llm_gateway_publication_t
+    ADD CONSTRAINT llm_gateway_publication_delivery_mode_ck CHECK(
+        delivery_mode IN ('LEGACY_PROJECTION','INSTANCE_PROPERTIES','PROJECTION_V3')
+        AND (delivery_mode <> 'INSTANCE_PROPERTIES' OR
+            (source_digest IS NOT NULL AND config_properties IS NOT NULL
+             AND config_properties_digest IS NOT NULL))
+        AND (delivery_mode <> 'PROJECTION_V3' OR projection_schema_version = 3));
+
+CREATE TABLE IF NOT EXISTS llm_gateway_publication_ack_t (
+    host_id UUID NOT NULL,
+    environment VARCHAR(32) NOT NULL,
+    gateway_publication_id UUID NOT NULL,
+    replica_inventory_id UUID NOT NULL,
+    inventory_generation BIGINT NOT NULL,
+    inventory_digest VARCHAR(64) NOT NULL CHECK(inventory_digest ~ '^[0-9a-f]{64}$'),
+    gateway_instance VARCHAR(255) NOT NULL,
+    pod_uid VARCHAR(255) NOT NULL,
+    sequence_id BIGINT CHECK(sequence_id > 0),
+    root_digest VARCHAR(64) CHECK(root_digest IS NULL OR root_digest ~ '^[0-9a-f]{64}$'),
+    applied_schema_version INTEGER CHECK(applied_schema_version IN (2,3)),
+    gateway_version VARCHAR(32),
+    reader_version VARCHAR(64),
+    material_generation BIGINT CHECK(material_generation >= 0),
+    resolved_trust_digest VARCHAR(64) CHECK(
+        resolved_trust_digest IS NULL OR resolved_trust_digest ~ '^[0-9a-f]{64}$'),
+    evidence_key_set_version VARCHAR(255),
+    evidence_key_set_digest VARCHAR(64) CHECK(
+        evidence_key_set_digest IS NULL OR evidence_key_set_digest ~ '^[0-9a-f]{64}$'),
+    acknowledgement_state VARCHAR(16) NOT NULL DEFAULT 'PENDING',
+    failure_category VARCHAR(32),
+    failure_code VARCHAR(64),
+    acknowledgement_digest VARCHAR(64) CHECK(acknowledgement_digest IS NULL OR acknowledgement_digest ~ '^[0-9a-f]{64}$'),
+    authenticated_principal VARCHAR(255),
+    authenticated_audience VARCHAR(255),
+    applied_at TIMESTAMPTZ,
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(host_id, environment, gateway_publication_id, gateway_instance),
+    FOREIGN KEY(host_id, environment, gateway_publication_id)
+        REFERENCES llm_gateway_publication_t(host_id, environment, gateway_publication_id) ON DELETE RESTRICT,
+    FOREIGN KEY(host_id, environment, replica_inventory_id, inventory_generation,
+                gateway_instance, pod_uid)
+        REFERENCES llm_gateway_replica_inventory_member_t(
+                host_id, environment, replica_inventory_id, inventory_generation,
+                gateway_instance, pod_uid) ON DELETE RESTRICT,
+    CHECK(acknowledgement_state IN ('PENDING','ACKNOWLEDGED','FAILED','DIVERGENT')),
+    CHECK((acknowledgement_state = 'PENDING' AND acknowledgement_digest IS NULL AND applied_at IS NULL
+            AND sequence_id IS NULL AND root_digest IS NULL AND applied_schema_version IS NULL)
+       OR (acknowledgement_state = 'ACKNOWLEDGED' AND acknowledgement_digest IS NOT NULL
+           AND applied_at IS NOT NULL AND sequence_id IS NOT NULL AND root_digest IS NOT NULL
+           AND applied_schema_version IS NOT NULL AND gateway_version IS NOT NULL
+           AND reader_version IS NOT NULL AND material_generation IS NOT NULL
+           AND resolved_trust_digest IS NOT NULL AND evidence_key_set_version IS NOT NULL
+           AND evidence_key_set_digest IS NOT NULL AND failure_category IS NULL AND failure_code IS NULL)
+       OR (acknowledgement_state IN ('FAILED','DIVERGENT') AND acknowledgement_digest IS NOT NULL
+           AND applied_at IS NOT NULL AND failure_category IS NOT NULL AND failure_code IS NOT NULL))
+);
+
+COMMIT;
+-- END INLINED patch_20260808_03_llm_local_provider_transport.sql
+
+-- BEGIN INLINED patch_20260810_01_llm_remove_conformance_lifecycle.sql
+BEGIN;
+
+-- Preserve the immutable embedding-space contract before retiring live
+-- conformance. Existing deployments that route to one exact Alias space can
+-- inherit that operator-declared space into the global model declaration.
+WITH model_spaces AS (
+    SELECT registration.model_id,
+           (jsonb_agg(DISTINCT alias.required_capabilities->'embeddingSpace'))->0 AS space
+      FROM llm_public_alias_t alias
+      JOIN llm_alias_route_t route ON route.host_id=alias.host_id
+       AND route.public_alias_id=alias.public_alias_id AND route.active IS TRUE
+      JOIN llm_provider_deployment_t deployment ON deployment.host_id=route.host_id
+       AND deployment.provider_deployment_id=route.provider_deployment_id
+       AND deployment.active IS TRUE AND deployment.provider_protocol='openai_embeddings'
+      JOIN llm_model_registration_t registration ON registration.host_id=deployment.host_id
+       AND registration.model_registration_id=deployment.model_registration_id
+     WHERE alias.active IS TRUE
+       AND jsonb_typeof(alias.required_capabilities->'embeddingSpace')='object'
+     GROUP BY registration.model_id
+    HAVING count(DISTINCT alias.required_capabilities->'embeddingSpace')=1
+)
+UPDATE llm_model_t model
+   SET declared_capabilities=jsonb_set(
+       model.declared_capabilities,
+       '{embedding}',
+       COALESCE(model.declared_capabilities->'embedding','{}'::jsonb)
+           || jsonb_build_object('space',spaces.space),
+       TRUE)
+  FROM model_spaces spaces
+ WHERE model.model_id=spaces.model_id
+   AND model.operations ? 'embed'
+   AND NOT (model.declared_capabilities->'embedding' ? 'space');
+
+-- Lifecycle is no longer an authoring workflow, but terminal historical states
+-- still express an operator's intent that a resource must not be published.
+-- Preserve that intent through the existing soft-delete flag before dropping
+-- the lifecycle columns. Draft/pending/validating rows remain active by design.
+DO $preserve_terminal_lifecycle$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_attribute
+                WHERE attrelid='llm_model_t'::regclass
+                  AND attname='lifecycle_status' AND NOT attisdropped) THEN
+        EXECUTE $sql$UPDATE llm_model_t SET active=FALSE
+                     WHERE lifecycle_status IN ('DEPRECATED','RETIRED')$sql$;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_attribute
+                WHERE attrelid='llm_model_registration_t'::regclass
+                  AND attname='lifecycle_status' AND NOT attisdropped) THEN
+        EXECUTE $sql$UPDATE llm_model_registration_t SET active=FALSE
+                     WHERE lifecycle_status IN ('SUSPENDED','RETIRED')$sql$;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_attribute
+                WHERE attrelid='llm_provider_account_t'::regclass
+                  AND attname='lifecycle_status' AND NOT attisdropped) THEN
+        EXECUTE $sql$UPDATE llm_provider_account_t SET active=FALSE
+                     WHERE lifecycle_status IN ('SUSPENDED','RETIRED')$sql$;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_attribute
+                WHERE attrelid='llm_network_zone_t'::regclass
+                  AND attname='lifecycle_status' AND NOT attisdropped) THEN
+        EXECUTE $sql$UPDATE llm_network_zone_t SET active=FALSE
+                     WHERE lifecycle_status IN ('SUSPENDED','RETIRED')$sql$;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_attribute
+                WHERE attrelid='llm_provider_endpoint_t'::regclass
+                  AND attname='lifecycle_status' AND NOT attisdropped) THEN
+        EXECUTE $sql$UPDATE llm_provider_endpoint_t SET active=FALSE
+                     WHERE lifecycle_status IN ('SUSPENDED','RETIRED')$sql$;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_attribute
+                WHERE attrelid='llm_provider_credential_t'::regclass
+                  AND attname='lifecycle_status' AND NOT attisdropped) THEN
+        EXECUTE $sql$UPDATE llm_provider_credential_t SET active=FALSE
+                     WHERE lifecycle_status IN ('REVOKED','EXPIRED')$sql$;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_attribute
+                WHERE attrelid='llm_public_alias_t'::regclass
+                  AND attname='lifecycle_status' AND NOT attisdropped) THEN
+        EXECUTE $sql$UPDATE llm_public_alias_t SET active=FALSE
+                     WHERE lifecycle_status IN ('DEPRECATED','RETIRED')$sql$;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_attribute
+                WHERE attrelid='llm_model_policy_t'::regclass
+                  AND attname='lifecycle_status' AND NOT attisdropped) THEN
+        EXECUTE $sql$UPDATE llm_model_policy_t SET active=FALSE
+                     WHERE lifecycle_status IN ('SUSPENDED','RETIRED')$sql$;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_attribute
+                WHERE attrelid='llm_provider_deployment_t'::regclass
+                  AND attname='lifecycle_status' AND NOT attisdropped) THEN
+        EXECUTE $sql$UPDATE llm_provider_deployment_t SET active=FALSE
+                     WHERE lifecycle_status IN ('SUSPENDED','RETIRED')$sql$;
+    END IF;
+END
+$preserve_terminal_lifecycle$;
+
+-- Preserve dependent views such as knowledge_embedding_profile_runtime_v.
+-- The replacement exposes the same columns while releasing its dependencies
+-- on the lifecycle and conformance columns before those columns are dropped.
+CREATE OR REPLACE VIEW knowledge_qualified_embedding_alias_v AS
+SELECT alias.host_id,alias.host_id AS alias_owner_host_id,alias.public_alias_id,alias.alias_name,
+       alias.required_capabilities->'embeddingSpace' AS embedding_space,
+       TRUE AS active,alias.update_ts,count(*) AS eligible_route_count
+  FROM llm_public_alias_t alias
+  JOIN llm_alias_route_t route ON route.host_id=alias.host_id
+   AND route.public_alias_id=alias.public_alias_id AND route.active IS TRUE
+  JOIN llm_provider_deployment_t deployment ON deployment.host_id=route.host_id
+   AND deployment.provider_deployment_id=route.provider_deployment_id
+   AND deployment.active IS TRUE AND deployment.provider_protocol='openai_embeddings'
+  JOIN llm_model_registration_t registration ON registration.host_id=deployment.host_id
+   AND registration.model_registration_id=deployment.model_registration_id AND registration.active IS TRUE
+  JOIN llm_model_t model ON model.model_id=registration.model_id AND model.active IS TRUE
+ WHERE alias.active IS TRUE AND alias.operations ? 'embed'
+   AND alias.require_expected_embedding_space IS TRUE
+   AND (model.declared_capabilities || registration.capability_restrictions)
+       ->'embedding'->'space'=alias.required_capabilities->'embeddingSpace'
+ GROUP BY alias.host_id,alias.public_alias_id,alias.alias_name,
+          alias.required_capabilities->'embeddingSpace',alias.update_ts
+HAVING bool_and(
+    jsonb_array_length(COALESCE(
+        (model.declared_capabilities || registration.capability_restrictions)
+            ->'embedding'->'supportedDimensions',
+        (model.declared_capabilities || registration.capability_restrictions)
+            ->'embedding'->'dimensions'))=1
+    AND COALESCE(
+        (model.declared_capabilities || registration.capability_restrictions)
+            ->'embedding'->'supportedDimensions',
+        (model.declared_capabilities || registration.capability_restrictions)
+            ->'embedding'->'dimensions')
+        @> jsonb_build_array((alias.required_capabilities->'embeddingSpace'->>'dimension')::integer)
+);
+
+DROP INDEX IF EXISTS llm_deployment_conformance_due_idx;
+
+ALTER TABLE llm_model_t DROP COLUMN IF EXISTS lifecycle_status;
+ALTER TABLE llm_model_registration_t DROP COLUMN IF EXISTS lifecycle_status;
+ALTER TABLE llm_provider_account_t DROP COLUMN IF EXISTS lifecycle_status;
+ALTER TABLE llm_network_zone_t DROP COLUMN IF EXISTS lifecycle_status;
+ALTER TABLE llm_provider_endpoint_t DROP COLUMN IF EXISTS lifecycle_status;
+ALTER TABLE llm_provider_credential_t DROP COLUMN IF EXISTS lifecycle_status;
+ALTER TABLE llm_public_alias_t DROP COLUMN IF EXISTS lifecycle_status;
+ALTER TABLE llm_model_policy_t DROP COLUMN IF EXISTS lifecycle_status;
+ALTER TABLE llm_provider_deployment_t
+    DROP COLUMN IF EXISTS lifecycle_status,
+    DROP COLUMN IF EXISTS conformance_state,
+    DROP COLUMN IF EXISTS conformance_digest,
+    DROP COLUMN IF EXISTS conformance_valid_until,
+    DROP COLUMN IF EXISTS conformance_result,
+    DROP COLUMN IF EXISTS qualification_contract,
+    DROP COLUMN IF EXISTS refresh_before_seconds;
+
+COMMIT;
+-- END INLINED patch_20260810_01_llm_remove_conformance_lifecycle.sql
+-- BEGIN LIGHT KNOWLEDGE PHASE 0 CONTRACT SCHEMA
+-- Light Knowledge Phase 0 schema contract.
+-- This is a guarded clean cutover from the August 8 stability foundation.
+-- A non-empty deployment requires an explicitly reviewed converter.
+BEGIN;
+
+DO $inventory_guard$
+DECLARE
+    table_name TEXT;
+    has_rows BOOLEAN;
+BEGIN
+    FOREACH table_name IN ARRAY ARRAY[
+        'knowledge_embedding_artifact_t',
+        'knowledge_base_import_identity_map_t',
+        'knowledge_base_import_t',
+        'knowledge_base_manifest_export_t',
+        'knowledge_base_strategy_qualification_t',
+        'agent_knowledge_base_t',
+        'knowledge_source_t',
+        'knowledge_ingestion_policy_t',
+        'knowledge_query_usage_t',
+        'knowledge_consumer_quota_t',
+        'knowledge_index_pointer_t',
+        'knowledge_index_generation_t',
+        'knowledge_base_t',
+        'knowledge_retrieval_profile_t'
+    ] LOOP
+        IF to_regclass(table_name) IS NOT NULL THEN
+            EXECUTE format('SELECT EXISTS (SELECT 1 FROM %I LIMIT 1)', table_name)
+               INTO has_rows;
+            IF has_rows THEN
+                RAISE EXCEPTION
+                    'LIGHT_KNOWLEDGE_NONEMPTY_REQUIRES_APPROVED_MIGRATION: %',
+                    table_name;
+            END IF;
+        END IF;
+    END LOOP;
+END
+$inventory_guard$;
+
+DROP TRIGGER IF EXISTS knowledge_index_pointer_valid_trg
+    ON knowledge_index_pointer_t;
+DROP FUNCTION IF EXISTS validate_knowledge_index_pointer();
+DROP TRIGGER IF EXISTS knowledge_index_generation_profile_trg
+    ON knowledge_index_generation_t;
+DROP FUNCTION IF EXISTS validate_knowledge_index_generation_profile();
+DROP FUNCTION IF EXISTS enforce_knowledge_manifest_export_immutable() CASCADE;
+DROP FUNCTION IF EXISTS enforce_knowledge_import_identity_immutable() CASCADE;
+DROP FUNCTION IF EXISTS enforce_knowledge_import_identity_map_append_only()
+    CASCADE;
+
+DROP TABLE IF EXISTS knowledge_embedding_artifact_t CASCADE;
+DROP TABLE IF EXISTS knowledge_base_import_identity_map_t CASCADE;
+DROP TABLE IF EXISTS knowledge_base_import_t CASCADE;
+DROP TABLE IF EXISTS knowledge_base_manifest_export_t CASCADE;
+DROP TABLE IF EXISTS knowledge_base_strategy_qualification_t CASCADE;
+DROP TABLE IF EXISTS agent_knowledge_base_t CASCADE;
+DROP TABLE IF EXISTS knowledge_source_t CASCADE;
+DROP TABLE IF EXISTS knowledge_ingestion_policy_t CASCADE;
+DROP TABLE IF EXISTS knowledge_query_usage_t CASCADE;
+DROP TABLE IF EXISTS knowledge_consumer_quota_t CASCADE;
+DROP TABLE IF EXISTS knowledge_index_pointer_t CASCADE;
+DROP TABLE IF EXISTS knowledge_index_generation_t CASCADE;
+DROP TABLE IF EXISTS knowledge_base_t CASCADE;
+DROP TABLE IF EXISTS knowledge_retrieval_profile_t CASCADE;
+
+CREATE TABLE knowledge_retrieval_profile_t (
+    profile_id UUID PRIMARY KEY,
+    host_id UUID,
+    profile_name VARCHAR(255) NOT NULL
+        CONSTRAINT knowledge_retrieval_profile_name_ck
+        CHECK(length(btrim(profile_name)) > 0),
+    strategy VARCHAR(24) NOT NULL DEFAULT 'HYBRID'
+        CHECK(strategy IN ('LEXICAL', 'VECTOR', 'HYBRID', 'GRAPH_ASSISTED')),
+    lexical_candidates INTEGER NOT NULL CHECK(lexical_candidates > 0),
+    vector_candidates INTEGER NOT NULL CHECK(vector_candidates > 0),
+    top_k INTEGER NOT NULL CHECK(top_k > 0
+        AND top_k <= lexical_candidates + vector_candidates),
+    token_budget INTEGER NOT NULL CHECK(token_budget > 0),
+    fusion_method VARCHAR(16) NOT NULL DEFAULT 'RRF'
+        CHECK(fusion_method = 'RRF'),
+    operational_failure_policy VARCHAR(24) NOT NULL DEFAULT 'FAIL_REQUEST'
+        CHECK(operational_failure_policy IN ('FAIL_REQUEST', 'RETURN_PARTIAL')),
+    graph_policy JSONB CHECK(graph_policy IS NULL
+        OR jsonb_typeof(graph_policy) = 'object'),
+    version BIGINT NOT NULL DEFAULT 1 CHECK(version > 0),
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
+    FOREIGN KEY(host_id) REFERENCES host_t(host_id) ON DELETE RESTRICT
+);
+CREATE UNIQUE INDEX knowledge_retrieval_profile_global_name_uq
+    ON knowledge_retrieval_profile_t(profile_name)
+    WHERE host_id IS NULL AND active IS TRUE;
+CREATE UNIQUE INDEX knowledge_retrieval_profile_tenant_name_uq
+    ON knowledge_retrieval_profile_t(host_id,profile_name)
+    WHERE host_id IS NOT NULL AND active IS TRUE;
+
+CREATE TABLE knowledge_ingestion_policy_t (
+    ingestion_policy_id UUID PRIMARY KEY,
+    host_id UUID,
+    policy_name VARCHAR(255) NOT NULL,
+    max_documents BIGINT NOT NULL CHECK(max_documents > 0),
+    max_chunks BIGINT NOT NULL CHECK(max_chunks > 0),
+    max_source_bytes BIGINT NOT NULL CHECK(max_source_bytes > 0),
+    max_stored_bytes BIGINT NOT NULL CHECK(max_stored_bytes > 0),
+    max_embedding_tokens BIGINT NOT NULL CHECK(max_embedding_tokens > 0),
+    max_spend_micros BIGINT NOT NULL CHECK(max_spend_micros >= 0),
+    max_wall_time_seconds BIGINT NOT NULL CHECK(max_wall_time_seconds > 0),
+    max_concurrency INTEGER NOT NULL CHECK(max_concurrency > 0),
+    version BIGINT NOT NULL DEFAULT 1 CHECK(version > 0),
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
+    FOREIGN KEY(host_id) REFERENCES host_t(host_id) ON DELETE RESTRICT
+);
+CREATE UNIQUE INDEX knowledge_ingestion_policy_global_name_uq
+    ON knowledge_ingestion_policy_t(policy_name)
+    WHERE host_id IS NULL AND active IS TRUE;
+CREATE UNIQUE INDEX knowledge_ingestion_policy_tenant_name_uq
+    ON knowledge_ingestion_policy_t(host_id, policy_name)
+    WHERE host_id IS NOT NULL AND active IS TRUE;
+
+CREATE TABLE knowledge_base_t (
+    knowledge_base_id UUID PRIMARY KEY,
+    host_id UUID,
+    name VARCHAR(255) NOT NULL,
+    description TEXT,
+    environment VARCHAR(32) NOT NULL CHECK(length(environment) > 0),
+    status VARCHAR(24) NOT NULL DEFAULT 'DRAFT'
+        CHECK(status IN (
+            'DRAFT', 'ACTIVE', 'DEPRECATED', 'INACTIVE',
+            'DELETING', 'DELETED'
+        )),
+    desired_embedding_profile_id UUID,
+    desired_embedding_profile_revision BIGINT
+        CHECK(desired_embedding_profile_revision IS NULL
+            OR desired_embedding_profile_revision > 0),
+    retention_policy JSONB NOT NULL DEFAULT '{}'::jsonb
+        CHECK(jsonb_typeof(retention_policy) = 'object'),
+    replacement_knowledge_base_id UUID,
+    deprecation_deadline TIMESTAMPTZ,
+    version BIGINT NOT NULL DEFAULT 1 CHECK(version > 0),
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
+    CHECK((desired_embedding_profile_id IS NULL)
+        = (desired_embedding_profile_revision IS NULL)),
+    CHECK(replacement_knowledge_base_id IS NULL
+        OR replacement_knowledge_base_id <> knowledge_base_id),
+    FOREIGN KEY(host_id) REFERENCES host_t(host_id) ON DELETE RESTRICT,
+    FOREIGN KEY(desired_embedding_profile_id, desired_embedding_profile_revision)
+        REFERENCES knowledge_embedding_profile_t(profile_id, profile_revision)
+        ON DELETE RESTRICT
+);
+ALTER TABLE knowledge_base_t
+    ADD CONSTRAINT knowledge_base_replacement_fk
+    FOREIGN KEY(replacement_knowledge_base_id)
+    REFERENCES knowledge_base_t(knowledge_base_id) ON DELETE RESTRICT;
+CREATE UNIQUE INDEX knowledge_base_global_name_uq
+    ON knowledge_base_t(environment, name)
+    WHERE host_id IS NULL AND status <> 'DELETED';
+CREATE UNIQUE INDEX knowledge_base_tenant_name_uq
+    ON knowledge_base_t(host_id, environment, name)
+    WHERE host_id IS NOT NULL AND status <> 'DELETED';
+
+CREATE TABLE knowledge_source_t (
+    source_id UUID PRIMARY KEY,
+    knowledge_base_id UUID NOT NULL,
+    source_type VARCHAR(32) NOT NULL
+        CHECK(source_type IN ('GIT_MARKDOWN', 'UPLOAD', 'CONFLUENCE', 'SHAREPOINT')),
+    display_name VARCHAR(255) NOT NULL,
+    config_json JSONB NOT NULL DEFAULT '{}'::jsonb
+        CHECK(jsonb_typeof(config_json) = 'object'),
+    secret_reference VARCHAR(1024),
+    status VARCHAR(24) NOT NULL DEFAULT 'DRAFT'
+        CHECK(status IN ('DRAFT', 'ACTIVE', 'INACTIVE', 'DELETING', 'DELETED')),
+    acl_mode VARCHAR(24) NOT NULL DEFAULT 'UNIFORM_SCOPE'
+        CHECK(acl_mode IN ('UNIFORM_SCOPE', 'MIRROR_SOURCE_ACL')),
+    source_trust_tier VARCHAR(32) NOT NULL DEFAULT 'UNREVIEWED',
+    approval_policy JSONB NOT NULL DEFAULT '{}'::jsonb
+        CHECK(jsonb_typeof(approval_policy) = 'object'),
+    schedule JSONB NOT NULL DEFAULT '{}'::jsonb
+        CHECK(jsonb_typeof(schedule) = 'object'),
+    acl_reconciliation_policy JSONB NOT NULL DEFAULT '{}'::jsonb
+        CHECK(jsonb_typeof(acl_reconciliation_policy) = 'object'),
+    ingestion_policy_id UUID NOT NULL,
+    version BIGINT NOT NULL DEFAULT 1 CHECK(version > 0),
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
+    FOREIGN KEY(knowledge_base_id)
+        REFERENCES knowledge_base_t(knowledge_base_id) ON DELETE RESTRICT,
+    FOREIGN KEY(ingestion_policy_id)
+        REFERENCES knowledge_ingestion_policy_t(ingestion_policy_id)
+        ON DELETE RESTRICT
+);
+CREATE UNIQUE INDEX knowledge_source_name_uq
+    ON knowledge_source_t(knowledge_base_id, display_name)
+    WHERE status <> 'DELETED';
+
+CREATE TABLE agent_knowledge_base_t (
+    host_id UUID NOT NULL,
+    agent_id UUID NOT NULL,
+    knowledge_base_id UUID NOT NULL,
+    environment VARCHAR(32) NOT NULL CHECK(length(environment) > 0),
+    retrieval_profile_id UUID NOT NULL,
+    priority INTEGER NOT NULL DEFAULT 50 CHECK(priority BETWEEN 1 AND 100),
+    version BIGINT NOT NULL DEFAULT 1 CHECK(version > 0),
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
+    PRIMARY KEY(host_id, agent_id, knowledge_base_id, environment),
+    FOREIGN KEY(host_id, agent_id)
+        REFERENCES agent_definition_t(host_id, agent_def_id) ON DELETE CASCADE,
+    FOREIGN KEY(knowledge_base_id)
+        REFERENCES knowledge_base_t(knowledge_base_id) ON DELETE RESTRICT,
+    FOREIGN KEY(retrieval_profile_id)
+        REFERENCES knowledge_retrieval_profile_t(profile_id) ON DELETE RESTRICT
+);
+
+CREATE TABLE knowledge_base_strategy_qualification_t (
+    knowledge_base_id UUID NOT NULL,
+    strategy VARCHAR(24) NOT NULL
+        CHECK(strategy IN ('HYBRID', 'GRAPH_ASSISTED')),
+    status VARCHAR(24) NOT NULL
+        CHECK(status IN ('QUALIFIED', 'REVOKED', 'EXPIRED')),
+    compatible_profile_constraints JSONB NOT NULL DEFAULT '{}'::jsonb
+        CHECK(jsonb_typeof(compatible_profile_constraints) = 'object'),
+    qualification_evidence_id VARCHAR(255) NOT NULL,
+    qualified_at TIMESTAMPTZ NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    version BIGINT NOT NULL DEFAULT 1 CHECK(version > 0),
+    PRIMARY KEY(knowledge_base_id, strategy),
+    FOREIGN KEY(knowledge_base_id)
+        REFERENCES knowledge_base_t(knowledge_base_id) ON DELETE RESTRICT,
+    CHECK(expires_at > qualified_at)
+);
+
+CREATE TABLE knowledge_base_manifest_export_t (
+    manifest_export_id UUID NOT NULL,
+    host_id UUID,
+    environment VARCHAR(32) NOT NULL CHECK(length(environment) > 0),
+    publication_id UUID NOT NULL,
+    payload_digest CHAR(64) NOT NULL
+        CHECK(payload_digest ~ '^[a-f0-9]{64}$'),
+    source_knowledge_base_id UUID NOT NULL,
+    source_knowledge_base_version BIGINT NOT NULL
+        CHECK(source_knowledge_base_version > 0),
+    manifest_format_version INTEGER NOT NULL CHECK(manifest_format_version > 0),
+    exporter_reference VARCHAR(255) NOT NULL,
+    issued_at TIMESTAMPTZ NOT NULL,
+    signing_key_id VARCHAR(255) NOT NULL,
+    signature_digest CHAR(64) NOT NULL
+        CHECK(signature_digest ~ '^[a-f0-9]{64}$'),
+    delivery_classification VARCHAR(32) NOT NULL,
+    expires_ts TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (manifest_export_id),
+    FOREIGN KEY(host_id) REFERENCES host_t(host_id) ON DELETE RESTRICT,
+    CHECK(expires_ts > issued_at)
+);
+CREATE UNIQUE INDEX knowledge_manifest_export_global_publication_uq
+    ON knowledge_base_manifest_export_t(environment, publication_id)
+    WHERE host_id IS NULL;
+CREATE UNIQUE INDEX knowledge_manifest_export_tenant_publication_uq
+    ON knowledge_base_manifest_export_t(host_id, environment, publication_id)
+    WHERE host_id IS NOT NULL;
+
+CREATE OR REPLACE FUNCTION enforce_knowledge_manifest_export_immutable()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION
+        'manifest export audit rows are immutable; expiry deletes the whole row';
+END
+$$;
+CREATE TRIGGER knowledge_manifest_export_immutable_trg
+BEFORE UPDATE ON knowledge_base_manifest_export_t
+FOR EACH ROW EXECUTE FUNCTION enforce_knowledge_manifest_export_immutable();
+
+CREATE TABLE knowledge_base_import_t (
+    knowledge_base_import_id UUID NOT NULL,
+    host_id UUID,
+    environment VARCHAR(32) NOT NULL CHECK(length(environment) > 0),
+    publication_id UUID NOT NULL,
+    payload_digest CHAR(64) NOT NULL
+        CHECK(payload_digest ~ '^[a-f0-9]{64}$'),
+    manifest_format_version INTEGER NOT NULL CHECK(manifest_format_version > 0),
+    exporter_identity VARCHAR(255),
+    signing_key_id VARCHAR(255),
+    source_environment VARCHAR(32) NOT NULL,
+    source_knowledge_base_id UUID NOT NULL,
+    source_knowledge_base_version BIGINT NOT NULL
+        CHECK(source_knowledge_base_version > 0),
+    state VARCHAR(32) NOT NULL DEFAULT 'DEPENDENCIES_PENDING'
+        CHECK(state IN (
+            'DEPENDENCIES_PENDING', 'READY_TO_BUILD', 'BUILD_APPROVED',
+            'BUILDING', 'FAILED_RETRYABLE', 'COMPLETED', 'ABANDONED'
+        )),
+    terminal_reason_code VARCHAR(64),
+    authorizing_actor_reference VARCHAR(255) NOT NULL,
+    target_knowledge_base_id UUID,
+    version BIGINT NOT NULL DEFAULT 1 CHECK(version > 0),
+    created_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (knowledge_base_import_id),
+    FOREIGN KEY(host_id) REFERENCES host_t(host_id) ON DELETE RESTRICT,
+    CHECK((state = 'ABANDONED' AND terminal_reason_code IS NOT NULL)
+        OR (state <> 'ABANDONED' AND terminal_reason_code IS NULL))
+);
+CREATE UNIQUE INDEX knowledge_base_import_global_publication_uq
+    ON knowledge_base_import_t(environment, publication_id)
+    WHERE host_id IS NULL;
+CREATE UNIQUE INDEX knowledge_base_import_tenant_publication_uq
+    ON knowledge_base_import_t(host_id, environment, publication_id)
+    WHERE host_id IS NOT NULL;
+
+CREATE OR REPLACE FUNCTION enforce_knowledge_import_identity_immutable()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF ROW(
+        NEW.knowledge_base_import_id, NEW.host_id, NEW.environment,
+        NEW.publication_id, NEW.payload_digest, NEW.manifest_format_version,
+        NEW.exporter_identity, NEW.signing_key_id, NEW.source_environment,
+        NEW.source_knowledge_base_id, NEW.source_knowledge_base_version,
+        NEW.authorizing_actor_reference, NEW.created_ts
+    ) IS DISTINCT FROM ROW(
+        OLD.knowledge_base_import_id, OLD.host_id, OLD.environment,
+        OLD.publication_id, OLD.payload_digest, OLD.manifest_format_version,
+        OLD.exporter_identity, OLD.signing_key_id, OLD.source_environment,
+        OLD.source_knowledge_base_id, OLD.source_knowledge_base_version,
+        OLD.authorizing_actor_reference, OLD.created_ts
+    ) THEN
+        RAISE EXCEPTION
+            'publication identity, digest, and source lineage are immutable';
+    END IF;
+    IF OLD.target_knowledge_base_id IS NOT NULL
+       AND NEW.target_knowledge_base_id IS DISTINCT FROM
+           OLD.target_knowledge_base_id THEN
+        RAISE EXCEPTION 'generated target Knowledge Base identity is immutable';
+    END IF;
+    IF OLD.state IN ('COMPLETED', 'ABANDONED')
+       AND NEW IS DISTINCT FROM OLD THEN
+        RAISE EXCEPTION 'terminal publication state is immutable';
+    END IF;
+    IF NEW.state <> OLD.state AND NOT (
+        (OLD.state = 'DEPENDENCIES_PENDING'
+            AND NEW.state IN ('READY_TO_BUILD', 'ABANDONED'))
+        OR (OLD.state = 'READY_TO_BUILD'
+            AND NEW.state IN ('BUILD_APPROVED', 'ABANDONED'))
+        OR (OLD.state = 'BUILD_APPROVED'
+            AND NEW.state IN ('BUILDING', 'ABANDONED'))
+        OR (OLD.state = 'BUILDING'
+            AND NEW.state IN ('FAILED_RETRYABLE', 'COMPLETED', 'ABANDONED'))
+        OR (OLD.state = 'FAILED_RETRYABLE'
+            AND NEW.state IN ('BUILDING', 'ABANDONED'))
+    ) THEN
+        RAISE EXCEPTION 'invalid publication state transition: % -> %',
+            OLD.state, NEW.state;
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER knowledge_import_identity_immutable_trg
+BEFORE UPDATE ON knowledge_base_import_t
+FOR EACH ROW EXECUTE FUNCTION enforce_knowledge_import_identity_immutable();
+
+CREATE TABLE knowledge_base_import_identity_map_t (
+    knowledge_base_import_id UUID NOT NULL,
+    source_resource_type VARCHAR(32) NOT NULL,
+    source_resource_id UUID NOT NULL,
+    generated_target_resource_id UUID NOT NULL,
+    PRIMARY KEY(
+        knowledge_base_import_id,
+        source_resource_type,
+        source_resource_id
+    ),
+    FOREIGN KEY(knowledge_base_import_id)
+        REFERENCES knowledge_base_import_t(knowledge_base_import_id)
+        ON DELETE RESTRICT,
+    UNIQUE(knowledge_base_import_id, generated_target_resource_id)
+);
+
+CREATE OR REPLACE FUNCTION enforce_knowledge_import_identity_map_append_only()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'publication identity-map rows are append-only';
+END
+$$;
+CREATE TRIGGER knowledge_import_identity_map_append_only_trg
+BEFORE UPDATE OR DELETE ON knowledge_base_import_identity_map_t
+FOR EACH ROW EXECUTE FUNCTION enforce_knowledge_import_identity_map_append_only();
+
+CREATE TABLE knowledge_index_generation_t (
+    index_generation_id UUID PRIMARY KEY,
+    knowledge_base_id UUID NOT NULL,
+    embedding_profile_id UUID NOT NULL,
+    embedding_profile_revision BIGINT NOT NULL,
+    space_id VARCHAR(255) NOT NULL,
+    space_revision BIGINT NOT NULL CHECK(space_revision > 0),
+    dimension INTEGER NOT NULL CHECK(dimension > 0),
+    parser_contract_digest CHAR(64) NOT NULL,
+    chunker_contract_digest CHAR(64) NOT NULL,
+    metadata_contract_digest CHAR(64) NOT NULL,
+    citation_contract_digest CHAR(64) NOT NULL,
+    acl_normalization_contract_digest CHAR(64) NOT NULL,
+    lexical_contract_digest CHAR(64) NOT NULL,
+    contract_set_digest CHAR(64) NOT NULL,
+    query_input_transform_version VARCHAR(255) NOT NULL,
+    snapshot_watermark BIGINT NOT NULL CHECK(snapshot_watermark >= 0),
+    final_watermark BIGINT CHECK(final_watermark IS NULL
+        OR final_watermark >= snapshot_watermark),
+    ordered_segment_manifest_digest CHAR(64),
+    strategy_projections JSONB NOT NULL DEFAULT '{}'::jsonb
+        CHECK(jsonb_typeof(strategy_projections) = 'object'),
+    state VARCHAR(16) NOT NULL
+        CHECK(state IN (
+            'BUILDING', 'CATCHING_UP', 'VALIDATING', 'READY',
+            'PROMOTED', 'FAILED', 'SUPERSEDED', 'PURGED'
+        )),
+    evidence JSONB NOT NULL DEFAULT '{}'::jsonb
+        CHECK(jsonb_typeof(evidence) = 'object'),
+    created_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    promoted_ts TIMESTAMPTZ,
+    FOREIGN KEY(knowledge_base_id)
+        REFERENCES knowledge_base_t(knowledge_base_id) ON DELETE RESTRICT,
+    FOREIGN KEY(embedding_profile_id, embedding_profile_revision)
+        REFERENCES knowledge_embedding_profile_t(profile_id, profile_revision)
+        ON DELETE RESTRICT,
+    CHECK(parser_contract_digest ~ '^[a-f0-9]{64}$'),
+    CHECK(chunker_contract_digest ~ '^[a-f0-9]{64}$'),
+    CHECK(metadata_contract_digest ~ '^[a-f0-9]{64}$'),
+    CHECK(citation_contract_digest ~ '^[a-f0-9]{64}$'),
+    CHECK(acl_normalization_contract_digest ~ '^[a-f0-9]{64}$'),
+    CHECK(lexical_contract_digest ~ '^[a-f0-9]{64}$'),
+    CHECK(contract_set_digest ~ '^[a-f0-9]{64}$'),
+    CHECK(ordered_segment_manifest_digest IS NULL
+        OR ordered_segment_manifest_digest ~ '^[a-f0-9]{64}$')
+);
+
+CREATE OR REPLACE FUNCTION validate_knowledge_index_generation_profile()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+          FROM knowledge_embedding_profile_t profile
+         WHERE profile.profile_id = NEW.embedding_profile_id
+           AND profile.profile_revision = NEW.embedding_profile_revision
+           AND profile.expected_space_id = NEW.space_id
+           AND profile.expected_space_revision = NEW.space_revision
+           AND profile.dimension = NEW.dimension
+           AND profile.query_input_transform_version
+               = NEW.query_input_transform_version
+    ) THEN
+        RAISE EXCEPTION
+            'index generation must preserve its immutable embedding profile contract';
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER knowledge_index_generation_profile_trg
+BEFORE INSERT OR UPDATE ON knowledge_index_generation_t
+FOR EACH ROW EXECUTE FUNCTION validate_knowledge_index_generation_profile();
+
+CREATE TABLE knowledge_index_pointer_t (
+    knowledge_base_id UUID PRIMARY KEY,
+    environment VARCHAR(32) NOT NULL CHECK(length(environment) > 0),
+    index_generation_id UUID NOT NULL,
+    pointer_version BIGINT NOT NULL CHECK(pointer_version > 0),
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
+    FOREIGN KEY(knowledge_base_id)
+        REFERENCES knowledge_base_t(knowledge_base_id) ON DELETE RESTRICT,
+    FOREIGN KEY(index_generation_id)
+        REFERENCES knowledge_index_generation_t(index_generation_id)
+        ON DELETE RESTRICT
+);
+
+CREATE OR REPLACE FUNCTION validate_knowledge_index_pointer()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+          FROM knowledge_index_generation_t generation
+          JOIN knowledge_base_t knowledge_base
+            ON knowledge_base.knowledge_base_id = generation.knowledge_base_id
+         WHERE generation.index_generation_id = NEW.index_generation_id
+           AND generation.knowledge_base_id = NEW.knowledge_base_id
+           AND generation.state = 'PROMOTED'
+           AND knowledge_base.environment = NEW.environment
+    ) THEN
+        RAISE EXCEPTION
+            'index pointer must select one matching promoted generation and environment';
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER knowledge_index_pointer_valid_trg
+BEFORE INSERT OR UPDATE ON knowledge_index_pointer_t
+FOR EACH ROW EXECUTE FUNCTION validate_knowledge_index_pointer();
+
+CREATE TABLE knowledge_consumer_quota_t (
+    knowledge_base_id UUID NOT NULL,
+    consumer_host_id UUID NOT NULL,
+    max_concurrency INTEGER NOT NULL CHECK(max_concurrency > 0),
+    requests_per_minute INTEGER NOT NULL CHECK(requests_per_minute > 0),
+    max_cost_micros_per_day BIGINT NOT NULL CHECK(max_cost_micros_per_day > 0),
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(knowledge_base_id, consumer_host_id),
+    FOREIGN KEY(knowledge_base_id)
+        REFERENCES knowledge_base_t(knowledge_base_id) ON DELETE CASCADE,
+    FOREIGN KEY(consumer_host_id)
+        REFERENCES host_t(host_id) ON DELETE CASCADE
+);
+
+CREATE TABLE knowledge_query_usage_t (
+    usage_id UUID PRIMARY KEY,
+    knowledge_base_id UUID NOT NULL,
+    consumer_host_id UUID NOT NULL,
+    request_id VARCHAR(255) NOT NULL,
+    request_day DATE NOT NULL,
+    charged_micros BIGINT NOT NULL CHECK(charged_micros >= 0),
+    result_count INTEGER NOT NULL DEFAULT 0 CHECK(result_count >= 0),
+    status VARCHAR(24) NOT NULL,
+    created_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(knowledge_base_id, consumer_host_id)
+        REFERENCES knowledge_consumer_quota_t(
+            knowledge_base_id,
+            consumer_host_id
+        ) ON DELETE RESTRICT,
+    UNIQUE(knowledge_base_id, consumer_host_id, request_id)
+);
+
+CREATE TABLE knowledge_embedding_artifact_t (
+    embedding_artifact_id UUID PRIMARY KEY,
+    knowledge_base_id UUID NOT NULL,
+    owner_host_id UUID,
+    transformed_input_digest CHAR(64) NOT NULL
+        CHECK(transformed_input_digest ~ '^[a-f0-9]{64}$'),
+    space_id VARCHAR(255) NOT NULL,
+    space_revision BIGINT NOT NULL CHECK(space_revision > 0),
+    dimension INTEGER NOT NULL CHECK(dimension > 0),
+    document_input_transform_version VARCHAR(255) NOT NULL,
+    embedding VECTOR NOT NULL CHECK(vector_dims(embedding) = dimension),
+    created_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(knowledge_base_id)
+        REFERENCES knowledge_base_t(knowledge_base_id) ON DELETE RESTRICT,
+    FOREIGN KEY(owner_host_id) REFERENCES host_t(host_id) ON DELETE RESTRICT,
+    UNIQUE(
+        knowledge_base_id,
+        transformed_input_digest,
+        space_id,
+        space_revision,
+        document_input_transform_version
+    ),
+    UNIQUE(embedding_artifact_id, dimension)
+);
+
+DO $roles$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_roles
+         WHERE rolname = 'light_knowledge_portal_projector_role'
+    ) THEN
+        CREATE ROLE light_knowledge_portal_projector_role NOLOGIN;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_roles
+         WHERE rolname = 'light_knowledge_api_role'
+    ) THEN
+        CREATE ROLE light_knowledge_api_role NOLOGIN;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_roles
+         WHERE rolname = 'light_knowledge_worker_role'
+    ) THEN
+        CREATE ROLE light_knowledge_worker_role NOLOGIN;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_roles
+         WHERE rolname = 'light_knowledge_schema_migration_role'
+    ) THEN
+        CREATE ROLE light_knowledge_schema_migration_role NOLOGIN;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_roles
+         WHERE rolname = 'light_knowledge_ops_read_role'
+    ) THEN
+        CREATE ROLE light_knowledge_ops_read_role NOLOGIN;
+    END IF;
+END
+$roles$;
+
+REVOKE ALL ON TABLE
+    knowledge_embedding_profile_t,
+    knowledge_retrieval_profile_t,
+    knowledge_ingestion_policy_t,
+    knowledge_base_t,
+    knowledge_source_t,
+    agent_knowledge_base_t,
+    knowledge_base_strategy_qualification_t,
+    knowledge_base_manifest_export_t,
+    knowledge_base_import_t,
+    knowledge_base_import_identity_map_t,
+    knowledge_index_generation_t,
+    knowledge_index_pointer_t,
+    knowledge_consumer_quota_t,
+    knowledge_query_usage_t,
+    knowledge_embedding_artifact_t
+FROM PUBLIC;
+
+GRANT USAGE ON SCHEMA public TO
+    light_knowledge_portal_projector_role,
+    light_knowledge_api_role,
+    light_knowledge_worker_role,
+    light_knowledge_ops_read_role;
+GRANT USAGE, CREATE ON SCHEMA public TO
+    light_knowledge_schema_migration_role;
+
+GRANT SELECT, INSERT, UPDATE ON TABLE
+    knowledge_embedding_profile_t,
+    knowledge_retrieval_profile_t,
+    knowledge_ingestion_policy_t,
+    knowledge_base_t,
+    knowledge_source_t,
+    agent_knowledge_base_t,
+    knowledge_base_strategy_qualification_t
+TO light_knowledge_portal_projector_role;
+GRANT SELECT, INSERT ON TABLE
+    knowledge_base_manifest_export_t,
+    knowledge_base_import_identity_map_t
+TO light_knowledge_portal_projector_role;
+GRANT SELECT, INSERT, UPDATE ON TABLE knowledge_base_import_t
+TO light_knowledge_portal_projector_role;
+
+GRANT SELECT ON TABLE
+    knowledge_embedding_profile_t,
+    knowledge_retrieval_profile_t,
+    knowledge_ingestion_policy_t,
+    knowledge_base_t,
+    knowledge_source_t,
+    agent_knowledge_base_t,
+    knowledge_base_strategy_qualification_t,
+    knowledge_index_generation_t,
+    knowledge_index_pointer_t,
+    knowledge_consumer_quota_t,
+    knowledge_embedding_artifact_t
+TO light_knowledge_api_role;
+GRANT SELECT, INSERT, UPDATE ON TABLE knowledge_query_usage_t
+TO light_knowledge_api_role;
+
+GRANT SELECT ON TABLE
+    knowledge_embedding_profile_t,
+    knowledge_retrieval_profile_t,
+    knowledge_ingestion_policy_t,
+    knowledge_base_t,
+    knowledge_source_t,
+    agent_knowledge_base_t,
+    knowledge_base_strategy_qualification_t
+TO light_knowledge_worker_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
+    knowledge_index_generation_t,
+    knowledge_index_pointer_t,
+    knowledge_consumer_quota_t,
+    knowledge_query_usage_t,
+    knowledge_embedding_artifact_t
+TO light_knowledge_worker_role;
+
+GRANT SELECT ON TABLE
+    knowledge_embedding_profile_t,
+    knowledge_retrieval_profile_t,
+    knowledge_ingestion_policy_t,
+    knowledge_base_t,
+    knowledge_source_t,
+    agent_knowledge_base_t,
+    knowledge_base_strategy_qualification_t,
+    knowledge_base_manifest_export_t,
+    knowledge_base_import_t,
+    knowledge_base_import_identity_map_t,
+    knowledge_index_generation_t,
+    knowledge_index_pointer_t,
+    knowledge_consumer_quota_t,
+    knowledge_query_usage_t,
+    knowledge_embedding_artifact_t
+TO light_knowledge_ops_read_role;
+
+COMMIT;
+-- END LIGHT KNOWLEDGE PHASE 0 CONTRACT SCHEMA
+-- BEGIN LIGHT KNOWLEDGE PHASE 1A OPERATIONAL SCHEMA
+-- Light Knowledge Phase 1a operational schema.
+-- Phase 1a supports one immutable full BASE segment per candidate generation.
+BEGIN;
+
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
+ALTER TABLE agent_knowledge_base_t
+    ADD COLUMN evidence_required BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN allowed_source_trust_tiers JSONB NOT NULL DEFAULT '[]'::jsonb
+        CHECK(jsonb_typeof(allowed_source_trust_tiers) = 'array');
+
+CREATE TABLE knowledge_projection_inbox_t (
+    event_id UUID PRIMARY KEY,
+    aggregate_type VARCHAR(96) NOT NULL,
+    aggregate_id VARCHAR(512) NOT NULL,
+    aggregate_sequence BIGINT NOT NULL CHECK(aggregate_sequence > 0),
+    event_type VARCHAR(160) NOT NULL,
+    event_ts TIMESTAMPTZ NOT NULL,
+    payload JSONB NOT NULL CHECK(jsonb_typeof(payload) = 'object'),
+    payload_digest CHAR(64) NOT NULL CHECK(payload_digest ~ '^[a-f0-9]{64}$'),
+    state VARCHAR(16) NOT NULL DEFAULT 'RECEIVED'
+        CHECK(state IN ('RECEIVED', 'APPLIED', 'GAP', 'DEAD_LETTER')),
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+    next_attempt_ts TIMESTAMPTZ,
+    applied_ts TIMESTAMPTZ,
+    last_error JSONB CHECK(last_error IS NULL OR jsonb_typeof(last_error) = 'object'),
+    UNIQUE(aggregate_type, aggregate_id, aggregate_sequence)
+);
+CREATE INDEX knowledge_projection_inbox_work_idx
+    ON knowledge_projection_inbox_t(state, next_attempt_ts, event_ts);
+
+CREATE TABLE knowledge_projection_heartbeat_t (
+    projector_id VARCHAR(255) PRIMARY KEY,
+    applied_event_sequence BIGINT NOT NULL CHECK(applied_event_sequence >= 0),
+    effective_config_digest CHAR(64) NOT NULL
+        CHECK(effective_config_digest ~ '^[a-f0-9]{64}$'),
+    signature_digest CHAR(64) NOT NULL
+        CHECK(signature_digest ~ '^[a-f0-9]{64}$'),
+    lease_expires_ts TIMESTAMPTZ NOT NULL,
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK(lease_expires_ts <= update_ts + INTERVAL '30 seconds')
+);
+
+CREATE TABLE knowledge_projection_ack_t (
+    event_id UUID PRIMARY KEY,
+    aggregate_type VARCHAR(96) NOT NULL,
+    aggregate_id VARCHAR(512) NOT NULL,
+    aggregate_sequence BIGINT NOT NULL CHECK(aggregate_sequence > 0),
+    projector_id VARCHAR(255) NOT NULL,
+    effective_config_digest CHAR(64) NOT NULL
+        CHECK(effective_config_digest ~ '^[a-f0-9]{64}$'),
+    acknowledged_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(event_id) REFERENCES knowledge_projection_inbox_t(event_id)
+        ON DELETE RESTRICT,
+    FOREIGN KEY(projector_id)
+        REFERENCES knowledge_projection_heartbeat_t(projector_id)
+        ON DELETE RESTRICT
+);
+
+CREATE TABLE knowledge_runtime_authorization_t (
+    knowledge_base_id UUID NOT NULL,
+    consumer_host_id UUID NOT NULL,
+    environment VARCHAR(32) NOT NULL CHECK(length(environment) > 0),
+    agent_id UUID NOT NULL,
+    retrieval_profile_id UUID NOT NULL,
+    qualified_strategies JSONB NOT NULL DEFAULT '["HYBRID"]'::jsonb
+        CHECK(jsonb_typeof(qualified_strategies) = 'array'),
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    desired_event_sequence BIGINT NOT NULL CHECK(desired_event_sequence >= 0),
+    applied_event_sequence BIGINT NOT NULL CHECK(applied_event_sequence >= 0),
+    projector_id VARCHAR(255) NOT NULL,
+    lease_expires_ts TIMESTAMPTZ NOT NULL,
+    authorization_digest CHAR(64) NOT NULL
+        CHECK(authorization_digest ~ '^[a-f0-9]{64}$'),
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(knowledge_base_id, consumer_host_id, environment, agent_id),
+    FOREIGN KEY(knowledge_base_id)
+        REFERENCES knowledge_base_t(knowledge_base_id) ON DELETE RESTRICT,
+    FOREIGN KEY(consumer_host_id) REFERENCES host_t(host_id) ON DELETE RESTRICT,
+    FOREIGN KEY(consumer_host_id, agent_id)
+        REFERENCES agent_definition_t(host_id, agent_def_id) ON DELETE RESTRICT,
+    FOREIGN KEY(retrieval_profile_id)
+        REFERENCES knowledge_retrieval_profile_t(profile_id) ON DELETE RESTRICT,
+    FOREIGN KEY(projector_id)
+        REFERENCES knowledge_projection_heartbeat_t(projector_id)
+        ON DELETE RESTRICT,
+    CHECK(applied_event_sequence <= desired_event_sequence)
+);
+CREATE INDEX knowledge_runtime_authorization_effective_idx
+    ON knowledge_runtime_authorization_t(
+        consumer_host_id, agent_id, environment, knowledge_base_id, active
+    );
+
+CREATE TABLE knowledge_sync_run_t (
+    sync_run_id UUID PRIMARY KEY,
+    knowledge_base_id UUID NOT NULL,
+    source_id UUID NOT NULL,
+    requested_by VARCHAR(255) NOT NULL,
+    requested_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    start_watermark BIGINT NOT NULL DEFAULT 0 CHECK(start_watermark >= 0),
+    snapshot_watermark BIGINT CHECK(snapshot_watermark IS NULL
+        OR snapshot_watermark >= start_watermark),
+    state VARCHAR(20) NOT NULL DEFAULT 'REQUESTED'
+        CHECK(state IN ('REQUESTED', 'RUNNING', 'SUCCEEDED', 'FAILED', 'CANCELLED')),
+    document_count BIGINT NOT NULL DEFAULT 0 CHECK(document_count >= 0),
+    chunk_count BIGINT NOT NULL DEFAULT 0 CHECK(chunk_count >= 0),
+    source_bytes BIGINT NOT NULL DEFAULT 0 CHECK(source_bytes >= 0),
+    embedding_tokens BIGINT NOT NULL DEFAULT 0 CHECK(embedding_tokens >= 0),
+    stored_bytes BIGINT NOT NULL DEFAULT 0 CHECK(stored_bytes >= 0),
+    finished_ts TIMESTAMPTZ,
+    error_summary JSONB CHECK(error_summary IS NULL
+        OR jsonb_typeof(error_summary) = 'object'),
+    FOREIGN KEY(knowledge_base_id)
+        REFERENCES knowledge_base_t(knowledge_base_id) ON DELETE RESTRICT,
+    FOREIGN KEY(source_id) REFERENCES knowledge_source_t(source_id) ON DELETE RESTRICT
+);
+CREATE INDEX knowledge_sync_run_source_idx
+    ON knowledge_sync_run_t(source_id, requested_ts DESC);
+
+CREATE TABLE knowledge_source_cursor_t (
+    source_id UUID PRIMARY KEY,
+    knowledge_base_id UUID NOT NULL,
+    opaque_cursor TEXT,
+    source_watermark BIGINT NOT NULL DEFAULT 0 CHECK(source_watermark >= 0),
+    last_full_reconciliation_ts TIMESTAMPTZ,
+    cursor_digest CHAR(64) CHECK(cursor_digest IS NULL
+        OR cursor_digest ~ '^[a-f0-9]{64}$'),
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(source_id) REFERENCES knowledge_source_t(source_id) ON DELETE RESTRICT,
+    FOREIGN KEY(knowledge_base_id)
+        REFERENCES knowledge_base_t(knowledge_base_id) ON DELETE RESTRICT
+);
+
+CREATE TABLE knowledge_document_t (
+    document_id UUID PRIMARY KEY,
+    knowledge_base_id UUID NOT NULL,
+    source_id UUID NOT NULL,
+    source_object_id VARCHAR(1024) NOT NULL,
+    canonical_uri VARCHAR(2048) NOT NULL,
+    lifecycle_state VARCHAR(16) NOT NULL DEFAULT 'ACTIVE'
+        CHECK(lifecycle_state IN ('ACTIVE', 'DELETED', 'EXCLUDED')),
+    current_document_version_id UUID,
+    observed_ts TIMESTAMPTZ NOT NULL,
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(knowledge_base_id)
+        REFERENCES knowledge_base_t(knowledge_base_id) ON DELETE RESTRICT,
+    FOREIGN KEY(source_id) REFERENCES knowledge_source_t(source_id) ON DELETE RESTRICT,
+    UNIQUE(source_id, source_object_id),
+    UNIQUE(document_id, knowledge_base_id)
+);
+
+CREATE TABLE knowledge_document_version_t (
+    document_version_id UUID PRIMARY KEY,
+    document_id UUID NOT NULL,
+    knowledge_base_id UUID NOT NULL,
+    source_version VARCHAR(255) NOT NULL,
+    content_digest CHAR(64) NOT NULL CHECK(content_digest ~ '^[a-f0-9]{64}$'),
+    parser_contract_digest CHAR(64) NOT NULL
+        CHECK(parser_contract_digest ~ '^[a-f0-9]{64}$'),
+    metadata_schema_version VARCHAR(64) NOT NULL,
+    object_locator VARCHAR(2048) NOT NULL,
+    object_digest CHAR(64) NOT NULL CHECK(object_digest ~ '^[a-f0-9]{64}$'),
+    normalized_bytes BIGINT NOT NULL CHECK(normalized_bytes >= 0),
+    source_modified_ts TIMESTAMPTZ,
+    created_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(document_id, knowledge_base_id)
+        REFERENCES knowledge_document_t(document_id, knowledge_base_id)
+        ON DELETE RESTRICT,
+    UNIQUE(document_id, source_version, parser_contract_digest),
+    UNIQUE(document_version_id, knowledge_base_id)
+);
+ALTER TABLE knowledge_document_t
+    ADD CONSTRAINT knowledge_document_current_version_fk
+    FOREIGN KEY(current_document_version_id, knowledge_base_id)
+    REFERENCES knowledge_document_version_t(document_version_id, knowledge_base_id)
+    ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
+
+CREATE TABLE knowledge_document_acl_t (
+    acl_revision_id UUID PRIMARY KEY,
+    document_id UUID NOT NULL,
+    knowledge_base_id UUID NOT NULL,
+    acl_sequence BIGINT NOT NULL CHECK(acl_sequence > 0),
+    visibility_mode VARCHAR(24) NOT NULL
+        CHECK(visibility_mode IN ('UNIFORM_SCOPE', 'MIRROR_SOURCE_ACL')),
+    normalized_acl JSONB NOT NULL CHECK(jsonb_typeof(normalized_acl) = 'object'),
+    normalization_contract_digest CHAR(64) NOT NULL
+        CHECK(normalization_contract_digest ~ '^[a-f0-9]{64}$'),
+    completeness_state VARCHAR(16) NOT NULL
+        CHECK(completeness_state IN ('COMPLETE', 'STALE', 'INCOMPLETE')),
+    observed_ts TIMESTAMPTZ NOT NULL,
+    fresh_until_ts TIMESTAMPTZ NOT NULL,
+    evidence_digest CHAR(64) NOT NULL CHECK(evidence_digest ~ '^[a-f0-9]{64}$'),
+    FOREIGN KEY(document_id, knowledge_base_id)
+        REFERENCES knowledge_document_t(document_id, knowledge_base_id)
+        ON DELETE RESTRICT,
+    UNIQUE(document_id, acl_sequence),
+    UNIQUE(acl_revision_id, knowledge_base_id),
+    CHECK(fresh_until_ts >= observed_ts)
+);
+
+CREATE TABLE knowledge_chunk_t (
+    chunk_id UUID PRIMARY KEY,
+    knowledge_base_id UUID NOT NULL,
+    document_version_id UUID NOT NULL,
+    ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+    section_path JSONB NOT NULL DEFAULT '[]'::jsonb
+        CHECK(jsonb_typeof(section_path) = 'array'),
+    start_offset BIGINT NOT NULL CHECK(start_offset >= 0),
+    end_offset BIGINT NOT NULL CHECK(end_offset > start_offset),
+    chunk_text TEXT NOT NULL,
+    token_count INTEGER NOT NULL CHECK(token_count > 0),
+    content_digest CHAR(64) NOT NULL CHECK(content_digest ~ '^[a-f0-9]{64}$'),
+    parser_output_digest CHAR(64) NOT NULL
+        CHECK(parser_output_digest ~ '^[a-f0-9]{64}$'),
+    chunker_contract_digest CHAR(64) NOT NULL
+        CHECK(chunker_contract_digest ~ '^[a-f0-9]{64}$'),
+    lexical_input TSVECTOR NOT NULL,
+    lexical_input_digest CHAR(64) NOT NULL
+        CHECK(lexical_input_digest ~ '^[a-f0-9]{64}$'),
+    metadata_schema_version VARCHAR(64) NOT NULL,
+    created_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(document_version_id, knowledge_base_id)
+        REFERENCES knowledge_document_version_t(document_version_id, knowledge_base_id)
+        ON DELETE RESTRICT,
+    UNIQUE(document_version_id, ordinal, chunker_contract_digest),
+    UNIQUE(chunk_id, knowledge_base_id)
+);
+CREATE INDEX knowledge_chunk_lexical_idx
+    ON knowledge_chunk_t USING GIN(lexical_input);
+CREATE INDEX knowledge_chunk_identifier_idx
+    ON knowledge_chunk_t USING GIN(chunk_text gin_trgm_ops);
+
+CREATE TABLE knowledge_chunk_embedding_t (
+    chunk_id UUID NOT NULL,
+    embedding_artifact_id UUID NOT NULL,
+    knowledge_base_id UUID NOT NULL,
+    embedding_profile_id UUID NOT NULL,
+    embedding_profile_revision BIGINT NOT NULL,
+    request_id VARCHAR(255) NOT NULL,
+    reused BOOLEAN NOT NULL DEFAULT FALSE,
+    created_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(chunk_id, embedding_artifact_id),
+    FOREIGN KEY(chunk_id, knowledge_base_id)
+        REFERENCES knowledge_chunk_t(chunk_id, knowledge_base_id) ON DELETE RESTRICT,
+    FOREIGN KEY(embedding_artifact_id)
+        REFERENCES knowledge_embedding_artifact_t(embedding_artifact_id)
+        ON DELETE RESTRICT,
+    FOREIGN KEY(embedding_profile_id, embedding_profile_revision)
+        REFERENCES knowledge_embedding_profile_t(profile_id, profile_revision)
+        ON DELETE RESTRICT
+);
+
+CREATE TABLE knowledge_index_segment_t (
+    index_segment_id UUID PRIMARY KEY,
+    knowledge_base_id UUID NOT NULL,
+    index_generation_id UUID NOT NULL,
+    segment_kind VARCHAR(8) NOT NULL CHECK(segment_kind = 'BASE'),
+    state VARCHAR(16) NOT NULL
+        CHECK(state IN ('BUILDING', 'READY', 'FAILED', 'PURGED')),
+    snapshot_watermark BIGINT NOT NULL CHECK(snapshot_watermark >= 0),
+    parser_contract_digest CHAR(64) NOT NULL,
+    chunker_contract_digest CHAR(64) NOT NULL,
+    lexical_contract_digest CHAR(64) NOT NULL,
+    embedding_contract_digest CHAR(64) NOT NULL,
+    acl_contract_digest CHAR(64) NOT NULL,
+    physical_locator VARCHAR(2048) NOT NULL,
+    manifest_digest CHAR(64) NOT NULL CHECK(manifest_digest ~ '^[a-f0-9]{64}$'),
+    document_count BIGINT NOT NULL CHECK(document_count >= 0),
+    chunk_count BIGINT NOT NULL CHECK(chunk_count >= 0),
+    vector_count BIGINT NOT NULL CHECK(vector_count >= 0),
+    acl_count BIGINT NOT NULL CHECK(acl_count >= 0),
+    created_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(index_generation_id)
+        REFERENCES knowledge_index_generation_t(index_generation_id)
+        ON DELETE RESTRICT,
+    FOREIGN KEY(knowledge_base_id)
+        REFERENCES knowledge_base_t(knowledge_base_id) ON DELETE RESTRICT,
+    UNIQUE(index_generation_id),
+    UNIQUE(index_segment_id, knowledge_base_id)
+);
+
+CREATE TABLE knowledge_segment_document_t (
+    index_segment_id UUID NOT NULL,
+    document_id UUID NOT NULL,
+    knowledge_base_id UUID NOT NULL,
+    document_version_id UUID NOT NULL,
+    acl_revision_id UUID NOT NULL,
+    PRIMARY KEY(index_segment_id, document_id),
+    FOREIGN KEY(index_segment_id, knowledge_base_id)
+        REFERENCES knowledge_index_segment_t(index_segment_id, knowledge_base_id)
+        ON DELETE RESTRICT,
+    FOREIGN KEY(document_version_id, knowledge_base_id)
+        REFERENCES knowledge_document_version_t(document_version_id, knowledge_base_id)
+        ON DELETE RESTRICT,
+    FOREIGN KEY(acl_revision_id, knowledge_base_id)
+        REFERENCES knowledge_document_acl_t(acl_revision_id, knowledge_base_id)
+        ON DELETE RESTRICT
+);
+
+CREATE TABLE knowledge_segment_chunk_t (
+    index_segment_id UUID NOT NULL,
+    chunk_id UUID NOT NULL,
+    knowledge_base_id UUID NOT NULL,
+    acl_revision_id UUID NOT NULL,
+    PRIMARY KEY(index_segment_id, chunk_id),
+    FOREIGN KEY(index_segment_id, knowledge_base_id)
+        REFERENCES knowledge_index_segment_t(index_segment_id, knowledge_base_id)
+        ON DELETE RESTRICT,
+    FOREIGN KEY(chunk_id, knowledge_base_id)
+        REFERENCES knowledge_chunk_t(chunk_id, knowledge_base_id)
+        ON DELETE RESTRICT,
+    FOREIGN KEY(acl_revision_id, knowledge_base_id)
+        REFERENCES knowledge_document_acl_t(acl_revision_id, knowledge_base_id)
+        ON DELETE RESTRICT
+);
+
+CREATE TABLE knowledge_segment_vector_t (
+    index_segment_id UUID NOT NULL,
+    chunk_id UUID NOT NULL,
+    embedding_artifact_id UUID NOT NULL,
+    knowledge_base_id UUID NOT NULL,
+    projection VECTOR NOT NULL,
+    dimension INTEGER NOT NULL CHECK(dimension > 0),
+    PRIMARY KEY(index_segment_id, chunk_id),
+    FOREIGN KEY(index_segment_id, chunk_id)
+        REFERENCES knowledge_segment_chunk_t(index_segment_id, chunk_id)
+        ON DELETE RESTRICT,
+    FOREIGN KEY(embedding_artifact_id, dimension)
+        REFERENCES knowledge_embedding_artifact_t(
+            embedding_artifact_id, dimension
+        ) ON DELETE RESTRICT,
+    CHECK(vector_dims(projection) = dimension)
+);
+CREATE FUNCTION enforce_knowledge_segment_vector_dimension()
+RETURNS TRIGGER LANGUAGE plpgsql AS $function$
+DECLARE expected_dimension INTEGER;
+BEGIN
+    SELECT generation.dimension INTO expected_dimension
+      FROM knowledge_index_segment_t segment
+      JOIN knowledge_index_generation_t generation
+        ON generation.index_generation_id = segment.index_generation_id
+     WHERE segment.index_segment_id = NEW.index_segment_id;
+    IF expected_dimension IS NULL OR NEW.dimension <> expected_dimension THEN
+        RAISE EXCEPTION 'KNOWLEDGE_SEGMENT_VECTOR_DIMENSION_MISMATCH';
+    END IF;
+    RETURN NEW;
+END
+$function$;
+CREATE TRIGGER knowledge_segment_vector_dimension_trg
+BEFORE INSERT OR UPDATE ON knowledge_segment_vector_t
+FOR EACH ROW EXECUTE FUNCTION enforce_knowledge_segment_vector_dimension();
+CREATE TABLE knowledge_generation_segment_t (
+    index_generation_id UUID NOT NULL,
+    ordinal INTEGER NOT NULL CHECK(ordinal = 0),
+    index_segment_id UUID NOT NULL,
+    PRIMARY KEY(index_generation_id, ordinal),
+    UNIQUE(index_generation_id, index_segment_id),
+    FOREIGN KEY(index_generation_id)
+        REFERENCES knowledge_index_generation_t(index_generation_id)
+        ON DELETE RESTRICT,
+    FOREIGN KEY(index_segment_id)
+        REFERENCES knowledge_index_segment_t(index_segment_id)
+        ON DELETE RESTRICT
+);
+
+CREATE TABLE knowledge_index_pointer_history_t (
+    pointer_history_id UUID PRIMARY KEY,
+    knowledge_base_id UUID NOT NULL,
+    environment VARCHAR(32) NOT NULL,
+    previous_generation_id UUID,
+    selected_generation_id UUID NOT NULL,
+    pointer_version BIGINT NOT NULL CHECK(pointer_version > 0),
+    evaluation_evidence JSONB NOT NULL
+        CHECK(jsonb_typeof(evaluation_evidence) = 'object'),
+    authorized_by VARCHAR(255) NOT NULL,
+    reason TEXT NOT NULL,
+    release_notes TEXT,
+    rollback_deadline TIMESTAMPTZ NOT NULL,
+    promoted_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(knowledge_base_id)
+        REFERENCES knowledge_base_t(knowledge_base_id) ON DELETE RESTRICT,
+    FOREIGN KEY(previous_generation_id)
+        REFERENCES knowledge_index_generation_t(index_generation_id)
+        ON DELETE RESTRICT,
+    FOREIGN KEY(selected_generation_id)
+        REFERENCES knowledge_index_generation_t(index_generation_id)
+        ON DELETE RESTRICT,
+    UNIQUE(knowledge_base_id, environment, pointer_version)
+);
+
+CREATE TABLE knowledge_promotion_outbox_t (
+    promotion_id UUID PRIMARY KEY,
+    knowledge_base_id UUID NOT NULL,
+    environment VARCHAR(32) NOT NULL,
+    index_generation_id UUID NOT NULL,
+    pointer_version BIGINT NOT NULL CHECK(pointer_version > 0),
+    evidence_digest CHAR(64) NOT NULL CHECK(evidence_digest ~ '^[a-f0-9]{64}$'),
+    state VARCHAR(16) NOT NULL DEFAULT 'PENDING'
+        CHECK(state IN ('PENDING', 'SENT', 'ACKNOWLEDGED', 'FAILED')),
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+    next_attempt_ts TIMESTAMPTZ,
+    created_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    acknowledged_ts TIMESTAMPTZ,
+    FOREIGN KEY(knowledge_base_id)
+        REFERENCES knowledge_base_t(knowledge_base_id) ON DELETE RESTRICT,
+    FOREIGN KEY(index_generation_id)
+        REFERENCES knowledge_index_generation_t(index_generation_id)
+        ON DELETE RESTRICT,
+    UNIQUE(knowledge_base_id, environment, index_generation_id)
+);
+CREATE INDEX knowledge_promotion_outbox_work_idx
+    ON knowledge_promotion_outbox_t(state, next_attempt_ts, created_ts);
+
+CREATE TABLE knowledge_promotion_ack_t (
+    promotion_id UUID PRIMARY KEY,
+    portal_event_id UUID NOT NULL UNIQUE,
+    portal_aggregate_sequence BIGINT NOT NULL CHECK(portal_aggregate_sequence > 0),
+    evidence_digest CHAR(64) NOT NULL CHECK(evidence_digest ~ '^[a-f0-9]{64}$'),
+    acknowledged_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(promotion_id)
+        REFERENCES knowledge_promotion_outbox_t(promotion_id) ON DELETE RESTRICT
+);
+
+CREATE TABLE knowledge_query_admission_t (
+    admission_id UUID PRIMARY KEY,
+    knowledge_base_id UUID NOT NULL,
+    consumer_host_id UUID NOT NULL,
+    request_id VARCHAR(255) NOT NULL,
+    admitted_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    lease_expires_ts TIMESTAMPTZ NOT NULL,
+    reserved_cost_micros BIGINT NOT NULL CHECK(reserved_cost_micros >= 0),
+    state VARCHAR(16) NOT NULL DEFAULT 'ADMITTED'
+        CHECK(state IN ('ADMITTED', 'COMPLETED', 'RELEASED')),
+    FOREIGN KEY(knowledge_base_id, consumer_host_id)
+        REFERENCES knowledge_consumer_quota_t(knowledge_base_id, consumer_host_id)
+        ON DELETE RESTRICT,
+    UNIQUE(knowledge_base_id, consumer_host_id, request_id),
+    CHECK(lease_expires_ts > admitted_ts)
+);
+CREATE INDEX knowledge_query_admission_active_idx
+    ON knowledge_query_admission_t(
+        knowledge_base_id, consumer_host_id, lease_expires_ts
+    ) WHERE state = 'ADMITTED';
+
+CREATE TABLE knowledge_query_audit_t (
+    query_audit_id UUID PRIMARY KEY,
+    request_id VARCHAR(255) NOT NULL,
+    knowledge_base_id UUID NOT NULL,
+    consumer_host_id UUID NOT NULL,
+    index_generation_id UUID NOT NULL,
+    retrieval_profile_id UUID NOT NULL,
+    strategy VARCHAR(24) NOT NULL CHECK(strategy IN ('LEXICAL', 'VECTOR', 'HYBRID')),
+    segment_manifest_digest CHAR(64) NOT NULL
+        CHECK(segment_manifest_digest ~ '^[a-f0-9]{64}$'),
+    query_digest CHAR(64) NOT NULL CHECK(query_digest ~ '^[a-f0-9]{64}$'),
+    result_identities JSONB NOT NULL CHECK(jsonb_typeof(result_identities) = 'array'),
+    fallback_reason VARCHAR(64),
+    latency_ms BIGINT NOT NULL CHECK(latency_ms >= 0),
+    created_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(knowledge_base_id)
+        REFERENCES knowledge_base_t(knowledge_base_id) ON DELETE RESTRICT,
+    FOREIGN KEY(consumer_host_id) REFERENCES host_t(host_id) ON DELETE RESTRICT,
+    FOREIGN KEY(index_generation_id)
+        REFERENCES knowledge_index_generation_t(index_generation_id)
+        ON DELETE RESTRICT,
+    FOREIGN KEY(retrieval_profile_id)
+        REFERENCES knowledge_retrieval_profile_t(profile_id) ON DELETE RESTRICT,
+    UNIQUE(knowledge_base_id, consumer_host_id, request_id)
+);
+
+CREATE TABLE knowledge_ingestion_error_t (
+    ingestion_error_id UUID PRIMARY KEY,
+    sync_run_id UUID NOT NULL,
+    source_object_id VARCHAR(1024),
+    error_class VARCHAR(96) NOT NULL,
+    retryable BOOLEAN NOT NULL,
+    redacted_detail JSONB NOT NULL CHECK(jsonb_typeof(redacted_detail) = 'object'),
+    occurrence_count INTEGER NOT NULL DEFAULT 1 CHECK(occurrence_count > 0),
+    first_seen_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_seen_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(sync_run_id) REFERENCES knowledge_sync_run_t(sync_run_id)
+        ON DELETE RESTRICT
+);
+
+CREATE TABLE knowledge_job_t (
+    job_id UUID PRIMARY KEY,
+    knowledge_base_id UUID NOT NULL,
+    source_id UUID,
+    job_type VARCHAR(24) NOT NULL
+        CHECK(job_type IN (
+            'SYNC', 'FULL_REINDEX', 'PROMOTE', 'PURGE', 'RETRIEVAL_TEST',
+            'CONNECTIVITY_TEST'
+        )),
+    state VARCHAR(16) NOT NULL DEFAULT 'QUEUED'
+        CHECK(state IN ('QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED', 'CANCELLED')),
+    idempotency_key VARCHAR(255) NOT NULL,
+    requested_by VARCHAR(255) NOT NULL,
+    claim_token UUID,
+    lease_expires_ts TIMESTAMPTZ,
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+    next_attempt_ts TIMESTAMPTZ,
+    payload JSONB NOT NULL DEFAULT '{}'::jsonb CHECK(jsonb_typeof(payload) = 'object'),
+    result JSONB CHECK(result IS NULL OR jsonb_typeof(result) = 'object'),
+    created_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(knowledge_base_id)
+        REFERENCES knowledge_base_t(knowledge_base_id) ON DELETE RESTRICT,
+    FOREIGN KEY(source_id) REFERENCES knowledge_source_t(source_id) ON DELETE RESTRICT,
+    UNIQUE(knowledge_base_id, idempotency_key)
+);
+CREATE INDEX knowledge_job_work_idx
+    ON knowledge_job_t(state, next_attempt_ts, created_ts);
+
+CREATE OR REPLACE FUNCTION promote_knowledge_base_generation(
+    p_promotion_id UUID,
+    p_history_id UUID,
+    p_knowledge_base_id UUID,
+    p_environment VARCHAR,
+    p_generation_id UUID,
+    p_expected_pointer_version BIGINT,
+    p_authorized_by VARCHAR,
+    p_reason TEXT,
+    p_evidence JSONB,
+    p_evidence_digest CHAR(64),
+    p_rollback_deadline TIMESTAMPTZ
+) RETURNS BIGINT LANGUAGE plpgsql AS $$
+DECLARE
+    current_version BIGINT;
+    previous_generation UUID;
+    next_version BIGINT;
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM knowledge_base_t
+         WHERE knowledge_base_id = p_knowledge_base_id
+           AND environment = p_environment
+    ) THEN
+        RAISE EXCEPTION 'KNOWLEDGE_BASE_ENVIRONMENT_MISMATCH';
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM knowledge_index_pointer_t
+         WHERE knowledge_base_id = p_knowledge_base_id
+           AND environment <> p_environment
+    ) THEN
+        RAISE EXCEPTION 'KNOWLEDGE_POINTER_ENVIRONMENT_MISMATCH';
+    END IF;
+    SELECT pointer_version, index_generation_id
+      INTO current_version, previous_generation
+      FROM knowledge_index_pointer_t
+     WHERE knowledge_base_id = p_knowledge_base_id
+       AND environment = p_environment
+     FOR UPDATE;
+
+    current_version := COALESCE(current_version, 0);
+    IF current_version <> p_expected_pointer_version THEN
+        RAISE EXCEPTION 'KNOWLEDGE_POINTER_VERSION_CONFLICT';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1
+          FROM knowledge_index_generation_t generation
+          JOIN knowledge_generation_segment_t member
+            ON member.index_generation_id = generation.index_generation_id
+          JOIN knowledge_index_segment_t segment
+            ON segment.index_segment_id = member.index_segment_id
+         WHERE generation.index_generation_id = p_generation_id
+           AND generation.knowledge_base_id = p_knowledge_base_id
+           AND generation.state = 'READY'
+           AND member.ordinal = 0
+           AND segment.segment_kind = 'BASE'
+           AND segment.state = 'READY'
+           AND segment.index_generation_id = generation.index_generation_id
+    ) THEN
+        RAISE EXCEPTION 'KNOWLEDGE_GENERATION_NOT_READY_FULL_BASE';
+    END IF;
+
+    next_version := current_version + 1;
+    UPDATE knowledge_index_generation_t
+       SET state = 'SUPERSEDED'
+     WHERE index_generation_id = previous_generation
+       AND state = 'PROMOTED';
+    UPDATE knowledge_index_generation_t
+       SET state = 'PROMOTED', promoted_ts = CURRENT_TIMESTAMP
+     WHERE index_generation_id = p_generation_id;
+
+    INSERT INTO knowledge_index_pointer_t(
+        knowledge_base_id, environment, index_generation_id,
+        pointer_version, update_user
+    ) VALUES (
+        p_knowledge_base_id, p_environment, p_generation_id,
+        next_version, p_authorized_by
+    ) ON CONFLICT (knowledge_base_id) DO UPDATE SET
+        index_generation_id = EXCLUDED.index_generation_id,
+        pointer_version = EXCLUDED.pointer_version,
+        update_ts = CURRENT_TIMESTAMP,
+        update_user = EXCLUDED.update_user
+      WHERE knowledge_index_pointer_t.environment = EXCLUDED.environment;
+
+    INSERT INTO knowledge_index_pointer_history_t(
+        pointer_history_id, knowledge_base_id, environment,
+        previous_generation_id, selected_generation_id, pointer_version,
+        evaluation_evidence, authorized_by, reason, rollback_deadline
+    ) VALUES (
+        p_history_id, p_knowledge_base_id, p_environment,
+        previous_generation, p_generation_id, next_version,
+        p_evidence, p_authorized_by, p_reason, p_rollback_deadline
+    );
+    INSERT INTO knowledge_promotion_outbox_t(
+        promotion_id, knowledge_base_id, environment, index_generation_id,
+        pointer_version, evidence_digest
+    ) VALUES (
+        p_promotion_id, p_knowledge_base_id, p_environment, p_generation_id,
+        next_version, p_evidence_digest
+    );
+    RETURN next_version;
+END
+$$;
+
+REVOKE ALL ON TABLE
+    knowledge_projection_inbox_t,
+    knowledge_projection_heartbeat_t,
+    knowledge_projection_ack_t,
+    knowledge_runtime_authorization_t,
+    knowledge_sync_run_t,
+    knowledge_source_cursor_t,
+    knowledge_document_t,
+    knowledge_document_version_t,
+    knowledge_document_acl_t,
+    knowledge_chunk_t,
+    knowledge_chunk_embedding_t,
+    knowledge_index_segment_t,
+    knowledge_segment_document_t,
+    knowledge_segment_chunk_t,
+    knowledge_segment_vector_t,
+    knowledge_generation_segment_t,
+    knowledge_index_pointer_history_t,
+    knowledge_promotion_outbox_t,
+    knowledge_promotion_ack_t,
+    knowledge_query_admission_t,
+    knowledge_query_audit_t,
+    knowledge_ingestion_error_t,
+    knowledge_job_t
+FROM PUBLIC;
+
+GRANT SELECT ON TABLE
+    knowledge_runtime_authorization_t,
+    knowledge_document_t,
+    knowledge_document_version_t,
+    knowledge_document_acl_t,
+    knowledge_chunk_t,
+    knowledge_chunk_embedding_t,
+    knowledge_index_segment_t,
+    knowledge_segment_document_t,
+    knowledge_segment_chunk_t,
+    knowledge_segment_vector_t,
+    knowledge_generation_segment_t,
+    knowledge_index_pointer_history_t
+TO light_knowledge_api_role;
+GRANT SELECT, INSERT, UPDATE ON TABLE
+    knowledge_query_admission_t,
+    knowledge_query_audit_t,
+    knowledge_query_usage_t
+TO light_knowledge_api_role;
+
+GRANT SELECT, INSERT, UPDATE ON TABLE
+    knowledge_projection_inbox_t,
+    knowledge_projection_heartbeat_t,
+    knowledge_projection_ack_t,
+    knowledge_runtime_authorization_t
+TO light_knowledge_portal_projector_role;
+GRANT SELECT ON TABLE event_store_t TO light_knowledge_portal_projector_role;
+GRANT SELECT, INSERT, UPDATE ON TABLE
+    knowledge_base_t,
+    knowledge_source_t,
+    agent_knowledge_base_t,
+    knowledge_consumer_quota_t
+TO light_knowledge_portal_projector_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
+    knowledge_sync_run_t,
+    knowledge_source_cursor_t,
+    knowledge_document_t,
+    knowledge_document_version_t,
+    knowledge_document_acl_t,
+    knowledge_chunk_t,
+    knowledge_chunk_embedding_t,
+    knowledge_index_segment_t,
+    knowledge_segment_document_t,
+    knowledge_segment_chunk_t,
+    knowledge_segment_vector_t,
+    knowledge_generation_segment_t,
+    knowledge_index_pointer_history_t,
+    knowledge_promotion_outbox_t,
+    knowledge_ingestion_error_t,
+    knowledge_job_t
+TO light_knowledge_worker_role;
+GRANT SELECT ON TABLE knowledge_promotion_ack_t TO light_knowledge_worker_role;
+GRANT EXECUTE ON FUNCTION promote_knowledge_base_generation(
+    UUID, UUID, UUID, VARCHAR, UUID, BIGINT, VARCHAR, TEXT, JSONB, CHAR, TIMESTAMPTZ
+) TO light_knowledge_worker_role;
+
+GRANT SELECT, INSERT ON TABLE knowledge_promotion_ack_t
+TO light_knowledge_portal_projector_role;
+GRANT SELECT, UPDATE ON TABLE knowledge_promotion_outbox_t
+TO light_knowledge_portal_projector_role;
+
+GRANT SELECT ON TABLE
+    knowledge_projection_inbox_t,
+    knowledge_projection_heartbeat_t,
+    knowledge_projection_ack_t,
+    knowledge_runtime_authorization_t,
+    knowledge_sync_run_t,
+    knowledge_source_cursor_t,
+    knowledge_document_t,
+    knowledge_document_version_t,
+    knowledge_document_acl_t,
+    knowledge_chunk_t,
+    knowledge_chunk_embedding_t,
+    knowledge_index_segment_t,
+    knowledge_segment_document_t,
+    knowledge_segment_chunk_t,
+    knowledge_segment_vector_t,
+    knowledge_generation_segment_t,
+    knowledge_index_pointer_history_t,
+    knowledge_promotion_outbox_t,
+    knowledge_promotion_ack_t,
+    knowledge_query_admission_t,
+    knowledge_query_audit_t,
+    knowledge_ingestion_error_t,
+    knowledge_job_t
+TO light_knowledge_ops_read_role;
+
+COMMIT;
+-- END LIGHT KNOWLEDGE PHASE 1A OPERATIONAL SCHEMA
+-- BEGIN LIGHT KNOWLEDGE PHASE 1B OPERATIONAL SCHEMA
+-- Light Knowledge Phase 1b incremental, upload, multi-KB, and MCP schema.
+BEGIN;
+
+ALTER TABLE knowledge_retrieval_profile_t
+    ADD COLUMN maximum_knowledge_bases INTEGER NOT NULL DEFAULT 1
+        CHECK(maximum_knowledge_bases BETWEEN 1 AND 4),
+    ADD COLUMN lexical_evidence_required BOOLEAN NOT NULL DEFAULT TRUE,
+    ADD COLUMN segment_candidate_multiplier INTEGER NOT NULL DEFAULT 4
+        CHECK(segment_candidate_multiplier BETWEEN 1 AND 16),
+    ADD COLUMN context_expansion_before INTEGER NOT NULL DEFAULT 0
+        CHECK(context_expansion_before BETWEEN 0 AND 4),
+    ADD COLUMN context_expansion_after INTEGER NOT NULL DEFAULT 0
+        CHECK(context_expansion_after BETWEEN 0 AND 4);
+
+ALTER TABLE knowledge_index_segment_t
+    DROP CONSTRAINT knowledge_index_segment_t_segment_kind_check,
+    DROP CONSTRAINT knowledge_index_segment_t_index_generation_id_key,
+    ADD COLUMN predecessor_segment_id UUID,
+    ADD COLUMN operation_count BIGINT NOT NULL DEFAULT 0
+        CHECK(operation_count >= 0),
+    ADD CONSTRAINT knowledge_index_segment_kind_ck
+        CHECK(segment_kind IN ('BASE', 'DELTA')),
+    ADD CONSTRAINT knowledge_index_segment_predecessor_fk
+        FOREIGN KEY(predecessor_segment_id)
+        REFERENCES knowledge_index_segment_t(index_segment_id)
+        ON DELETE RESTRICT;
+
+ALTER TABLE knowledge_generation_segment_t
+    DROP CONSTRAINT knowledge_generation_segment_t_ordinal_check,
+    ADD CONSTRAINT knowledge_generation_segment_ordinal_ck CHECK(ordinal >= 0);
+
+ALTER TABLE knowledge_job_t
+    DROP CONSTRAINT knowledge_job_t_job_type_check,
+    ADD CONSTRAINT knowledge_job_type_phase1b_ck CHECK(job_type IN (
+        'SYNC', 'DELTA_SYNC', 'FULL_REINDEX', 'PROMOTE', 'PURGE',
+        'RETRIEVAL_TEST', 'CONNECTIVITY_TEST', 'UPLOAD', 'COMPACTION',
+        'ANTI_ENTROPY'
+    ));
+
+CREATE TABLE knowledge_upload_t (
+    upload_id UUID PRIMARY KEY,
+    knowledge_base_id UUID NOT NULL,
+    source_id UUID NOT NULL,
+    source_object_id VARCHAR(1024) NOT NULL,
+    original_filename VARCHAR(512) NOT NULL,
+    media_type VARCHAR(128) NOT NULL CHECK(media_type IN (
+        'text/plain', 'text/markdown', 'text/html', 'application/pdf'
+    )),
+    content_length BIGINT NOT NULL CHECK(content_length BETWEEN 1 AND 104857600),
+    staged_locator VARCHAR(2048) NOT NULL,
+    staged_digest CHAR(64) NOT NULL CHECK(staged_digest ~ '^[a-f0-9]{64}$'),
+    scan_state VARCHAR(16) NOT NULL DEFAULT 'PENDING'
+        CHECK(scan_state IN ('PENDING', 'CLEAN', 'REJECTED', 'ERROR')),
+    lifecycle_state VARCHAR(16) NOT NULL DEFAULT 'STAGED'
+        CHECK(lifecycle_state IN (
+            'STAGED', 'VERIFIED', 'PROMOTED', 'REJECTED', 'ORPHANED', 'PURGED'
+        )),
+    rejection_code VARCHAR(96),
+    requested_by VARCHAR(255) NOT NULL,
+    staged_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    verified_ts TIMESTAMPTZ,
+    promoted_ts TIMESTAMPTZ,
+    purge_after_ts TIMESTAMPTZ NOT NULL,
+    FOREIGN KEY(knowledge_base_id)
+        REFERENCES knowledge_base_t(knowledge_base_id) ON DELETE RESTRICT,
+    FOREIGN KEY(source_id) REFERENCES knowledge_source_t(source_id) ON DELETE RESTRICT,
+    UNIQUE(source_id, source_object_id, staged_digest),
+    CHECK(purge_after_ts > staged_ts),
+    CHECK((lifecycle_state IN ('VERIFIED', 'PROMOTED')) =
+        (scan_state = 'CLEAN') OR lifecycle_state IN ('STAGED', 'REJECTED', 'ORPHANED', 'PURGED'))
+);
+CREATE INDEX knowledge_upload_orphan_idx
+    ON knowledge_upload_t(lifecycle_state, purge_after_ts)
+    WHERE lifecycle_state IN ('STAGED', 'ORPHANED', 'REJECTED');
+
+CREATE TABLE knowledge_source_change_t (
+    source_change_id UUID PRIMARY KEY,
+    sync_run_id UUID NOT NULL,
+    knowledge_base_id UUID NOT NULL,
+    source_id UUID NOT NULL,
+    source_object_id VARCHAR(1024) NOT NULL,
+    change_sequence BIGINT NOT NULL CHECK(change_sequence > 0),
+    change_kind VARCHAR(16) NOT NULL CHECK(change_kind IN (
+        'ADD', 'MODIFY', 'DELETE', 'ACL_ONLY', 'METADATA_ONLY'
+    )),
+    previous_document_version_id UUID,
+    selected_document_version_id UUID,
+    selected_acl_revision_id UUID,
+    input_contract_digest CHAR(64) NOT NULL
+        CHECK(input_contract_digest ~ '^[a-f0-9]{64}$'),
+    change_digest CHAR(64) NOT NULL CHECK(change_digest ~ '^[a-f0-9]{64}$'),
+    observed_ts TIMESTAMPTZ NOT NULL,
+    FOREIGN KEY(sync_run_id) REFERENCES knowledge_sync_run_t(sync_run_id)
+        ON DELETE RESTRICT,
+    FOREIGN KEY(knowledge_base_id)
+        REFERENCES knowledge_base_t(knowledge_base_id) ON DELETE RESTRICT,
+    FOREIGN KEY(source_id) REFERENCES knowledge_source_t(source_id) ON DELETE RESTRICT,
+    UNIQUE(source_id, change_sequence),
+    UNIQUE(sync_run_id, source_object_id)
+);
+
+CREATE TABLE knowledge_passage_anchor_t (
+    passage_anchor_id UUID NOT NULL,
+    knowledge_base_id UUID NOT NULL,
+    document_id UUID NOT NULL,
+    document_version_id UUID NOT NULL,
+    chunk_id UUID NOT NULL,
+    anchor_contract_digest CHAR(64) NOT NULL
+        CHECK(anchor_contract_digest ~ '^[a-f0-9]{64}$'),
+    continuity_state VARCHAR(16) NOT NULL
+        CHECK(continuity_state IN ('STABLE', 'MOVED', 'AMBIGUOUS', 'RETIRED')),
+    anchor_sequence BIGINT NOT NULL CHECK(anchor_sequence > 0),
+    created_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(passage_anchor_id, document_version_id),
+    FOREIGN KEY(document_id, knowledge_base_id)
+        REFERENCES knowledge_document_t(document_id, knowledge_base_id)
+        ON DELETE RESTRICT,
+    FOREIGN KEY(document_version_id, knowledge_base_id)
+        REFERENCES knowledge_document_version_t(document_version_id, knowledge_base_id)
+        ON DELETE RESTRICT,
+    FOREIGN KEY(chunk_id, knowledge_base_id)
+        REFERENCES knowledge_chunk_t(chunk_id, knowledge_base_id)
+        ON DELETE RESTRICT,
+    UNIQUE(document_version_id, chunk_id),
+    UNIQUE(document_id, anchor_sequence, passage_anchor_id)
+);
+CREATE INDEX knowledge_passage_anchor_current_idx
+    ON knowledge_passage_anchor_t(document_id, passage_anchor_id, anchor_sequence DESC);
+
+CREATE TABLE knowledge_segment_operation_t (
+    index_segment_id UUID NOT NULL,
+    operation_ordinal BIGINT NOT NULL CHECK(operation_ordinal >= 0),
+    operation_id UUID NOT NULL,
+    knowledge_base_id UUID NOT NULL,
+    operation_kind VARCHAR(24) NOT NULL CHECK(operation_kind IN (
+        'ACTIVATE_DOCUMENT', 'SUPERSEDE_DOCUMENT', 'TOMBSTONE_DOCUMENT',
+        'ACTIVATE_CHUNK', 'TOMBSTONE_CHUNK', 'SET_ACL_REVISION'
+    )),
+    document_id UUID NOT NULL,
+    document_version_id UUID,
+    chunk_id UUID,
+    passage_anchor_id UUID,
+    acl_revision_id UUID,
+    operation_digest CHAR(64) NOT NULL CHECK(operation_digest ~ '^[a-f0-9]{64}$'),
+    PRIMARY KEY(index_segment_id, operation_ordinal),
+    UNIQUE(index_segment_id, operation_id),
+    FOREIGN KEY(index_segment_id, knowledge_base_id)
+        REFERENCES knowledge_index_segment_t(index_segment_id, knowledge_base_id)
+        ON DELETE RESTRICT,
+    FOREIGN KEY(document_id, knowledge_base_id)
+        REFERENCES knowledge_document_t(document_id, knowledge_base_id)
+        ON DELETE RESTRICT,
+    CHECK(operation_kind <> 'ACTIVATE_CHUNK' OR chunk_id IS NOT NULL),
+    CHECK(operation_kind <> 'SET_ACL_REVISION' OR acl_revision_id IS NOT NULL)
+);
+CREATE INDEX knowledge_segment_operation_document_idx
+    ON knowledge_segment_operation_t(
+        knowledge_base_id, document_id, index_segment_id, operation_ordinal
+    );
+
+CREATE TABLE knowledge_embedding_reference_t (
+    embedding_artifact_id UUID NOT NULL,
+    knowledge_base_id UUID NOT NULL,
+    chunk_id UUID NOT NULL,
+    input_digest CHAR(64) NOT NULL CHECK(input_digest ~ '^[a-f0-9]{64}$'),
+    transform_contract_digest CHAR(64) NOT NULL
+        CHECK(transform_contract_digest ~ '^[a-f0-9]{64}$'),
+    reference_state VARCHAR(12) NOT NULL DEFAULT 'ACTIVE'
+        CHECK(reference_state IN ('ACTIVE', 'RELEASED', 'PURGED')),
+    created_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    released_ts TIMESTAMPTZ,
+    PRIMARY KEY(embedding_artifact_id, knowledge_base_id, chunk_id),
+    FOREIGN KEY(embedding_artifact_id)
+        REFERENCES knowledge_embedding_artifact_t(embedding_artifact_id)
+        ON DELETE RESTRICT,
+    FOREIGN KEY(chunk_id, knowledge_base_id)
+        REFERENCES knowledge_chunk_t(chunk_id, knowledge_base_id)
+        ON DELETE RESTRICT
+);
+CREATE INDEX knowledge_embedding_reference_last_ref_idx
+    ON knowledge_embedding_reference_t(embedding_artifact_id, reference_state);
+
+CREATE TABLE knowledge_compaction_run_t (
+    compaction_run_id UUID PRIMARY KEY,
+    knowledge_base_id UUID NOT NULL,
+    source_generation_id UUID NOT NULL,
+    candidate_generation_id UUID,
+    canonical_watermark BIGINT NOT NULL CHECK(canonical_watermark >= 0),
+    state VARCHAR(16) NOT NULL DEFAULT 'REQUESTED'
+        CHECK(state IN ('REQUESTED', 'RUNNING', 'VERIFIED', 'PROMOTED', 'FAILED')),
+    source_manifest_digest CHAR(64) NOT NULL
+        CHECK(source_manifest_digest ~ '^[a-f0-9]{64}$'),
+    resolved_corpus_digest CHAR(64),
+    verification_evidence JSONB NOT NULL DEFAULT '{}'::jsonb
+        CHECK(jsonb_typeof(verification_evidence) = 'object'),
+    created_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    finished_ts TIMESTAMPTZ,
+    FOREIGN KEY(knowledge_base_id)
+        REFERENCES knowledge_base_t(knowledge_base_id) ON DELETE RESTRICT,
+    FOREIGN KEY(source_generation_id)
+        REFERENCES knowledge_index_generation_t(index_generation_id)
+        ON DELETE RESTRICT,
+    FOREIGN KEY(candidate_generation_id)
+        REFERENCES knowledge_index_generation_t(index_generation_id)
+        ON DELETE RESTRICT
+);
+
+CREATE TABLE knowledge_anti_entropy_run_t (
+    anti_entropy_run_id UUID PRIMARY KEY,
+    knowledge_base_id UUID NOT NULL,
+    index_generation_id UUID NOT NULL,
+    state VARCHAR(16) NOT NULL DEFAULT 'RUNNING'
+        CHECK(state IN ('RUNNING', 'CONSISTENT', 'DRIFTED', 'FAILED')),
+    expected_manifest_digest CHAR(64) NOT NULL
+        CHECK(expected_manifest_digest ~ '^[a-f0-9]{64}$'),
+    observed_manifest_digest CHAR(64),
+    mismatch_counts JSONB NOT NULL DEFAULT '{}'::jsonb
+        CHECK(jsonb_typeof(mismatch_counts) = 'object'),
+    started_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    finished_ts TIMESTAMPTZ,
+    FOREIGN KEY(knowledge_base_id)
+        REFERENCES knowledge_base_t(knowledge_base_id) ON DELETE RESTRICT,
+    FOREIGN KEY(index_generation_id)
+        REFERENCES knowledge_index_generation_t(index_generation_id)
+        ON DELETE RESTRICT
+);
+
+CREATE FUNCTION validate_knowledge_generation_segment_phase1b()
+RETURNS TRIGGER LANGUAGE plpgsql AS $function$
+DECLARE
+    expected RECORD;
+    candidate RECORD;
+BEGIN
+    SELECT g.knowledge_base_id, g.space_id, g.space_revision,
+           g.dimension, s.parser_contract_digest, s.chunker_contract_digest,
+           s.lexical_contract_digest, s.embedding_contract_digest,
+           s.acl_contract_digest
+      INTO candidate
+      FROM knowledge_index_generation_t g
+      JOIN knowledge_index_segment_t s
+        ON s.index_segment_id = NEW.index_segment_id
+       AND s.knowledge_base_id = g.knowledge_base_id
+     WHERE g.index_generation_id = NEW.index_generation_id
+    ;
+    IF candidate IS NULL THEN
+        RAISE EXCEPTION 'KNOWLEDGE_GENERATION_SEGMENT_IDENTITY_MISMATCH';
+    END IF;
+    SELECT g.knowledge_base_id, g.space_id, g.space_revision,
+           g.dimension, s.parser_contract_digest, s.chunker_contract_digest,
+           s.lexical_contract_digest, s.embedding_contract_digest,
+           s.acl_contract_digest
+      INTO expected
+      FROM knowledge_generation_segment_t gs
+      JOIN knowledge_index_generation_t g
+        ON g.index_generation_id = gs.index_generation_id
+      JOIN knowledge_index_segment_t s
+        ON s.index_segment_id = gs.index_segment_id
+     WHERE gs.index_generation_id = NEW.index_generation_id
+     ORDER BY gs.ordinal LIMIT 1;
+    IF expected IS NOT NULL AND expected IS DISTINCT FROM candidate THEN
+        RAISE EXCEPTION 'KNOWLEDGE_GENERATION_SEGMENT_CONTRACT_MISMATCH';
+    END IF;
+    RETURN NEW;
+END
+$function$;
+CREATE TRIGGER knowledge_generation_segment_phase1b_trg
+BEFORE INSERT OR UPDATE ON knowledge_generation_segment_t
+FOR EACH ROW EXECUTE FUNCTION validate_knowledge_generation_segment_phase1b();
+
+CREATE OR REPLACE FUNCTION promote_knowledge_base_generation(
+    p_promotion_id UUID,
+    p_history_id UUID,
+    p_knowledge_base_id UUID,
+    p_environment VARCHAR,
+    p_generation_id UUID,
+    p_expected_pointer_version BIGINT,
+    p_authorized_by VARCHAR,
+    p_reason TEXT,
+    p_evidence JSONB,
+    p_evidence_digest CHAR(64),
+    p_rollback_deadline TIMESTAMPTZ
+) RETURNS BIGINT LANGUAGE plpgsql AS $$
+DECLARE
+    current_version BIGINT;
+    previous_generation UUID;
+    next_version BIGINT;
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM knowledge_base_t
+         WHERE knowledge_base_id=p_knowledge_base_id AND environment=p_environment
+    ) THEN
+        RAISE EXCEPTION 'KNOWLEDGE_BASE_ENVIRONMENT_MISMATCH';
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM knowledge_index_pointer_t
+         WHERE knowledge_base_id=p_knowledge_base_id AND environment<>p_environment
+    ) THEN
+        RAISE EXCEPTION 'KNOWLEDGE_POINTER_ENVIRONMENT_MISMATCH';
+    END IF;
+    SELECT pointer_version,index_generation_id
+      INTO current_version,previous_generation
+      FROM knowledge_index_pointer_t
+     WHERE knowledge_base_id=p_knowledge_base_id AND environment=p_environment
+     FOR UPDATE;
+    current_version := COALESCE(current_version,0);
+    IF current_version<>p_expected_pointer_version THEN
+        RAISE EXCEPTION 'KNOWLEDGE_POINTER_VERSION_CONFLICT';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1
+          FROM knowledge_index_generation_t generation
+          JOIN knowledge_generation_segment_t member
+            ON member.index_generation_id=generation.index_generation_id
+          JOIN knowledge_index_segment_t segment
+            ON segment.index_segment_id=member.index_segment_id
+         WHERE generation.index_generation_id=p_generation_id
+           AND generation.knowledge_base_id=p_knowledge_base_id
+           AND generation.state='READY'
+           AND member.ordinal=0
+           AND segment.segment_kind='BASE'
+           AND segment.state='READY'
+    ) OR EXISTS (
+        SELECT 1
+          FROM knowledge_generation_segment_t member
+          JOIN knowledge_index_segment_t segment
+            ON segment.index_segment_id=member.index_segment_id
+         WHERE member.index_generation_id=p_generation_id
+           AND segment.state<>'READY'
+    ) THEN
+        RAISE EXCEPTION 'KNOWLEDGE_GENERATION_NOT_READY_SEGMENT_SET';
+    END IF;
+    next_version := current_version+1;
+    UPDATE knowledge_index_generation_t SET state='SUPERSEDED'
+     WHERE index_generation_id=previous_generation AND state='PROMOTED';
+    UPDATE knowledge_index_generation_t
+       SET state='PROMOTED',promoted_ts=CURRENT_TIMESTAMP
+     WHERE index_generation_id=p_generation_id;
+    INSERT INTO knowledge_index_pointer_t(
+        knowledge_base_id,environment,index_generation_id,pointer_version,update_user
+    ) VALUES (
+        p_knowledge_base_id,p_environment,p_generation_id,next_version,p_authorized_by
+    ) ON CONFLICT(knowledge_base_id) DO UPDATE SET
+        index_generation_id=EXCLUDED.index_generation_id,
+        pointer_version=EXCLUDED.pointer_version,
+        update_ts=CURRENT_TIMESTAMP,
+        update_user=EXCLUDED.update_user
+      WHERE knowledge_index_pointer_t.environment=EXCLUDED.environment;
+    INSERT INTO knowledge_index_pointer_history_t(
+        pointer_history_id,knowledge_base_id,environment,previous_generation_id,
+        selected_generation_id,pointer_version,evaluation_evidence,authorized_by,
+        reason,rollback_deadline
+    ) VALUES (
+        p_history_id,p_knowledge_base_id,p_environment,previous_generation,
+        p_generation_id,next_version,p_evidence,p_authorized_by,p_reason,
+        p_rollback_deadline
+    );
+    INSERT INTO knowledge_promotion_outbox_t(
+        promotion_id,knowledge_base_id,environment,index_generation_id,
+        pointer_version,evidence_digest
+    ) VALUES (
+        p_promotion_id,p_knowledge_base_id,p_environment,p_generation_id,
+        next_version,p_evidence_digest
+    );
+    RETURN next_version;
+END
+$$;
+
+GRANT SELECT ON TABLE
+    knowledge_passage_anchor_t,
+    knowledge_segment_operation_t
+TO light_knowledge_api_role;
+GRANT SELECT, INSERT ON TABLE knowledge_upload_t TO light_knowledge_api_role;
+GRANT UPDATE(scan_state, lifecycle_state, rejection_code, verified_ts)
+    ON TABLE knowledge_upload_t TO light_knowledge_api_role;
+GRANT INSERT ON TABLE knowledge_job_t TO light_knowledge_api_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
+    knowledge_upload_t,
+    knowledge_source_change_t,
+    knowledge_passage_anchor_t,
+    knowledge_segment_operation_t,
+    knowledge_embedding_reference_t,
+    knowledge_compaction_run_t,
+    knowledge_anti_entropy_run_t
+TO light_knowledge_worker_role;
+GRANT SELECT ON TABLE
+    knowledge_upload_t,
+    knowledge_source_change_t,
+    knowledge_passage_anchor_t,
+    knowledge_segment_operation_t,
+    knowledge_embedding_reference_t,
+    knowledge_compaction_run_t,
+    knowledge_anti_entropy_run_t
+TO light_knowledge_ops_read_role;
+
+COMMIT;
+-- END LIGHT KNOWLEDGE PHASE 1B OPERATIONAL SCHEMA
+-- BEGIN LIGHT KNOWLEDGE PHASE 2 ENTERPRISE ACL SCHEMA
+-- Light Knowledge Phase 2 enterprise connector and principal ACL schema.
+BEGIN;
+
+ALTER TABLE knowledge_job_t
+    DROP CONSTRAINT knowledge_job_type_phase1b_ck,
+    ADD CONSTRAINT knowledge_job_type_phase2_ck CHECK(job_type IN (
+        'SYNC', 'DELTA_SYNC', 'FULL_REINDEX', 'PROMOTE', 'PURGE',
+        'RETRIEVAL_TEST', 'CONNECTIVITY_TEST', 'UPLOAD', 'COMPACTION',
+        'ANTI_ENTROPY', 'CONNECTOR_SYNC', 'ACL_RECONCILE',
+        'PROVIDER_NOTIFICATION'
+    ));
+
+CREATE TABLE knowledge_acl_reconciliation_t (
+    reconciliation_id UUID PRIMARY KEY,
+    knowledge_base_id UUID NOT NULL,
+    source_id UUID NOT NULL,
+    provider VARCHAR(16) NOT NULL CHECK(provider IN ('SHAREPOINT', 'CONFLUENCE')),
+    reconciliation_mode VARCHAR(12) NOT NULL
+        CHECK(reconciliation_mode IN ('FULL', 'DELTA', 'HINT')),
+    state VARCHAR(16) NOT NULL CHECK(state IN (
+        'REQUESTED', 'RUNNING', 'COMPLETE', 'FAILED', 'INCOMPLETE'
+    )),
+    input_cursor_digest CHAR(64)
+        CHECK(input_cursor_digest IS NULL OR input_cursor_digest ~ '^[a-f0-9]{64}$'),
+    output_cursor_digest CHAR(64)
+        CHECK(output_cursor_digest IS NULL OR output_cursor_digest ~ '^[a-f0-9]{64}$'),
+    discovered_object_count BIGINT NOT NULL DEFAULT 0 CHECK(discovered_object_count >= 0),
+    applied_acl_count BIGINT NOT NULL DEFAULT 0 CHECK(applied_acl_count >= 0),
+    denied_object_count BIGINT NOT NULL DEFAULT 0 CHECK(denied_object_count >= 0),
+    unresolved_subject_count BIGINT NOT NULL DEFAULT 0 CHECK(unresolved_subject_count >= 0),
+    provider_evidence JSONB NOT NULL DEFAULT '{}'::jsonb
+        CHECK(jsonb_typeof(provider_evidence) = 'object'),
+    evidence_digest CHAR(64) NOT NULL CHECK(evidence_digest ~ '^[a-f0-9]{64}$'),
+    started_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    finished_ts TIMESTAMPTZ,
+    fresh_until_ts TIMESTAMPTZ,
+    error_code VARCHAR(96),
+    FOREIGN KEY(knowledge_base_id)
+        REFERENCES knowledge_base_t(knowledge_base_id) ON DELETE RESTRICT,
+    FOREIGN KEY(source_id) REFERENCES knowledge_source_t(source_id) ON DELETE RESTRICT,
+    UNIQUE(reconciliation_id, knowledge_base_id),
+    CHECK(state <> 'COMPLETE' OR (
+        finished_ts IS NOT NULL AND fresh_until_ts IS NOT NULL
+        AND fresh_until_ts >= finished_ts
+        AND fresh_until_ts <= finished_ts + INTERVAL '15 minutes'
+        AND unresolved_subject_count = 0
+    ))
+);
+CREATE INDEX knowledge_acl_reconciliation_source_idx
+    ON knowledge_acl_reconciliation_t(source_id, started_ts DESC);
+
+CREATE TABLE knowledge_source_acl_state_t (
+    source_id UUID PRIMARY KEY,
+    knowledge_base_id UUID NOT NULL,
+    reconciliation_id UUID,
+    state VARCHAR(16) NOT NULL CHECK(state IN (
+        'PENDING', 'RECONCILING', 'COMPLETE', 'STALE', 'INCOMPLETE'
+    )),
+    discovered_object_count BIGINT NOT NULL DEFAULT 0 CHECK(discovered_object_count >= 0),
+    covered_object_count BIGINT NOT NULL DEFAULT 0 CHECK(covered_object_count >= 0),
+    denied_object_count BIGINT NOT NULL DEFAULT 0 CHECK(denied_object_count >= 0),
+    unresolved_subject_count BIGINT NOT NULL DEFAULT 0 CHECK(unresolved_subject_count >= 0),
+    observed_ts TIMESTAMPTZ,
+    fresh_until_ts TIMESTAMPTZ,
+    evidence_digest CHAR(64) CHECK(evidence_digest IS NULL
+        OR evidence_digest ~ '^[a-f0-9]{64}$'),
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(source_id) REFERENCES knowledge_source_t(source_id) ON DELETE RESTRICT,
+    FOREIGN KEY(knowledge_base_id)
+        REFERENCES knowledge_base_t(knowledge_base_id) ON DELETE RESTRICT,
+    FOREIGN KEY(reconciliation_id, knowledge_base_id)
+        REFERENCES knowledge_acl_reconciliation_t(reconciliation_id, knowledge_base_id)
+        ON DELETE RESTRICT,
+    CHECK(state <> 'COMPLETE' OR (
+        reconciliation_id IS NOT NULL
+        AND observed_ts IS NOT NULL AND fresh_until_ts IS NOT NULL
+        AND fresh_until_ts > observed_ts
+        AND fresh_until_ts <= observed_ts + INTERVAL '15 minutes'
+        AND covered_object_count = discovered_object_count
+        AND unresolved_subject_count = 0
+    ))
+);
+
+CREATE TABLE knowledge_connector_object_t (
+    connector_object_id UUID PRIMARY KEY,
+    knowledge_base_id UUID NOT NULL,
+    source_id UUID NOT NULL,
+    provider VARCHAR(16) NOT NULL CHECK(provider IN ('SHAREPOINT', 'CONFLUENCE')),
+    external_id VARCHAR(1024) NOT NULL,
+    provider_version VARCHAR(255) NOT NULL,
+    canonical_uri VARCHAR(2048) NOT NULL,
+    document_id UUID,
+    parent_external_id VARCHAR(1024),
+    relationship_kind VARCHAR(16) NOT NULL DEFAULT 'NONE'
+        CHECK(relationship_kind IN ('NONE', 'CONTAINMENT', 'REFERENCE')),
+    deleted BOOLEAN NOT NULL DEFAULT FALSE,
+    last_reconciliation_id UUID NOT NULL,
+    observed_ts TIMESTAMPTZ NOT NULL,
+    FOREIGN KEY(knowledge_base_id)
+        REFERENCES knowledge_base_t(knowledge_base_id) ON DELETE RESTRICT,
+    FOREIGN KEY(source_id) REFERENCES knowledge_source_t(source_id) ON DELETE RESTRICT,
+    FOREIGN KEY(document_id, knowledge_base_id)
+        REFERENCES knowledge_document_t(document_id, knowledge_base_id) ON DELETE RESTRICT,
+    FOREIGN KEY(last_reconciliation_id, knowledge_base_id)
+        REFERENCES knowledge_acl_reconciliation_t(reconciliation_id, knowledge_base_id)
+        ON DELETE RESTRICT,
+    UNIQUE(source_id, external_id)
+);
+
+CREATE TABLE knowledge_subject_mapping_t (
+    subject_mapping_id UUID PRIMARY KEY,
+    host_id UUID,
+    source_id UUID NOT NULL,
+    provider_subject_type VARCHAR(32) NOT NULL,
+    provider_subject_id VARCHAR(1024) NOT NULL,
+    normalized_subject_type VARCHAR(16) NOT NULL CHECK(normalized_subject_type IN (
+        'USER', 'GROUP', 'ORGANIZATION', 'EVERYONE', 'UNRESOLVED'
+    )),
+    normalized_subject_id VARCHAR(1024),
+    mapping_state VARCHAR(16) NOT NULL CHECK(mapping_state IN (
+        'APPROVED', 'REVOKED', 'AMBIGUOUS', 'UNRESOLVED'
+    )),
+    evidence_digest CHAR(64) NOT NULL CHECK(evidence_digest ~ '^[a-f0-9]{64}$'),
+    valid_from_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    valid_until_ts TIMESTAMPTZ,
+    update_user VARCHAR(255) NOT NULL,
+    FOREIGN KEY(source_id) REFERENCES knowledge_source_t(source_id) ON DELETE RESTRICT,
+    CHECK((mapping_state = 'APPROVED') = (normalized_subject_id IS NOT NULL))
+);
+CREATE UNIQUE INDEX knowledge_subject_mapping_global_uk
+    ON knowledge_subject_mapping_t(source_id, provider_subject_type, provider_subject_id)
+    WHERE host_id IS NULL;
+CREATE UNIQUE INDEX knowledge_subject_mapping_tenant_uk
+    ON knowledge_subject_mapping_t(host_id, source_id, provider_subject_type, provider_subject_id)
+    WHERE host_id IS NOT NULL;
+
+ALTER TABLE knowledge_document_acl_t
+    ADD COLUMN reconciliation_id UUID,
+    ADD COLUMN provider_effective_decision BOOLEAN NOT NULL DEFAULT TRUE,
+    ADD CONSTRAINT knowledge_document_acl_reconciliation_fk
+        FOREIGN KEY(reconciliation_id, knowledge_base_id)
+        REFERENCES knowledge_acl_reconciliation_t(reconciliation_id, knowledge_base_id)
+        ON DELETE RESTRICT,
+    ADD CONSTRAINT knowledge_document_acl_mirror_evidence_ck CHECK(
+        visibility_mode <> 'MIRROR_SOURCE_ACL' OR reconciliation_id IS NOT NULL
+    ),
+    ADD CONSTRAINT knowledge_document_acl_freshness_ck CHECK(
+        visibility_mode <> 'MIRROR_SOURCE_ACL'
+        OR fresh_until_ts <= observed_ts + INTERVAL '15 minutes'
+    );
+
+CREATE TABLE knowledge_acl_subject_t (
+    acl_revision_id UUID NOT NULL,
+    subject_ordinal INTEGER NOT NULL CHECK(subject_ordinal >= 0),
+    knowledge_base_id UUID NOT NULL,
+    document_id UUID NOT NULL,
+    provider_subject_type VARCHAR(32) NOT NULL,
+    provider_subject_id VARCHAR(1024) NOT NULL,
+    normalized_subject_type VARCHAR(16) NOT NULL CHECK(normalized_subject_type IN (
+        'USER', 'GROUP', 'ORGANIZATION', 'EVERYONE', 'UNRESOLVED'
+    )),
+    normalized_subject_id VARCHAR(1024),
+    effect VARCHAR(8) NOT NULL CHECK(effect IN ('ALLOW', 'DENY')),
+    mapping_complete BOOLEAN NOT NULL,
+    evidence_digest CHAR(64) NOT NULL CHECK(evidence_digest ~ '^[a-f0-9]{64}$'),
+    PRIMARY KEY(acl_revision_id, subject_ordinal),
+    FOREIGN KEY(acl_revision_id, knowledge_base_id)
+        REFERENCES knowledge_document_acl_t(acl_revision_id, knowledge_base_id)
+        ON DELETE RESTRICT,
+    FOREIGN KEY(document_id, knowledge_base_id)
+        REFERENCES knowledge_document_t(document_id, knowledge_base_id)
+        ON DELETE RESTRICT,
+    CHECK(mapping_complete = (
+        normalized_subject_type <> 'UNRESOLVED' AND normalized_subject_id IS NOT NULL
+    ))
+);
+CREATE INDEX knowledge_acl_subject_match_idx
+   ON knowledge_acl_subject_t(
+       acl_revision_id, effect, normalized_subject_type, normalized_subject_id
+   );
+
+CREATE OR REPLACE FUNCTION knowledge_document_acl_authorized(
+    p_document_id UUID,
+    p_subject_id TEXT,
+    p_subject_type TEXT,
+    p_groups TEXT[],
+    p_organizations TEXT[]
+) RETURNS BOOLEAN LANGUAGE sql STABLE AS $function$
+    SELECT COALESCE(bool_or(
+        source.acl_mode='UNIFORM_SCOPE' OR (
+            source.acl_mode='MIRROR_SOURCE_ACL'
+            AND acl.visibility_mode='MIRROR_SOURCE_ACL'
+            AND acl.completeness_state='COMPLETE'
+            AND acl.provider_effective_decision
+            AND acl.observed_ts<=now() AND acl.fresh_until_ts>now()
+            AND source_acl.state='COMPLETE'
+            AND source_acl.observed_ts<=now()
+            AND source_acl.fresh_until_ts>now()
+            AND source_acl.covered_object_count=source_acl.discovered_object_count
+            AND source_acl.unresolved_subject_count=0
+            AND NOT EXISTS (
+                SELECT 1 FROM knowledge_acl_subject_t unresolved
+                 WHERE unresolved.acl_revision_id=acl.acl_revision_id
+                   AND (NOT unresolved.mapping_complete
+                        OR unresolved.normalized_subject_type='UNRESOLVED')
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM knowledge_acl_subject_t denied
+                 WHERE denied.acl_revision_id=acl.acl_revision_id
+                   AND denied.effect='DENY'
+                   AND ((denied.normalized_subject_type='EVERYONE'
+                         AND denied.normalized_subject_id='*')
+                     OR (denied.normalized_subject_type='USER'
+                         AND upper(p_subject_type) IN ('USER','PERSON')
+                         AND denied.normalized_subject_id=p_subject_id)
+                     OR (denied.normalized_subject_type='GROUP'
+                         AND denied.normalized_subject_id=ANY(p_groups))
+                     OR (denied.normalized_subject_type='ORGANIZATION'
+                         AND denied.normalized_subject_id=ANY(p_organizations)))
+            )
+            AND EXISTS (
+                SELECT 1 FROM knowledge_acl_subject_t allowed
+                 WHERE allowed.acl_revision_id=acl.acl_revision_id
+                   AND allowed.effect='ALLOW'
+                   AND ((allowed.normalized_subject_type='EVERYONE'
+                         AND allowed.normalized_subject_id='*')
+                     OR (allowed.normalized_subject_type='USER'
+                         AND upper(p_subject_type) IN ('USER','PERSON')
+                         AND allowed.normalized_subject_id=p_subject_id)
+                     OR (allowed.normalized_subject_type='GROUP'
+                         AND allowed.normalized_subject_id=ANY(p_groups))
+                     OR (allowed.normalized_subject_type='ORGANIZATION'
+                         AND allowed.normalized_subject_id=ANY(p_organizations)))
+            )
+        )
+    ),FALSE)
+      FROM knowledge_document_t document
+      JOIN knowledge_source_t source ON source.source_id=document.source_id
+      JOIN LATERAL (
+        SELECT revision.* FROM knowledge_document_acl_t revision
+         WHERE revision.document_id=document.document_id
+         ORDER BY revision.acl_sequence DESC LIMIT 1
+      ) acl ON TRUE
+      LEFT JOIN knowledge_source_acl_state_t source_acl
+        ON source_acl.source_id=source.source_id
+     WHERE document.document_id=p_document_id
+       AND document.lifecycle_state='ACTIVE'
+       AND source.status='ACTIVE'
+$function$;
+
+CREATE TABLE knowledge_connector_notification_t (
+    connector_notification_id UUID PRIMARY KEY,
+    source_id UUID NOT NULL,
+    provider VARCHAR(16) NOT NULL CHECK(provider IN ('SHAREPOINT', 'CONFLUENCE')),
+    provider_notification_id VARCHAR(1024) NOT NULL,
+    state VARCHAR(12) NOT NULL CHECK(state IN ('RECEIVED', 'APPLIED', 'DISCARDED')),
+    received_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    applied_ts TIMESTAMPTZ,
+    evidence_digest CHAR(64) NOT NULL CHECK(evidence_digest ~ '^[a-f0-9]{64}$'),
+    FOREIGN KEY(source_id) REFERENCES knowledge_source_t(source_id) ON DELETE RESTRICT,
+    UNIQUE(source_id, provider_notification_id)
+);
+
+GRANT SELECT ON TABLE
+    knowledge_source_acl_state_t,
+    knowledge_acl_subject_t,
+    knowledge_connector_object_t
+TO light_knowledge_api_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
+    knowledge_acl_reconciliation_t,
+    knowledge_source_acl_state_t,
+    knowledge_connector_object_t,
+    knowledge_subject_mapping_t,
+    knowledge_acl_subject_t,
+    knowledge_connector_notification_t
+TO light_knowledge_worker_role;
+GRANT UPDATE(reconciliation_id, provider_effective_decision)
+    ON TABLE knowledge_document_acl_t TO light_knowledge_worker_role;
+GRANT SELECT ON TABLE
+    knowledge_acl_reconciliation_t,
+    knowledge_source_acl_state_t,
+    knowledge_connector_object_t,
+    knowledge_subject_mapping_t,
+    knowledge_acl_subject_t,
+    knowledge_connector_notification_t
+TO light_knowledge_ops_read_role;
+
+COMMIT;
+-- END LIGHT KNOWLEDGE PHASE 2 ENTERPRISE ACL SCHEMA
+-- BEGIN LIGHT KNOWLEDGE PHASE 2 OPERATIONAL HARDENING
+-- Light Knowledge Phase 2 operational reconciliation hardening.
+BEGIN;
+
+CREATE TABLE knowledge_acl_transition_t (
+    acl_transition_id UUID PRIMARY KEY,
+    reconciliation_id UUID NOT NULL,
+    knowledge_base_id UUID NOT NULL,
+    source_id UUID NOT NULL,
+    document_id UUID NOT NULL,
+    previous_acl_digest CHAR(64) NOT NULL
+        CHECK(previous_acl_digest ~ '^[a-f0-9]{64}$'),
+    current_acl_digest CHAR(64) NOT NULL
+        CHECK(current_acl_digest ~ '^[a-f0-9]{64}$'),
+    transition_kind VARCHAR(32) NOT NULL
+        CHECK(transition_kind IN ('PERMISSION_CHANGED')),
+    observed_ts TIMESTAMPTZ NOT NULL,
+    recorded_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(reconciliation_id, knowledge_base_id)
+        REFERENCES knowledge_acl_reconciliation_t(
+            reconciliation_id, knowledge_base_id
+        ) ON DELETE RESTRICT,
+    FOREIGN KEY(source_id) REFERENCES knowledge_source_t(source_id)
+        ON DELETE RESTRICT,
+    FOREIGN KEY(document_id, knowledge_base_id)
+        REFERENCES knowledge_document_t(document_id, knowledge_base_id)
+        ON DELETE RESTRICT,
+    UNIQUE(reconciliation_id, document_id),
+    CHECK(previous_acl_digest <> current_acl_digest)
+);
+CREATE INDEX knowledge_acl_transition_source_idx
+    ON knowledge_acl_transition_t(source_id, recorded_ts DESC);
+
+CREATE OR REPLACE FUNCTION prevent_knowledge_acl_mode_downgrade()
+RETURNS trigger LANGUAGE plpgsql AS $function$
+BEGIN
+    IF OLD.acl_mode='MIRROR_SOURCE_ACL'
+       AND NEW.acl_mode='UNIFORM_SCOPE' THEN
+        RAISE EXCEPTION 'MIRROR_SOURCE_ACL cannot be downgraded in place; create a new source identity';
+    END IF;
+    RETURN NEW;
+END
+$function$;
+CREATE TRIGGER knowledge_source_acl_mode_fence_trg
+BEFORE UPDATE OF acl_mode ON knowledge_source_t
+FOR EACH ROW EXECUTE FUNCTION prevent_knowledge_acl_mode_downgrade();
+
+-- A complete source reconciliation is the bounded freshness authority. ACL
+-- revisions remain immutable descriptions of the last permission transition;
+-- unchanged documents do not need timestamp-only replacement revisions on
+-- every provider delta page.
+CREATE OR REPLACE FUNCTION knowledge_document_acl_authorized(
+    p_document_id UUID,
+    p_subject_id TEXT,
+    p_subject_type TEXT,
+    p_groups TEXT[],
+    p_organizations TEXT[]
+) RETURNS BOOLEAN LANGUAGE sql STABLE AS $function$
+    SELECT COALESCE(bool_or(
+        source.acl_mode='UNIFORM_SCOPE' OR (
+            source.acl_mode='MIRROR_SOURCE_ACL'
+            AND acl.visibility_mode='MIRROR_SOURCE_ACL'
+            AND acl.completeness_state='COMPLETE'
+            AND acl.provider_effective_decision
+            AND source_acl.state='COMPLETE'
+            AND source_acl.observed_ts<=now()
+            AND source_acl.fresh_until_ts>now()
+            AND source_acl.covered_object_count=source_acl.discovered_object_count
+            AND source_acl.unresolved_subject_count=0
+            AND NOT EXISTS (
+                SELECT 1 FROM knowledge_acl_subject_t unresolved
+                 WHERE unresolved.acl_revision_id=acl.acl_revision_id
+                   AND (NOT unresolved.mapping_complete
+                        OR unresolved.normalized_subject_type='UNRESOLVED')
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM knowledge_acl_subject_t denied
+                 WHERE denied.acl_revision_id=acl.acl_revision_id
+                   AND denied.effect='DENY'
+                   AND ((denied.normalized_subject_type='EVERYONE'
+                         AND denied.normalized_subject_id='*')
+                     OR (denied.normalized_subject_type='USER'
+                         AND upper(p_subject_type) IN ('USER','PERSON')
+                         AND denied.normalized_subject_id=p_subject_id)
+                     OR (denied.normalized_subject_type='GROUP'
+                         AND denied.normalized_subject_id=ANY(p_groups))
+                     OR (denied.normalized_subject_type='ORGANIZATION'
+                         AND denied.normalized_subject_id=ANY(p_organizations)))
+            )
+            AND EXISTS (
+                SELECT 1 FROM knowledge_acl_subject_t allowed
+                 WHERE allowed.acl_revision_id=acl.acl_revision_id
+                   AND allowed.effect='ALLOW'
+                   AND ((allowed.normalized_subject_type='EVERYONE'
+                         AND allowed.normalized_subject_id='*')
+                     OR (allowed.normalized_subject_type='USER'
+                         AND upper(p_subject_type) IN ('USER','PERSON')
+                         AND allowed.normalized_subject_id=p_subject_id)
+                     OR (allowed.normalized_subject_type='GROUP'
+                         AND allowed.normalized_subject_id=ANY(p_groups))
+                     OR (allowed.normalized_subject_type='ORGANIZATION'
+                         AND allowed.normalized_subject_id=ANY(p_organizations)))
+            )
+        )
+    ),FALSE)
+      FROM knowledge_document_t document
+      JOIN knowledge_source_t source ON source.source_id=document.source_id
+      JOIN LATERAL (
+        SELECT revision.* FROM knowledge_document_acl_t revision
+         WHERE revision.document_id=document.document_id
+         ORDER BY revision.acl_sequence DESC LIMIT 1
+      ) acl ON TRUE
+      LEFT JOIN knowledge_source_acl_state_t source_acl
+        ON source_acl.source_id=source.source_id
+     WHERE document.document_id=p_document_id
+       AND document.lifecycle_state='ACTIVE'
+       AND source.status='ACTIVE'
+$function$;
+
+GRANT SELECT ON TABLE knowledge_acl_transition_t
+TO light_knowledge_ops_read_role;
+GRANT SELECT, INSERT ON TABLE knowledge_acl_transition_t
+TO light_knowledge_worker_role;
+
+COMMIT;
+-- END LIGHT KNOWLEDGE PHASE 2 OPERATIONAL HARDENING
+-- BEGIN LIGHT KNOWLEDGE PHASE 3 PRODUCTION OPERATIONS
+-- Light Knowledge Phase 3 production operations and embedding migration.
+BEGIN;
+
+ALTER TABLE knowledge_job_t
+    DROP CONSTRAINT knowledge_job_type_phase2_ck,
+    ADD CONSTRAINT knowledge_job_type_phase3_ck CHECK(job_type IN (
+        'SYNC', 'DELTA_SYNC', 'FULL_REINDEX', 'PROMOTE', 'PURGE',
+        'RETRIEVAL_TEST', 'CONNECTIVITY_TEST', 'UPLOAD', 'COMPACTION',
+        'ANTI_ENTROPY', 'CONNECTOR_SYNC', 'ACL_RECONCILE',
+        'PROVIDER_NOTIFICATION', 'MIGRATION_PREFLIGHT',
+        'MIGRATION_BACKFILL', 'MIGRATION_CATCHUP', 'MIGRATION_VALIDATE',
+        'MIGRATION_PAUSE', 'MIGRATION_CANCEL',
+        'MIGRATION_PROMOTE', 'MIGRATION_ROLLBACK', 'MIGRATION_RETIRE',
+        'BACKUP_CHECKPOINT', 'RESTORE_VERIFY', 'SEGMENT_PURGE'
+    ));
+
+CREATE VIEW knowledge_embedding_profile_runtime_v
+WITH (security_barrier = true) AS
+SELECT profile.profile_id, profile.profile_revision,
+       profile.expected_space_id, profile.expected_space_revision,
+       profile.dimension, profile.document_input_transform_version,
+       profile.query_input_transform_version, alias.alias_name
+  FROM knowledge_embedding_profile_t profile
+  JOIN knowledge_qualified_embedding_alias_v alias
+    ON alias.alias_owner_host_id=profile.alias_owner_host_id
+   AND alias.public_alias_id=profile.public_alias_id
+   AND alias.embedding_space->>'spaceId'=profile.expected_space_id
+   AND (alias.embedding_space->>'revision')::bigint=
+       profile.expected_space_revision
+   AND (alias.embedding_space->>'dimension')::integer=profile.dimension
+   AND alias.embedding_space->>'documentInputTransformVersion'=
+       profile.document_input_transform_version
+ WHERE profile.active=TRUE;
+
+CREATE TABLE knowledge_embedding_migration_t (
+    migration_id UUID PRIMARY KEY,
+    knowledge_base_id UUID NOT NULL,
+    environment VARCHAR(32) NOT NULL CHECK(length(environment) > 0),
+    source_generation_id UUID NOT NULL,
+    candidate_generation_id UUID NOT NULL UNIQUE,
+    target_profile_id UUID NOT NULL,
+    target_profile_revision BIGINT NOT NULL CHECK(target_profile_revision > 0),
+    target_space_id VARCHAR(255) NOT NULL,
+    target_space_revision BIGINT NOT NULL CHECK(target_space_revision > 0),
+    target_dimension INTEGER NOT NULL CHECK(target_dimension > 0),
+    estimate_version BIGINT NOT NULL CHECK(estimate_version > 0),
+    estimated_chunk_count BIGINT NOT NULL CHECK(estimated_chunk_count >= 0),
+    estimated_token_count BIGINT NOT NULL CHECK(estimated_token_count >= 0),
+    estimated_cost_micros BIGINT NOT NULL CHECK(estimated_cost_micros >= 0),
+    estimated_duration_seconds BIGINT NOT NULL CHECK(estimated_duration_seconds >= 0),
+    estimated_temporary_bytes BIGINT NOT NULL CHECK(estimated_temporary_bytes >= 0),
+    accepted_cost_ceiling_micros BIGINT NOT NULL
+        CHECK(accepted_cost_ceiling_micros >= 0),
+    rollback_window_seconds BIGINT NOT NULL
+        CHECK(rollback_window_seconds BETWEEN 300 AND 2592000),
+    consumed_token_count BIGINT NOT NULL DEFAULT 0 CHECK(consumed_token_count >= 0),
+    consumed_cost_micros BIGINT NOT NULL DEFAULT 0 CHECK(consumed_cost_micros >= 0),
+    reserved_cost_micros BIGINT NOT NULL DEFAULT 0 CHECK(reserved_cost_micros >= 0),
+    completed_chunk_count BIGINT NOT NULL DEFAULT 0 CHECK(completed_chunk_count >= 0),
+    catchup_chunk_count BIGINT NOT NULL DEFAULT 0 CHECK(catchup_chunk_count >= 0),
+    reused_canonical_chunk_count BIGINT NOT NULL DEFAULT 0
+        CHECK(reused_canonical_chunk_count >= 0),
+    start_watermark BIGINT NOT NULL CHECK(start_watermark >= 0),
+    snapshot_watermark BIGINT NOT NULL CHECK(snapshot_watermark >= start_watermark),
+    final_watermark BIGINT CHECK(final_watermark IS NULL
+        OR final_watermark >= snapshot_watermark),
+    predecessor_reconciled_watermark BIGINT NOT NULL DEFAULT 0
+        CHECK(predecessor_reconciled_watermark >= 0),
+    state VARCHAR(24) NOT NULL DEFAULT 'REQUESTED' CHECK(state IN (
+        'REQUESTED', 'PREFLIGHTED', 'BACKFILLING', 'PAUSED',
+        'CATCHING_UP', 'VALIDATING', 'READY', 'PROMOTED', 'SOAKING',
+        'ROLLED_BACK', 'CANCELLED', 'FAILED', 'RETIRED'
+    )),
+    version BIGINT NOT NULL DEFAULT 1 CHECK(version > 0),
+    evaluation_evidence_id UUID,
+    evaluation_evidence_digest CHAR(64) CHECK(evaluation_evidence_digest IS NULL
+        OR evaluation_evidence_digest ~ '^[a-f0-9]{64}$'),
+    promotion_watermark BIGINT,
+    rollback_deadline TIMESTAMPTZ,
+    pause_reason VARCHAR(96),
+    failure_code VARCHAR(96),
+    requested_by VARCHAR(255) NOT NULL,
+    authorized_by VARCHAR(255),
+    created_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    finished_ts TIMESTAMPTZ,
+    FOREIGN KEY(knowledge_base_id)
+        REFERENCES knowledge_base_t(knowledge_base_id) ON DELETE RESTRICT,
+    FOREIGN KEY(source_generation_id)
+        REFERENCES knowledge_index_generation_t(index_generation_id)
+        ON DELETE RESTRICT,
+    FOREIGN KEY(target_profile_id, target_profile_revision)
+        REFERENCES knowledge_embedding_profile_t(profile_id, profile_revision)
+        ON DELETE RESTRICT,
+    UNIQUE(knowledge_base_id, migration_id),
+    CHECK(accepted_cost_ceiling_micros >= estimated_cost_micros),
+    CHECK(completed_chunk_count <= estimated_chunk_count + catchup_chunk_count),
+    CHECK(reused_canonical_chunk_count <= completed_chunk_count),
+    CHECK(consumed_cost_micros + reserved_cost_micros
+        <= accepted_cost_ceiling_micros),
+    CHECK((state IN ('PROMOTED', 'SOAKING', 'ROLLED_BACK', 'RETIRED'))
+        = (promotion_watermark IS NOT NULL)),
+    CHECK((state IN ('PROMOTED', 'SOAKING')) IS FALSE
+        OR rollback_deadline IS NOT NULL)
+);
+CREATE UNIQUE INDEX knowledge_embedding_migration_active_uq
+    ON knowledge_embedding_migration_t(knowledge_base_id)
+    WHERE state IN ('REQUESTED', 'PREFLIGHTED', 'BACKFILLING', 'PAUSED',
+                    'CATCHING_UP', 'VALIDATING', 'READY', 'PROMOTED', 'SOAKING');
+CREATE INDEX knowledge_embedding_migration_work_idx
+    ON knowledge_embedding_migration_t(state, update_ts);
+
+CREATE FUNCTION enforce_knowledge_embedding_migration_contract()
+RETURNS TRIGGER LANGUAGE plpgsql AS $function$
+BEGIN
+    IF TG_OP = 'UPDATE' AND ROW(
+        NEW.migration_id, NEW.knowledge_base_id, NEW.environment,
+        NEW.source_generation_id, NEW.candidate_generation_id,
+        NEW.target_profile_id, NEW.target_profile_revision,
+        NEW.target_space_id, NEW.target_space_revision, NEW.target_dimension,
+        NEW.estimate_version, NEW.estimated_chunk_count,
+        NEW.estimated_token_count, NEW.estimated_cost_micros,
+        NEW.estimated_duration_seconds, NEW.estimated_temporary_bytes,
+        NEW.accepted_cost_ceiling_micros, NEW.rollback_window_seconds,
+        NEW.start_watermark,
+        NEW.snapshot_watermark, NEW.requested_by, NEW.created_ts
+    ) IS DISTINCT FROM ROW(
+        OLD.migration_id, OLD.knowledge_base_id, OLD.environment,
+        OLD.source_generation_id, OLD.candidate_generation_id,
+        OLD.target_profile_id, OLD.target_profile_revision,
+        OLD.target_space_id, OLD.target_space_revision, OLD.target_dimension,
+        OLD.estimate_version, OLD.estimated_chunk_count,
+        OLD.estimated_token_count, OLD.estimated_cost_micros,
+        OLD.estimated_duration_seconds, OLD.estimated_temporary_bytes,
+        OLD.accepted_cost_ceiling_micros, OLD.rollback_window_seconds,
+        OLD.start_watermark,
+        OLD.snapshot_watermark, OLD.requested_by, OLD.created_ts
+    ) THEN
+        RAISE EXCEPTION 'KNOWLEDGE_MIGRATION_IMMUTABLE_CONTRACT';
+    END IF;
+    IF TG_OP = 'UPDATE' AND NEW.version <= OLD.version THEN
+        RAISE EXCEPTION 'KNOWLEDGE_MIGRATION_VERSION_CONFLICT';
+    END IF;
+    IF NEW.consumed_cost_micros + NEW.reserved_cost_micros
+        > NEW.accepted_cost_ceiling_micros THEN
+        RAISE EXCEPTION 'KNOWLEDGE_MIGRATION_COST_CEILING_EXCEEDED';
+    END IF;
+    RETURN NEW;
+END
+$function$;
+CREATE TRIGGER knowledge_embedding_migration_contract_trg
+BEFORE UPDATE ON knowledge_embedding_migration_t
+FOR EACH ROW EXECUTE FUNCTION enforce_knowledge_embedding_migration_contract();
+
+CREATE TABLE knowledge_embedding_migration_chunk_t (
+    migration_id UUID NOT NULL,
+    chunk_id UUID NOT NULL,
+    knowledge_base_id UUID NOT NULL,
+    transformed_input_digest CHAR(64) NOT NULL
+        CHECK(transformed_input_digest ~ '^[a-f0-9]{64}$'),
+    embedding_artifact_id UUID,
+    state VARCHAR(16) NOT NULL DEFAULT 'PENDING'
+        CHECK(state IN (
+            'PENDING', 'CLAIMED', 'EMBEDDED', 'VERIFIED', 'FAILED'
+        )),
+    claim_token UUID,
+    claim_expires_ts TIMESTAMPTZ,
+    token_count INTEGER NOT NULL CHECK(token_count > 0),
+    reserved_cost_micros BIGINT NOT NULL DEFAULT 0
+        CHECK(reserved_cost_micros >= 0),
+    cost_micros BIGINT NOT NULL DEFAULT 0 CHECK(cost_micros >= 0),
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(migration_id, chunk_id),
+    FOREIGN KEY(migration_id, knowledge_base_id)
+        REFERENCES knowledge_embedding_migration_t(migration_id, knowledge_base_id)
+        ON DELETE RESTRICT,
+    FOREIGN KEY(chunk_id, knowledge_base_id)
+        REFERENCES knowledge_chunk_t(chunk_id, knowledge_base_id)
+        ON DELETE RESTRICT,
+    FOREIGN KEY(embedding_artifact_id)
+        REFERENCES knowledge_embedding_artifact_t(embedding_artifact_id)
+        ON DELETE RESTRICT,
+    CHECK((state IN ('EMBEDDED', 'VERIFIED'))
+        = (embedding_artifact_id IS NOT NULL)),
+    CHECK((state = 'CLAIMED') =
+        (claim_token IS NOT NULL AND claim_expires_ts IS NOT NULL))
+);
+CREATE INDEX knowledge_embedding_migration_chunk_work_idx
+    ON knowledge_embedding_migration_chunk_t(
+        migration_id, state, claim_expires_ts, chunk_id
+    );
+
+CREATE TABLE knowledge_migration_evaluation_t (
+    evaluation_evidence_id UUID PRIMARY KEY,
+    migration_id UUID NOT NULL,
+    knowledge_base_id UUID NOT NULL,
+    candidate_generation_id UUID NOT NULL,
+    evaluation_contract_version VARCHAR(64) NOT NULL,
+    corpus_watermark BIGINT NOT NULL CHECK(corpus_watermark >= 0),
+    metrics JSONB NOT NULL CHECK(jsonb_typeof(metrics) = 'object'),
+    evidence_digest CHAR(64) NOT NULL CHECK(evidence_digest ~ '^[a-f0-9]{64}$'),
+    passed BOOLEAN NOT NULL,
+    expires_ts TIMESTAMPTZ NOT NULL,
+    authorized_by VARCHAR(255) NOT NULL,
+    created_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(migration_id, knowledge_base_id)
+        REFERENCES knowledge_embedding_migration_t(migration_id, knowledge_base_id)
+        ON DELETE RESTRICT,
+    FOREIGN KEY(candidate_generation_id)
+        REFERENCES knowledge_index_generation_t(index_generation_id)
+        ON DELETE RESTRICT,
+    UNIQUE(migration_id, evidence_digest),
+    CHECK(expires_ts > created_ts)
+);
+
+CREATE TABLE knowledge_generation_retention_t (
+    index_generation_id UUID PRIMARY KEY,
+    knowledge_base_id UUID NOT NULL,
+    retention_state VARCHAR(20) NOT NULL DEFAULT 'RETAINED' CHECK(retention_state IN (
+        'ACTIVE', 'ROLLBACK_ELIGIBLE', 'RETAINED', 'PURGE_APPROVED', 'PURGED'
+    )),
+    retain_until_ts TIMESTAMPTZ,
+    legal_hold BOOLEAN NOT NULL DEFAULT FALSE,
+    backup_reference_count INTEGER NOT NULL DEFAULT 0
+        CHECK(backup_reference_count >= 0),
+    migration_reference_count INTEGER NOT NULL DEFAULT 0
+        CHECK(migration_reference_count >= 0),
+    last_reference_check_ts TIMESTAMPTZ,
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(index_generation_id)
+        REFERENCES knowledge_index_generation_t(index_generation_id)
+        ON DELETE RESTRICT,
+    FOREIGN KEY(knowledge_base_id)
+        REFERENCES knowledge_base_t(knowledge_base_id) ON DELETE RESTRICT,
+    CHECK(retention_state <> 'PURGE_APPROVED' OR (
+        legal_hold = FALSE AND backup_reference_count = 0
+        AND migration_reference_count = 0
+    ))
+);
+
+CREATE TABLE knowledge_backup_checkpoint_t (
+    checkpoint_id UUID PRIMARY KEY,
+    knowledge_base_id UUID NOT NULL,
+    index_generation_id UUID NOT NULL,
+    environment VARCHAR(32) NOT NULL,
+    pointer_version BIGINT NOT NULL CHECK(pointer_version > 0),
+    object_manifest_digest CHAR(64) NOT NULL
+        CHECK(object_manifest_digest ~ '^[a-f0-9]{64}$'),
+    database_checkpoint_reference VARCHAR(512) NOT NULL,
+    encrypted_object_checkpoint_reference VARCHAR(2048) NOT NULL,
+    state VARCHAR(20) NOT NULL CHECK(state IN (
+        'REQUESTED', 'VERIFIED', 'RESTORED', 'FAILED', 'EXPIRED'
+    )),
+    verification_evidence JSONB NOT NULL DEFAULT '{}'::jsonb
+        CHECK(jsonb_typeof(verification_evidence) = 'object'),
+    retain_until_ts TIMESTAMPTZ NOT NULL,
+    created_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    verified_ts TIMESTAMPTZ,
+    FOREIGN KEY(knowledge_base_id)
+        REFERENCES knowledge_base_t(knowledge_base_id) ON DELETE RESTRICT,
+    FOREIGN KEY(index_generation_id)
+        REFERENCES knowledge_index_generation_t(index_generation_id)
+        ON DELETE RESTRICT,
+    CHECK(retain_until_ts > created_ts)
+);
+
+CREATE TABLE knowledge_purge_evidence_t (
+    purge_evidence_id UUID PRIMARY KEY,
+    knowledge_base_id UUID NOT NULL,
+    index_generation_id UUID,
+    purge_scope VARCHAR(24) NOT NULL CHECK(purge_scope IN (
+        'GENERATION', 'SEGMENT', 'EMBEDDING_ARTIFACT', 'KNOWLEDGE_BASE'
+    )),
+    state VARCHAR(20) NOT NULL CHECK(state IN (
+        'REQUESTED', 'BLOCKED', 'VERIFIED', 'FAILED'
+    )),
+    reference_counts JSONB NOT NULL CHECK(jsonb_typeof(reference_counts) = 'object'),
+    deletion_counts JSONB NOT NULL CHECK(jsonb_typeof(deletion_counts) = 'object'),
+    evidence_digest CHAR(64) NOT NULL CHECK(evidence_digest ~ '^[a-f0-9]{64}$'),
+    authorized_by VARCHAR(255) NOT NULL,
+    created_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    finished_ts TIMESTAMPTZ,
+    FOREIGN KEY(knowledge_base_id)
+        REFERENCES knowledge_base_t(knowledge_base_id) ON DELETE RESTRICT,
+    FOREIGN KEY(index_generation_id)
+        REFERENCES knowledge_index_generation_t(index_generation_id)
+        ON DELETE RESTRICT
+);
+
+CREATE TABLE knowledge_operational_policy_t (
+    knowledge_base_id UUID PRIMARY KEY,
+    maximum_parallel_bulk_jobs INTEGER NOT NULL DEFAULT 1
+        CHECK(maximum_parallel_bulk_jobs BETWEEN 1 AND 32),
+    maximum_migration_cost_micros BIGINT NOT NULL DEFAULT 100000000
+        CHECK(maximum_migration_cost_micros >= 0),
+    migration_cost_per_token_micros NUMERIC(18,6) NOT NULL DEFAULT 0
+        CHECK(migration_cost_per_token_micros >= 0),
+    rollback_window_seconds BIGINT NOT NULL DEFAULT 86400
+        CHECK(rollback_window_seconds BETWEEN 300 AND 2592000),
+    anti_entropy_interval_seconds BIGINT NOT NULL DEFAULT 3600
+        CHECK(anti_entropy_interval_seconds BETWEEN 60 AND 604800),
+    backup_interval_seconds BIGINT NOT NULL DEFAULT 86400
+        CHECK(backup_interval_seconds BETWEEN 300 AND 2592000),
+    version BIGINT NOT NULL DEFAULT 1 CHECK(version > 0),
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(knowledge_base_id)
+        REFERENCES knowledge_base_t(knowledge_base_id) ON DELETE RESTRICT
+);
+
+CREATE OR REPLACE FUNCTION knowledge_resolved_generation_chunk(
+    p_index_generation_id UUID
+) RETURNS TABLE(
+    chunk_id UUID,
+    document_id UUID,
+    document_version_id UUID,
+    acl_revision_id UUID
+) LANGUAGE sql STABLE AS $$
+    WITH generation_segments AS (
+        SELECT member.index_segment_id, member.ordinal
+          FROM knowledge_generation_segment_t member
+          JOIN knowledge_index_segment_t segment
+            ON segment.index_segment_id=member.index_segment_id
+           AND segment.state IN ('READY', 'BUILDING')
+         WHERE member.index_generation_id=p_index_generation_id
+    ), eligible AS (
+        SELECT DISTINCT ON(segment_chunk.chunk_id)
+               segment_chunk.chunk_id,
+               document_version.document_id,
+               chunk.document_version_id,
+               segment_chunk.acl_revision_id,
+               generation_segment.ordinal
+          FROM generation_segments generation_segment
+          JOIN knowledge_segment_chunk_t segment_chunk
+            ON segment_chunk.index_segment_id=generation_segment.index_segment_id
+          JOIN knowledge_chunk_t chunk ON chunk.chunk_id=segment_chunk.chunk_id
+          JOIN knowledge_document_version_t document_version
+            ON document_version.document_version_id=chunk.document_version_id
+         WHERE NOT EXISTS (
+             SELECT 1
+               FROM generation_segments later
+               JOIN knowledge_segment_operation_t operation
+                 ON operation.index_segment_id=later.index_segment_id
+              WHERE later.ordinal>generation_segment.ordinal
+                AND operation.document_id=document_version.document_id
+                AND (operation.operation_kind IN (
+                      'SUPERSEDE_DOCUMENT', 'TOMBSTONE_DOCUMENT')
+                     OR (operation.operation_kind='TOMBSTONE_CHUNK'
+                         AND operation.chunk_id=segment_chunk.chunk_id))
+         )
+         ORDER BY segment_chunk.chunk_id, generation_segment.ordinal DESC
+    )
+    SELECT eligible.chunk_id, eligible.document_id,
+           eligible.document_version_id, eligible.acl_revision_id
+      FROM eligible
+$$;
+
+REVOKE ALL ON TABLE
+    knowledge_embedding_migration_t,
+    knowledge_embedding_migration_chunk_t,
+    knowledge_migration_evaluation_t,
+    knowledge_generation_retention_t,
+    knowledge_backup_checkpoint_t,
+    knowledge_purge_evidence_t,
+    knowledge_operational_policy_t
+FROM PUBLIC;
+
+REVOKE ALL ON TABLE knowledge_embedding_profile_runtime_v FROM PUBLIC;
+REVOKE ALL ON FUNCTION knowledge_resolved_generation_chunk(UUID) FROM PUBLIC;
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
+    knowledge_embedding_migration_t,
+    knowledge_embedding_migration_chunk_t,
+    knowledge_migration_evaluation_t,
+    knowledge_generation_retention_t,
+    knowledge_backup_checkpoint_t,
+    knowledge_purge_evidence_t,
+    knowledge_operational_policy_t
+TO light_knowledge_worker_role;
+
+GRANT SELECT ON TABLE knowledge_embedding_profile_runtime_v
+TO light_knowledge_worker_role;
+GRANT EXECUTE ON FUNCTION knowledge_resolved_generation_chunk(UUID)
+TO light_knowledge_worker_role;
+
+GRANT SELECT ON TABLE
+    knowledge_embedding_migration_t,
+    knowledge_embedding_migration_chunk_t,
+    knowledge_migration_evaluation_t,
+    knowledge_generation_retention_t,
+    knowledge_backup_checkpoint_t,
+    knowledge_purge_evidence_t,
+    knowledge_operational_policy_t
+TO light_knowledge_ops_read_role;
+
+GRANT SELECT ON TABLE knowledge_embedding_profile_runtime_v
+TO light_knowledge_ops_read_role;
+
+COMMIT;
+-- END LIGHT KNOWLEDGE PHASE 3 PRODUCTION OPERATIONS
+-- BEGIN LIGHT KNOWLEDGE PHASE 4 OPTIONAL GRAPH ASSISTED PILOT
+-- Phase 4 optional graph-assisted retrieval. The graph is a derived,
+-- generation-pinned artifact; canonical chunks remain the only evidence.
+
+BEGIN;
+
+ALTER TABLE knowledge_query_audit_t
+    DROP CONSTRAINT knowledge_query_audit_t_strategy_check;
+ALTER TABLE knowledge_query_audit_t
+    ADD CONSTRAINT knowledge_query_audit_t_strategy_check
+    CHECK(strategy IN ('LEXICAL', 'VECTOR', 'HYBRID', 'GRAPH_ASSISTED',
+                       'HYBRID_FALLBACK'));
+ALTER TABLE knowledge_query_audit_t
+    ADD COLUMN graph_generation_id UUID,
+    ADD COLUMN planner_diagnostics JSONB NOT NULL DEFAULT '{}'::jsonb
+        CHECK(jsonb_typeof(planner_diagnostics) = 'object');
+
+ALTER TABLE knowledge_chunk_t
+    ADD CONSTRAINT knowledge_chunk_identity_version_uq
+    UNIQUE(chunk_id, document_version_id, knowledge_base_id);
+
+ALTER TABLE knowledge_index_generation_t
+    ADD CONSTRAINT knowledge_index_generation_identity_kb_uq
+    UNIQUE(index_generation_id, knowledge_base_id);
+
+ALTER TABLE knowledge_retrieval_profile_t
+    ADD CONSTRAINT knowledge_retrieval_profile_graph_failure_policy_ck
+    CHECK(graph_policy IS NULL
+        OR NOT graph_policy ? 'failurePolicy'
+        OR graph_policy->>'failurePolicy' IN ('FALLBACK_HYBRID', 'FAIL_CLOSED'));
+
+CREATE TABLE knowledge_graph_generation_t (
+    graph_generation_id UUID PRIMARY KEY,
+    knowledge_base_id UUID NOT NULL,
+    index_generation_id UUID NOT NULL,
+    state VARCHAR(16) NOT NULL
+        CHECK(state IN ('BUILDING', 'READY', 'FAILED', 'STALE')),
+    visibility_mode VARCHAR(24) NOT NULL DEFAULT 'UNIFORM_SCOPE'
+        CHECK(visibility_mode = 'UNIFORM_SCOPE'),
+    contract_version VARCHAR(64) NOT NULL,
+    contract_digest CHAR(64) NOT NULL CHECK(contract_digest ~ '^[a-f0-9]{64}$'),
+    manifest_digest CHAR(64) CHECK(manifest_digest ~ '^[a-f0-9]{64}$'),
+    entity_count BIGINT NOT NULL DEFAULT 0 CHECK(entity_count >= 0),
+    relation_count BIGINT NOT NULL DEFAULT 0 CHECK(relation_count >= 0),
+    failure_code VARCHAR(96),
+    created_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_ts TIMESTAMPTZ,
+    FOREIGN KEY(knowledge_base_id)
+        REFERENCES knowledge_base_t(knowledge_base_id) ON DELETE RESTRICT,
+    FOREIGN KEY(index_generation_id, knowledge_base_id)
+        REFERENCES knowledge_index_generation_t(
+            index_generation_id, knowledge_base_id) ON DELETE RESTRICT,
+    UNIQUE(index_generation_id, contract_digest),
+    UNIQUE(graph_generation_id, knowledge_base_id)
+);
+
+CREATE TABLE knowledge_graph_entity_t (
+    graph_entity_id UUID PRIMARY KEY,
+    graph_generation_id UUID NOT NULL,
+    knowledge_base_id UUID NOT NULL,
+    entity_type VARCHAR(32) NOT NULL CHECK(entity_type IN (
+        'REPOSITORY', 'DOCUMENT', 'HEADING', 'LINK_TARGET', 'API_OPERATION',
+        'CONFIGURATION_KEY', 'SERVICE', 'COMPONENT', 'DESIGN_REFERENCE')),
+    normalized_key VARCHAR(2048) NOT NULL,
+    display_name VARCHAR(2048) NOT NULL,
+    origin VARCHAR(16) NOT NULL CHECK(origin IN ('STRUCTURAL', 'EXPLICIT', 'EXTRACTED')),
+    contract_version VARCHAR(64) NOT NULL,
+    FOREIGN KEY(graph_generation_id, knowledge_base_id)
+        REFERENCES knowledge_graph_generation_t(graph_generation_id, knowledge_base_id)
+        ON DELETE CASCADE,
+    UNIQUE(graph_generation_id, entity_type, normalized_key),
+    UNIQUE(graph_entity_id, graph_generation_id, knowledge_base_id)
+);
+
+CREATE TABLE knowledge_graph_entity_contribution_t (
+    graph_entity_id UUID NOT NULL,
+    graph_generation_id UUID NOT NULL,
+    knowledge_base_id UUID NOT NULL,
+    chunk_id UUID NOT NULL,
+    document_version_id UUID NOT NULL,
+    PRIMARY KEY(graph_entity_id, chunk_id),
+    FOREIGN KEY(graph_entity_id, graph_generation_id, knowledge_base_id)
+        REFERENCES knowledge_graph_entity_t(
+            graph_entity_id, graph_generation_id, knowledge_base_id)
+        ON DELETE CASCADE,
+    FOREIGN KEY(chunk_id, document_version_id, knowledge_base_id)
+        REFERENCES knowledge_chunk_t(
+            chunk_id, document_version_id, knowledge_base_id)
+        ON DELETE RESTRICT
+);
+
+CREATE TABLE knowledge_graph_relation_t (
+    graph_relation_id UUID PRIMARY KEY,
+    graph_generation_id UUID NOT NULL,
+    knowledge_base_id UUID NOT NULL,
+    subject_entity_id UUID NOT NULL,
+    object_entity_id UUID NOT NULL,
+    relation_type VARCHAR(64) NOT NULL,
+    origin VARCHAR(16) NOT NULL CHECK(origin IN ('STRUCTURAL', 'EXPLICIT', 'EXTRACTED')),
+    contract_version VARCHAR(64) NOT NULL,
+    FOREIGN KEY(graph_generation_id, knowledge_base_id)
+        REFERENCES knowledge_graph_generation_t(graph_generation_id, knowledge_base_id)
+        ON DELETE CASCADE,
+    FOREIGN KEY(subject_entity_id, graph_generation_id, knowledge_base_id)
+        REFERENCES knowledge_graph_entity_t(
+            graph_entity_id, graph_generation_id, knowledge_base_id)
+        ON DELETE CASCADE,
+    FOREIGN KEY(object_entity_id, graph_generation_id, knowledge_base_id)
+        REFERENCES knowledge_graph_entity_t(
+            graph_entity_id, graph_generation_id, knowledge_base_id)
+        ON DELETE CASCADE,
+    UNIQUE(graph_generation_id, subject_entity_id, relation_type, object_entity_id),
+    UNIQUE(graph_relation_id, graph_generation_id, knowledge_base_id)
+);
+
+CREATE TABLE knowledge_graph_relation_contribution_t (
+    graph_relation_id UUID NOT NULL,
+    graph_generation_id UUID NOT NULL,
+    knowledge_base_id UUID NOT NULL,
+    chunk_id UUID NOT NULL,
+    document_version_id UUID NOT NULL,
+    PRIMARY KEY(graph_relation_id, chunk_id),
+    FOREIGN KEY(graph_relation_id, graph_generation_id, knowledge_base_id)
+        REFERENCES knowledge_graph_relation_t(
+            graph_relation_id, graph_generation_id, knowledge_base_id)
+        ON DELETE CASCADE,
+    FOREIGN KEY(chunk_id, document_version_id, knowledge_base_id)
+        REFERENCES knowledge_chunk_t(
+            chunk_id, document_version_id, knowledge_base_id)
+        ON DELETE RESTRICT
+);
+
+CREATE INDEX knowledge_graph_entity_lookup_idx
+    ON knowledge_graph_entity_t(graph_generation_id, normalized_key);
+CREATE INDEX knowledge_graph_relation_subject_idx
+    ON knowledge_graph_relation_t(graph_generation_id, subject_entity_id, relation_type);
+CREATE INDEX knowledge_graph_relation_object_idx
+    ON knowledge_graph_relation_t(graph_generation_id, object_entity_id, relation_type);
+
+ALTER TABLE knowledge_query_audit_t
+    ADD CONSTRAINT knowledge_query_audit_graph_generation_fk
+    FOREIGN KEY(graph_generation_id)
+    REFERENCES knowledge_graph_generation_t(graph_generation_id) ON DELETE RESTRICT;
+
+REVOKE ALL ON TABLE
+    knowledge_graph_generation_t,
+    knowledge_graph_entity_t,
+    knowledge_graph_entity_contribution_t,
+    knowledge_graph_relation_t,
+    knowledge_graph_relation_contribution_t
+FROM PUBLIC;
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
+    knowledge_graph_generation_t,
+    knowledge_graph_entity_t,
+    knowledge_graph_entity_contribution_t,
+    knowledge_graph_relation_t,
+    knowledge_graph_relation_contribution_t
+TO light_knowledge_worker_role;
+
+GRANT SELECT ON TABLE
+    knowledge_graph_generation_t,
+    knowledge_graph_entity_t,
+    knowledge_graph_entity_contribution_t,
+    knowledge_graph_relation_t,
+    knowledge_graph_relation_contribution_t
+TO light_knowledge_api_role, light_knowledge_ops_read_role;
+
+COMMIT;
+-- END LIGHT KNOWLEDGE PHASE 4 OPTIONAL GRAPH ASSISTED PILOT
+-- BEGIN LIGHT KNOWLEDGE METRICS INDEX ONLINE MIGRATION
+-- Additive online correction for databases that applied the released Phase 1a
+-- patch before the Knowledge metrics endpoint began counting graph fallbacks.
+-- CONCURRENTLY avoids blocking retrieval audit inserts on populated databases.
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS
+    knowledge_query_audit_fallback_created_idx
+    ON knowledge_query_audit_t(created_ts DESC)
+    WHERE fallback_reason IS NOT NULL;
+-- END LIGHT KNOWLEDGE METRICS INDEX ONLINE MIGRATION
+-- BEGIN LIGHT KNOWLEDGE SYNC LIFECYCLE
+-- Additive operational lifecycle for source sync requests. This preserves the
+-- released Phase 1a tables while making accepted and queued work observable.
+BEGIN;
+
+ALTER TABLE knowledge_sync_run_t
+    DROP CONSTRAINT knowledge_sync_run_t_state_check,
+    DROP CONSTRAINT knowledge_sync_run_t_check,
+    ALTER COLUMN state SET DEFAULT 'ACCEPTED';
+
+-- Released rows used REQUESTED. Normalize them after removing the old state
+-- constraint and before installing the v2 contract.
+UPDATE knowledge_sync_run_t SET state='ACCEPTED' WHERE state='REQUESTED';
+
+ALTER TABLE knowledge_sync_run_t
+    ADD CONSTRAINT knowledge_sync_run_state_v2_ck CHECK(state IN (
+        'ACCEPTED', 'QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED',
+        'PAUSED_BUDGET', 'FAILED_BUDGET', 'CANCELLED'
+    )),
+    ADD CONSTRAINT knowledge_sync_run_snapshot_watermark_v2_ck CHECK(
+        snapshot_watermark IS NULL OR snapshot_watermark >= 0
+    ),
+    ADD COLUMN job_id UUID,
+    ADD COLUMN request_event_id UUID,
+    ADD COLUMN index_generation_id UUID,
+    ADD COLUMN ingestion_policy_id UUID,
+    ADD COLUMN ingestion_policy_version BIGINT,
+    ADD COLUMN phase VARCHAR(32) NOT NULL DEFAULT 'ACCEPTED',
+    ADD COLUMN progress JSONB NOT NULL DEFAULT '{}'::jsonb
+        CHECK(jsonb_typeof(progress) = 'object'),
+    ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0
+        CHECK(attempt_count >= 0),
+    ADD COLUMN next_attempt_ts TIMESTAMPTZ,
+    ADD COLUMN update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    ADD CONSTRAINT knowledge_sync_run_job_fk FOREIGN KEY(job_id)
+        REFERENCES knowledge_job_t(job_id) ON DELETE RESTRICT,
+    ADD CONSTRAINT knowledge_sync_run_generation_fk
+        FOREIGN KEY(index_generation_id)
+        REFERENCES knowledge_index_generation_t(index_generation_id)
+        ON DELETE RESTRICT,
+    ADD CONSTRAINT knowledge_sync_run_policy_fk
+        FOREIGN KEY(ingestion_policy_id)
+        REFERENCES knowledge_ingestion_policy_t(ingestion_policy_id)
+        ON DELETE RESTRICT;
+
+CREATE UNIQUE INDEX knowledge_sync_run_job_uq
+    ON knowledge_sync_run_t(job_id) WHERE job_id IS NOT NULL;
+CREATE INDEX knowledge_sync_run_base_state_idx
+    ON knowledge_sync_run_t(knowledge_base_id,state,requested_ts DESC);
+
+COMMIT;
+-- END LIGHT KNOWLEDGE SYNC LIFECYCLE
+-- BEGIN WORKFLOW BACKED MCP PHASE 0 CONTRACT
+BEGIN;
+
+CREATE TABLE workflow_tool_binding_t (
+    host_id UUID NOT NULL,
+    binding_id UUID NOT NULL,
+    tool_id UUID NOT NULL,
+    wf_def_id UUID NOT NULL,
+    workflow_version VARCHAR(64) NOT NULL,
+    definition_digest VARCHAR(71) NOT NULL CHECK(definition_digest ~ '^sha256:[0-9a-f]{64}$'),
+    schema_digest VARCHAR(71) NOT NULL CHECK(schema_digest ~ '^sha256:[0-9a-f]{64}$'),
+    invocation_mode VARCHAR(8) NOT NULL CHECK(invocation_mode IN ('sync','async')),
+    sync_wait_ms INTEGER NOT NULL CHECK(sync_wait_ms BETWEEN 1 AND 120000),
+    total_deadline_ms INTEGER NOT NULL CHECK(total_deadline_ms >= sync_wait_ms),
+    execution_class VARCHAR(16) NOT NULL CHECK(execution_class IN ('interactive','standard','batch')),
+    result_text_mode VARCHAR(16) NOT NULL CHECK(result_text_mode IN ('compact-json','summary')),
+    idempotency_policy JSONB NOT NULL CHECK(jsonb_typeof(idempotency_policy)='object'),
+    delegation_policy JSONB NOT NULL CHECK(jsonb_typeof(delegation_policy)='object'),
+    response_policy_digest VARCHAR(71) NOT NULL CHECK(response_policy_digest ~ '^sha256:[0-9a-f]{64}$'),
+    runtime_bounds JSONB NOT NULL CHECK(jsonb_typeof(runtime_bounds)='object'),
+    aggregate_version BIGINT NOT NULL DEFAULT 1 CHECK(aggregate_version > 0),
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(host_id,binding_id),
+    UNIQUE(host_id,tool_id,workflow_version),
+    FOREIGN KEY(host_id,tool_id) REFERENCES tool_t(host_id,tool_id) ON DELETE RESTRICT,
+    FOREIGN KEY(host_id,wf_def_id) REFERENCES wf_definition_t(host_id,wf_def_id) ON DELETE RESTRICT,
+    FOREIGN KEY(host_id,wf_def_id,workflow_version) REFERENCES wf_definition_version_t(host_id,wf_def_id,version) ON DELETE RESTRICT,
+    CHECK(invocation_mode <> 'sync' OR execution_class='interactive')
+);
+CREATE UNIQUE INDEX workflow_tool_binding_active_tool_uq
+    ON workflow_tool_binding_t(host_id,tool_id) WHERE active;
+
+CREATE TABLE workflow_tool_dependency_t (
+    host_id UUID NOT NULL,
+    outer_binding_id UUID NOT NULL,
+    nested_tool_id UUID NOT NULL,
+    nested_tool_version VARCHAR(64) NOT NULL,
+    contract_digest VARCHAR(71) NOT NULL CHECK(contract_digest ~ '^sha256:[0-9a-f]{64}$'),
+    compatibility_policy VARCHAR(32) NOT NULL CHECK(compatibility_policy IN ('exact','follow-compatible')),
+    authorization_tool_name VARCHAR(126) NOT NULL,
+    authorization_endpoint_key VARCHAR(255) NOT NULL,
+    authorization_policy_digest VARCHAR(71) NOT NULL CHECK(authorization_policy_digest ~ '^sha256:[0-9a-f]{64}$'),
+    lifecycle_status VARCHAR(16) NOT NULL CHECK(lifecycle_status IN ('active','superseded','retirement-candidate','revoked')),
+    dispatch_target JSONB NOT NULL CHECK(jsonb_typeof(dispatch_target)='object'),
+    retention_until TIMESTAMPTZ,
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(host_id,outer_binding_id,nested_tool_id,nested_tool_version),
+    FOREIGN KEY(host_id,outer_binding_id) REFERENCES workflow_tool_binding_t(host_id,binding_id) ON DELETE RESTRICT,
+    FOREIGN KEY(host_id,nested_tool_id) REFERENCES tool_t(host_id,tool_id) ON DELETE RESTRICT
+);
+CREATE INDEX workflow_tool_dependency_reverse_idx
+    ON workflow_tool_dependency_t(host_id,nested_tool_id,active,outer_binding_id);
+
+CREATE TABLE workflow_endpoint_target_t (
+    host_id UUID NOT NULL,
+    binding_id UUID NOT NULL,
+    endpoint_ref VARCHAR(255) NOT NULL,
+    endpoint_uri TEXT NOT NULL CHECK(endpoint_uri ~ '^https?://'),
+    allowed_methods TEXT[] NOT NULL CHECK(cardinality(allowed_methods) > 0),
+    authorization_policy_digest VARCHAR(71) NOT NULL
+        CHECK(authorization_policy_digest ~ '^sha256:[0-9a-f]{64}$'),
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(host_id,endpoint_ref),
+    FOREIGN KEY(host_id) REFERENCES host_t(host_id) ON DELETE CASCADE,
+    FOREIGN KEY(host_id,binding_id) REFERENCES workflow_tool_binding_t(host_id,binding_id) ON DELETE CASCADE,
+    CHECK(allowed_methods <@ ARRAY['GET','HEAD','POST','PUT','PATCH','DELETE']::TEXT[])
+);
+
+CREATE TABLE workflow_invocation_t (
+    host_id UUID NOT NULL,
+    workflow_instance_id UUID NOT NULL,
+    binding_id UUID NOT NULL,
+    process_id UUID,
+    stable_tool_ref UUID NOT NULL,
+    wf_def_id UUID NOT NULL,
+    workflow_version VARCHAR(64) NOT NULL,
+    definition_digest VARCHAR(71) NOT NULL CHECK(definition_digest ~ '^sha256:[0-9a-f]{64}$'),
+    schema_digest VARCHAR(71) NOT NULL CHECK(schema_digest ~ '^sha256:[0-9a-f]{64}$'),
+    policy_digest VARCHAR(71) NOT NULL CHECK(policy_digest ~ '^sha256:[0-9a-f]{64}$'),
+    response_policy_digest VARCHAR(71) NOT NULL CHECK(response_policy_digest ~ '^sha256:[0-9a-f]{64}$'),
+    principal_subject VARCHAR(255) NOT NULL,
+    end_user_subject VARCHAR(255) NOT NULL,
+    input JSONB NOT NULL CHECK(jsonb_typeof(input)='object'),
+    input_digest VARCHAR(71) NOT NULL CHECK(input_digest ~ '^sha256:[0-9a-f]{64}$'),
+    canonical_input_profile VARCHAR(32) NOT NULL CHECK(canonical_input_profile='rfc8785-safe-json-v1'),
+    invocation_mode VARCHAR(8) NOT NULL CHECK(invocation_mode IN ('sync','async')),
+    execution_class VARCHAR(16) NOT NULL CHECK(execution_class IN ('interactive','standard','batch')),
+    permit_depth INTEGER NOT NULL DEFAULT 0 CHECK(permit_depth BETWEEN 0 AND 16),
+    state VARCHAR(16) NOT NULL CHECK(state IN ('ACCEPTED','RUNNING','WAITING','COMPLETED','FAILED','CANCELLED')),
+    effect_state VARCHAR(16) NOT NULL DEFAULT 'none' CHECK(effect_state IN ('none','possible','confirmed')),
+    public_result JSONB,
+    normalized_error JSONB,
+    correlation_id VARCHAR(255) NOT NULL,
+    deadline_ts TIMESTAMPTZ NOT NULL,
+    accepted_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    terminal_ts TIMESTAMPTZ,
+    state_version BIGINT NOT NULL DEFAULT 1 CHECK(state_version > 0),
+    PRIMARY KEY(host_id,workflow_instance_id),
+    UNIQUE(host_id,process_id),
+    FOREIGN KEY(host_id,binding_id) REFERENCES workflow_tool_binding_t(host_id,binding_id) ON DELETE RESTRICT,
+    FOREIGN KEY(host_id,wf_def_id) REFERENCES wf_definition_t(host_id,wf_def_id) ON DELETE RESTRICT,
+    FOREIGN KEY(host_id,process_id) REFERENCES process_info_t(host_id,process_id) ON DELETE RESTRICT,
+    CHECK(invocation_mode <> 'sync' OR execution_class='interactive'),
+    CHECK((state IN ('COMPLETED','FAILED','CANCELLED'))=(terminal_ts IS NOT NULL)),
+    CHECK(public_result IS NULL OR jsonb_typeof(public_result)='object'),
+    CHECK(normalized_error IS NULL OR jsonb_typeof(normalized_error)='object')
+);
+CREATE INDEX workflow_invocation_subject_idx
+    ON workflow_invocation_t(host_id,principal_subject,end_user_subject,accepted_ts DESC);
+CREATE INDEX workflow_invocation_state_idx
+    ON workflow_invocation_t(host_id,execution_class,state,deadline_ts);
+
+CREATE TABLE workflow_invocation_idempotency_t (
+    host_id UUID NOT NULL,
+    reservation_id UUID NOT NULL,
+    scope_digest VARCHAR(71) NOT NULL CHECK(scope_digest ~ '^sha256:[0-9a-f]{64}$'),
+    idempotency_kind VARCHAR(16) NOT NULL CHECK(idempotency_kind IN ('DERIVED','EXPLICIT','BUSINESS')),
+    stable_tool_ref UUID NOT NULL,
+    principal_subject VARCHAR(255) NOT NULL,
+    end_user_subject VARCHAR(255) NOT NULL,
+    workflow_instance_id UUID NOT NULL,
+    definition_digest VARCHAR(71) NOT NULL CHECK(definition_digest ~ '^sha256:[0-9a-f]{64}$'),
+    input_digest VARCHAR(71) NOT NULL CHECK(input_digest ~ '^sha256:[0-9a-f]{64}$'),
+    generation BIGINT NOT NULL DEFAULT 1 CHECK(generation > 0),
+    in_flight_until TIMESTAMPTZ NOT NULL,
+    result_replay_until TIMESTAMPTZ NOT NULL,
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(host_id,reservation_id),
+    CHECK(result_replay_until >= in_flight_until)
+);
+CREATE UNIQUE INDEX workflow_invocation_idempotency_current_uq
+    ON workflow_invocation_idempotency_t(host_id,scope_digest) WHERE active;
+
+CREATE TABLE workflow_invocation_budget_t (
+    host_id UUID NOT NULL,
+    ledger_id UUID NOT NULL,
+    workflow_instance_id UUID NOT NULL,
+    generation BIGINT NOT NULL DEFAULT 1 CHECK(generation > 0),
+    task_attempt_limit BIGINT NOT NULL CHECK(task_attempt_limit > 0),
+    nested_call_limit BIGINT NOT NULL CHECK(nested_call_limit >= 0),
+    byte_limit BIGINT NOT NULL CHECK(byte_limit > 0),
+    cost_unit_limit BIGINT NOT NULL CHECK(cost_unit_limit >= 0),
+    task_attempt_used BIGINT NOT NULL DEFAULT 0 CHECK(task_attempt_used >= 0),
+    nested_call_used BIGINT NOT NULL DEFAULT 0 CHECK(nested_call_used >= 0),
+    byte_used BIGINT NOT NULL DEFAULT 0 CHECK(byte_used >= 0),
+    cost_unit_used BIGINT NOT NULL DEFAULT 0 CHECK(cost_unit_used >= 0),
+    task_attempt_reserved BIGINT NOT NULL DEFAULT 0 CHECK(task_attempt_reserved >= 0),
+    nested_call_reserved BIGINT NOT NULL DEFAULT 0 CHECK(nested_call_reserved >= 0),
+    byte_reserved BIGINT NOT NULL DEFAULT 0 CHECK(byte_reserved >= 0),
+    cost_unit_reserved BIGINT NOT NULL DEFAULT 0 CHECK(cost_unit_reserved >= 0),
+    deadline_ts TIMESTAMPTZ NOT NULL,
+    updated_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(host_id,ledger_id),
+    UNIQUE(host_id,workflow_instance_id),
+    FOREIGN KEY(host_id,workflow_instance_id) REFERENCES workflow_invocation_t(host_id,workflow_instance_id) ON DELETE RESTRICT,
+    CHECK(task_attempt_used+task_attempt_reserved <= task_attempt_limit),
+    CHECK(nested_call_used+nested_call_reserved <= nested_call_limit),
+    CHECK(byte_used+byte_reserved <= byte_limit),
+    CHECK(cost_unit_used+cost_unit_reserved <= cost_unit_limit)
+);
+
+CREATE TABLE workflow_invocation_budget_reservation_t (
+    host_id UUID NOT NULL,
+    reservation_id UUID NOT NULL,
+    ledger_id UUID NOT NULL,
+    generation BIGINT NOT NULL CHECK(generation > 0),
+    fencing_token BIGINT NOT NULL CHECK(fencing_token > 0),
+    task_attempts BIGINT NOT NULL CHECK(task_attempts >= 0),
+    nested_calls BIGINT NOT NULL CHECK(nested_calls >= 0),
+    reserved_bytes BIGINT NOT NULL CHECK(reserved_bytes >= 0),
+    reserved_cost_units BIGINT NOT NULL CHECK(reserved_cost_units >= 0),
+    actual_bytes BIGINT,
+    actual_cost_units BIGINT,
+    state VARCHAR(16) NOT NULL CHECK(state IN ('RESERVED','RECONCILED','RELEASED')),
+    created_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    reconciled_ts TIMESTAMPTZ,
+    PRIMARY KEY(host_id,reservation_id),
+    FOREIGN KEY(host_id,ledger_id) REFERENCES workflow_invocation_budget_t(host_id,ledger_id) ON DELETE RESTRICT,
+    CHECK(actual_bytes IS NULL OR actual_bytes BETWEEN 0 AND reserved_bytes),
+    CHECK(actual_cost_units IS NULL OR actual_cost_units BETWEEN 0 AND reserved_cost_units)
+);
+
+CREATE TABLE workflow_invocation_event_quarantine_t (
+    host_id UUID NOT NULL,
+    quarantine_id UUID NOT NULL,
+    consumer_group VARCHAR(255) NOT NULL,
+    partition_id INTEGER NOT NULL,
+    source_offset BIGINT NOT NULL,
+    aggregate_id VARCHAR(255) NOT NULL,
+    aggregate_version BIGINT NOT NULL,
+    transaction_id UUID,
+    payload_digest VARCHAR(71) NOT NULL CHECK(payload_digest ~ '^sha256:[0-9a-f]{64}$'),
+    encrypted_payload BYTEA,
+    immutable_payload_reference TEXT,
+    failure_code VARCHAR(126) NOT NULL,
+    failure_detail TEXT NOT NULL,
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+    repaired_by VARCHAR(255),
+    repair_reason TEXT,
+    replay_state VARCHAR(16) NOT NULL DEFAULT 'BLOCKED' CHECK(replay_state IN ('BLOCKED','REPAIRED','REPLAYED','DISCARDED')),
+    created_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    resolved_ts TIMESTAMPTZ,
+    PRIMARY KEY(host_id,quarantine_id),
+    UNIQUE(consumer_group,partition_id,source_offset),
+    CHECK((encrypted_payload IS NOT NULL) <> (immutable_payload_reference IS NOT NULL))
+);
+CREATE INDEX workflow_invocation_quarantine_aggregate_idx
+    ON workflow_invocation_event_quarantine_t(host_id,aggregate_id,aggregate_version);
+
+CREATE TABLE workflow_invocation_audit_outbox_t (
+    host_id UUID NOT NULL,
+    event_id UUID NOT NULL,
+    workflow_instance_id UUID NOT NULL,
+    event_type VARCHAR(126) NOT NULL,
+    payload JSONB NOT NULL CHECK(jsonb_typeof(payload)='object'),
+    correlation_id VARCHAR(255) NOT NULL,
+    event_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    published_ts TIMESTAMPTZ,
+    PRIMARY KEY(host_id,event_id),
+    UNIQUE(host_id,workflow_instance_id,event_type),
+    FOREIGN KEY(host_id,workflow_instance_id) REFERENCES workflow_invocation_t(host_id,workflow_instance_id) ON DELETE RESTRICT
+);
+CREATE INDEX workflow_invocation_audit_pending_idx
+    ON workflow_invocation_audit_outbox_t(event_ts,event_id) WHERE published_ts IS NULL;
+
+CREATE OR REPLACE FUNCTION workflow_claim_idempotency_v1(
+    p_host_id UUID, p_reservation_id UUID, p_scope_digest VARCHAR,
+    p_idempotency_kind VARCHAR, p_stable_tool_ref UUID,
+    p_principal_subject VARCHAR, p_end_user_subject VARCHAR,
+    p_workflow_instance_id UUID, p_definition_digest VARCHAR,
+    p_input_digest VARCHAR, p_in_flight_until TIMESTAMPTZ,
+    p_result_replay_until TIMESTAMPTZ
+) RETURNS TABLE(outcome VARCHAR, accepted_workflow_instance_id UUID, accepted_generation BIGINT)
+LANGUAGE plpgsql AS $body$
+DECLARE current_row workflow_invocation_idempotency_t%ROWTYPE;
+BEGIN
+    INSERT INTO workflow_invocation_idempotency_t(
+        host_id,reservation_id,scope_digest,idempotency_kind,stable_tool_ref,
+        principal_subject,end_user_subject,workflow_instance_id,
+        definition_digest,input_digest,in_flight_until,result_replay_until
+    ) VALUES(
+        p_host_id,p_reservation_id,p_scope_digest,p_idempotency_kind,
+        p_stable_tool_ref,p_principal_subject,p_end_user_subject,
+        p_workflow_instance_id,p_definition_digest,p_input_digest,
+        p_in_flight_until,p_result_replay_until
+    ) ON CONFLICT(host_id,scope_digest) WHERE active DO NOTHING;
+    IF FOUND THEN
+        RETURN QUERY SELECT 'ACCEPTED'::VARCHAR,p_workflow_instance_id,1::BIGINT;
+        RETURN;
+    END IF;
+    SELECT * INTO current_row FROM workflow_invocation_idempotency_t
+     WHERE host_id=p_host_id AND scope_digest=p_scope_digest AND active FOR UPDATE;
+    IF current_row.stable_tool_ref=p_stable_tool_ref
+       AND current_row.principal_subject=p_principal_subject
+       AND current_row.end_user_subject=p_end_user_subject
+       AND current_row.definition_digest=p_definition_digest
+       AND current_row.input_digest=p_input_digest THEN
+        IF current_row.result_replay_until>CURRENT_TIMESTAMP THEN
+            RETURN QUERY SELECT 'REPLAY'::VARCHAR,current_row.workflow_instance_id,current_row.generation;
+            RETURN;
+        END IF;
+        UPDATE workflow_invocation_idempotency_t SET
+            active=FALSE,updated_ts=CURRENT_TIMESTAMP
+         WHERE host_id=p_host_id AND reservation_id=current_row.reservation_id;
+        INSERT INTO workflow_invocation_idempotency_t(
+            host_id,reservation_id,scope_digest,idempotency_kind,stable_tool_ref,
+            principal_subject,end_user_subject,workflow_instance_id,
+            definition_digest,input_digest,generation,in_flight_until,result_replay_until
+        ) VALUES(
+            p_host_id,p_reservation_id,p_scope_digest,p_idempotency_kind,
+            p_stable_tool_ref,p_principal_subject,p_end_user_subject,
+            p_workflow_instance_id,p_definition_digest,p_input_digest,
+            current_row.generation+1,p_in_flight_until,p_result_replay_until
+        );
+        RETURN QUERY SELECT 'ACCEPTED'::VARCHAR,p_workflow_instance_id,current_row.generation+1;
+    ELSE
+        RETURN QUERY SELECT 'CONFLICT'::VARCHAR,current_row.workflow_instance_id,current_row.generation;
+    END IF;
+END
+$body$;
+
+CREATE OR REPLACE FUNCTION workflow_reserve_budget_v1(
+    p_host_id UUID, p_ledger_id UUID, p_reservation_id UUID,
+    p_generation BIGINT, p_fencing_token BIGINT,
+    p_task_attempts BIGINT, p_nested_calls BIGINT,
+    p_bytes BIGINT, p_cost_units BIGINT
+) RETURNS BOOLEAN LANGUAGE plpgsql AS $body$
+DECLARE existing workflow_invocation_budget_reservation_t%ROWTYPE;
+BEGIN
+    IF p_task_attempts < 0 OR p_nested_calls < 0 OR p_bytes < 0 OR p_cost_units < 0
+       OR p_fencing_token <= 0 THEN
+        RAISE EXCEPTION 'WORKFLOW_BUDGET_INVALID_RESERVATION';
+    END IF;
+    SELECT * INTO existing FROM workflow_invocation_budget_reservation_t
+     WHERE host_id=p_host_id AND reservation_id=p_reservation_id FOR UPDATE;
+    IF FOUND THEN
+        IF existing.ledger_id=p_ledger_id AND existing.generation=p_generation
+           AND existing.fencing_token=p_fencing_token
+           AND existing.task_attempts=p_task_attempts
+           AND existing.nested_calls=p_nested_calls
+           AND existing.reserved_bytes=p_bytes
+           AND existing.reserved_cost_units=p_cost_units THEN
+            RETURN existing.state IN ('RESERVED','RECONCILED');
+        END IF;
+        RAISE EXCEPTION 'WORKFLOW_BUDGET_RESERVATION_CONFLICT';
+    END IF;
+    UPDATE workflow_invocation_budget_t SET
+        task_attempt_reserved=task_attempt_reserved+p_task_attempts,
+        nested_call_reserved=nested_call_reserved+p_nested_calls,
+        byte_reserved=byte_reserved+p_bytes,
+        cost_unit_reserved=cost_unit_reserved+p_cost_units,
+        updated_ts=CURRENT_TIMESTAMP
+     WHERE host_id=p_host_id AND ledger_id=p_ledger_id
+       AND generation=p_generation AND deadline_ts>CURRENT_TIMESTAMP
+       AND task_attempt_used+task_attempt_reserved+p_task_attempts<=task_attempt_limit
+       AND nested_call_used+nested_call_reserved+p_nested_calls<=nested_call_limit
+       AND byte_used+byte_reserved+p_bytes<=byte_limit
+       AND cost_unit_used+cost_unit_reserved+p_cost_units<=cost_unit_limit;
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+    INSERT INTO workflow_invocation_budget_reservation_t(
+        host_id,reservation_id,ledger_id,generation,fencing_token,
+        task_attempts,nested_calls,reserved_bytes,reserved_cost_units,state
+    ) VALUES(p_host_id,p_reservation_id,p_ledger_id,p_generation,p_fencing_token,
+             p_task_attempts,p_nested_calls,p_bytes,p_cost_units,'RESERVED');
+    RETURN TRUE;
+END
+$body$;
+
+CREATE OR REPLACE FUNCTION workflow_reconcile_budget_v1(
+    p_host_id UUID, p_reservation_id UUID, p_fencing_token BIGINT,
+    p_actual_bytes BIGINT, p_actual_cost_units BIGINT
+) RETURNS BOOLEAN LANGUAGE plpgsql AS $body$
+DECLARE reservation workflow_invocation_budget_reservation_t%ROWTYPE;
+BEGIN
+    SELECT * INTO reservation FROM workflow_invocation_budget_reservation_t
+     WHERE host_id=p_host_id AND reservation_id=p_reservation_id FOR UPDATE;
+    IF NOT FOUND OR reservation.fencing_token<>p_fencing_token THEN RETURN FALSE; END IF;
+    IF reservation.state='RECONCILED' THEN
+        RETURN reservation.actual_bytes=p_actual_bytes
+           AND reservation.actual_cost_units=p_actual_cost_units;
+    END IF;
+    IF reservation.state<>'RESERVED' OR p_actual_bytes<0 OR p_actual_cost_units<0
+       OR p_actual_bytes>reservation.reserved_bytes
+       OR p_actual_cost_units>reservation.reserved_cost_units THEN RETURN FALSE; END IF;
+    UPDATE workflow_invocation_budget_t SET
+        task_attempt_reserved=task_attempt_reserved-reservation.task_attempts,
+        nested_call_reserved=nested_call_reserved-reservation.nested_calls,
+        byte_reserved=byte_reserved-reservation.reserved_bytes,
+        cost_unit_reserved=cost_unit_reserved-reservation.reserved_cost_units,
+        task_attempt_used=task_attempt_used+reservation.task_attempts,
+        nested_call_used=nested_call_used+reservation.nested_calls,
+        byte_used=byte_used+p_actual_bytes,
+        cost_unit_used=cost_unit_used+p_actual_cost_units,
+        updated_ts=CURRENT_TIMESTAMP
+     WHERE host_id=p_host_id AND ledger_id=reservation.ledger_id
+       AND generation=reservation.generation;
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+    UPDATE workflow_invocation_budget_reservation_t SET
+        state='RECONCILED',actual_bytes=p_actual_bytes,
+        actual_cost_units=p_actual_cost_units,reconciled_ts=CURRENT_TIMESTAMP
+     WHERE host_id=p_host_id AND reservation_id=p_reservation_id;
+    RETURN TRUE;
+END
+$body$;
+
+REVOKE ALL ON FUNCTION workflow_reserve_budget_v1(UUID,UUID,UUID,BIGINT,BIGINT,BIGINT,BIGINT,BIGINT,BIGINT) FROM PUBLIC;
+REVOKE ALL ON FUNCTION workflow_reconcile_budget_v1(UUID,UUID,BIGINT,BIGINT,BIGINT) FROM PUBLIC;
+REVOKE ALL ON FUNCTION workflow_claim_idempotency_v1(UUID,UUID,VARCHAR,VARCHAR,UUID,VARCHAR,VARCHAR,UUID,VARCHAR,VARCHAR,TIMESTAMPTZ,TIMESTAMPTZ) FROM PUBLIC;
+
+COMMIT;
+-- END WORKFLOW BACKED MCP PHASE 0 CONTRACT
+-- BEGIN WORKFLOW BACKED MCP PHASE 1 RUNTIME
+BEGIN;
+
+ALTER TABLE workflow_tool_binding_t
+    ADD COLUMN policy_digest VARCHAR(71)
+        CHECK(policy_digest ~ '^sha256:[0-9a-f]{64}$');
+UPDATE workflow_tool_binding_t
+   SET policy_digest=response_policy_digest
+ WHERE policy_digest IS NULL;
+ALTER TABLE workflow_tool_binding_t ALTER COLUMN policy_digest SET NOT NULL;
+
+ALTER TABLE workflow_invocation_t
+    ADD COLUMN subject_claims JSONB NOT NULL DEFAULT '{}'::JSONB
+        CHECK(jsonb_typeof(subject_claims)='object');
+
+ALTER TABLE workflow_invocation_budget_t
+    ADD COLUMN request_byte_limit BIGINT NOT NULL DEFAULT 1048576
+        CHECK(request_byte_limit>0),
+    ADD COLUMN result_byte_limit BIGINT NOT NULL DEFAULT 1048576
+        CHECK(result_byte_limit>0);
+
+ALTER TABLE task_info_t
+    ADD COLUMN execution_class VARCHAR(16) NOT NULL DEFAULT 'standard',
+    ADD COLUMN lease_owner UUID,
+    ADD COLUMN lease_fencing_token BIGINT NOT NULL DEFAULT 0,
+    ADD COLUMN lease_expires_ts TIMESTAMPTZ;
+ALTER TABLE task_info_t ADD CONSTRAINT task_info_execution_class_v1_ck
+    CHECK(execution_class IN ('interactive','standard','batch'));
+ALTER TABLE task_info_t ADD CONSTRAINT task_info_host_lease_v1_ck CHECK(
+    lease_fencing_token>=0 AND
+    ((locked='N' AND lease_owner IS NULL AND lease_expires_ts IS NULL)
+     OR (locked='Y' AND ((lease_owner IS NULL AND lease_expires_ts IS NULL)
+                         OR (lease_owner IS NOT NULL AND lease_expires_ts IS NOT NULL))))
+) NOT VALID;
+CREATE INDEX task_info_host_fair_claim_v1_idx
+    ON task_info_t(execution_class,priority DESC,started_ts,host_id,task_id)
+    WHERE active AND execution_placement='host' AND status_code IN ('A','C');
+
+CREATE TABLE workflow_executor_tenant_turn_t (
+    host_id UUID PRIMARY KEY REFERENCES host_t(host_id) ON DELETE CASCADE,
+    last_claim_ts TIMESTAMPTZ NOT NULL DEFAULT '-infinity',
+    claim_count BIGINT NOT NULL DEFAULT 0 CHECK(claim_count>=0),
+    updated_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE OR REPLACE FUNCTION notify_workflow_task_ready_v1()
+RETURNS TRIGGER LANGUAGE plpgsql AS $body$
+BEGIN
+    IF NEW.active AND NEW.execution_placement='host'
+       AND (NEW.status_code='A' OR
+            (NEW.status_code='C' AND NEW.task_type='ask' AND NEW.completed_ts IS NOT NULL
+             AND (NEW.task_output IS NULL OR NEW.task_output->>'status'='waiting_for_input'))) THEN
+        PERFORM pg_notify('workflow_task_ready_v1',
+            json_build_object('hostId',NEW.host_id,'taskId',NEW.task_id,
+                              'executionClass',NEW.execution_class)::text);
+    END IF;
+    RETURN NEW;
+END
+$body$;
+CREATE TRIGGER workflow_task_ready_v1_trg
+AFTER INSERT OR UPDATE OF status_code,completed_ts,task_output ON task_info_t
+FOR EACH ROW EXECUTE FUNCTION notify_workflow_task_ready_v1();
+
+CREATE OR REPLACE FUNCTION notify_workflow_invocation_state_v1()
+RETURNS TRIGGER LANGUAGE plpgsql AS $body$
+BEGIN
+    IF NEW.state_version IS DISTINCT FROM OLD.state_version THEN
+        PERFORM pg_notify('workflow_invocation_state_v1',
+            json_build_object('hostId',NEW.host_id,
+                              'workflowInstanceId',NEW.workflow_instance_id,
+                              'stateVersion',NEW.state_version)::text);
+    END IF;
+    RETURN NEW;
+END
+$body$;
+CREATE TRIGGER workflow_invocation_state_v1_trg
+AFTER UPDATE OF state_version ON workflow_invocation_t
+FOR EACH ROW EXECUTE FUNCTION notify_workflow_invocation_state_v1();
+
+CREATE OR REPLACE FUNCTION guard_quarantined_workflow_outbox_v1()
+RETURNS TRIGGER LANGUAGE plpgsql AS $body$
+BEGIN
+    IF EXISTS(
+        SELECT 1 FROM workflow_invocation_event_quarantine_t quarantine
+         WHERE quarantine.source_offset=OLD.c_offset
+           AND quarantine.replay_state='BLOCKED'
+    ) THEN
+        RAISE EXCEPTION 'WORKFLOW_QUARANTINE_OUTBOX_RETENTION_REQUIRED';
+    END IF;
+    RETURN OLD;
+END
+$body$;
+CREATE TRIGGER workflow_quarantined_outbox_retention_v1_trg
+BEFORE DELETE ON outbox_message_t
+FOR EACH ROW EXECUTE FUNCTION guard_quarantined_workflow_outbox_v1();
+
+CREATE OR REPLACE FUNCTION workflow_claim_host_task_v1(
+    p_worker_id UUID,
+    p_lease_ms INTEGER
+) RETURNS TABLE(
+    host_id UUID,task_id UUID,task_type VARCHAR,process_id UUID,
+    wf_instance_id VARCHAR,wf_task_id VARCHAR,status_code CHAR,result_code VARCHAR,
+    lease_owner UUID,lease_fencing_token BIGINT,lease_expires_ts TIMESTAMPTZ
+) LANGUAGE plpgsql AS $body$
+DECLARE claimed_host UUID;
+BEGIN
+    IF p_lease_ms<100 OR p_lease_ms>30000 THEN
+        RAISE EXCEPTION 'WORKFLOW_HOST_LEASE_MS_OUT_OF_RANGE';
+    END IF;
+    SELECT candidates.host_id INTO claimed_host
+      FROM (
+        SELECT t.host_id,
+               MIN(CASE t.execution_class WHEN 'interactive' THEN 0 WHEN 'standard' THEN 1 ELSE 2 END) AS class_rank,
+               MAX(t.priority) AS maximum_priority,
+               MIN(t.started_ts) AS oldest_task
+          FROM task_info_t t
+         WHERE t.active AND t.execution_placement='host'
+           AND ((t.status_code='A' AND t.task_type IN ('ask','assert','call','set','switch'))
+             OR (t.status_code='C' AND t.task_type='ask' AND t.completed_ts IS NOT NULL
+                 AND (t.task_output IS NULL OR t.task_output->>'status'='waiting_for_input')))
+           AND (t.locked='N' OR (t.locked='Y' AND t.lease_expires_ts<=CURRENT_TIMESTAMP))
+           AND (t.deadline_ts IS NULL OR t.deadline_ts>CURRENT_TIMESTAMP)
+         GROUP BY t.host_id
+      ) candidates
+      LEFT JOIN workflow_executor_tenant_turn_t turn ON turn.host_id=candidates.host_id
+     ORDER BY candidates.class_rank,
+              COALESCE(turn.last_claim_ts,'-infinity'::timestamptz),
+              candidates.maximum_priority DESC,candidates.oldest_task,candidates.host_id
+     LIMIT 1;
+    IF claimed_host IS NULL THEN RETURN; END IF;
+    IF NOT pg_try_advisory_xact_lock(hashtext(claimed_host::text)) THEN RETURN; END IF;
+
+    INSERT INTO workflow_executor_tenant_turn_t(host_id,last_claim_ts,claim_count)
+    VALUES(claimed_host,CURRENT_TIMESTAMP,1)
+    ON CONFLICT ON CONSTRAINT workflow_executor_tenant_turn_t_pkey DO UPDATE SET
+        last_claim_ts=EXCLUDED.last_claim_ts,
+        claim_count=workflow_executor_tenant_turn_t.claim_count+1,
+        updated_ts=CURRENT_TIMESTAMP;
+
+    RETURN QUERY
+    WITH candidate AS (
+        SELECT t.host_id,t.task_id
+          FROM task_info_t t
+         WHERE t.host_id=claimed_host AND t.active AND t.execution_placement='host'
+           AND ((t.status_code='A' AND t.task_type IN ('ask','assert','call','set','switch'))
+             OR (t.status_code='C' AND t.task_type='ask' AND t.completed_ts IS NOT NULL
+                 AND (t.task_output IS NULL OR t.task_output->>'status'='waiting_for_input')))
+           AND (t.locked='N' OR (t.locked='Y' AND t.lease_expires_ts<=CURRENT_TIMESTAMP))
+           AND (t.deadline_ts IS NULL OR t.deadline_ts>CURRENT_TIMESTAMP)
+         ORDER BY CASE t.execution_class WHEN 'interactive' THEN 0 WHEN 'standard' THEN 1 ELSE 2 END,
+                  t.priority DESC,t.started_ts,t.task_id
+         LIMIT 1 FOR UPDATE SKIP LOCKED
+    )
+    UPDATE task_info_t t SET
+        locked='Y',lease_owner=p_worker_id,
+        lease_fencing_token=t.lease_fencing_token+1,
+        lease_expires_ts=LEAST(COALESCE(t.deadline_ts,'infinity'::timestamptz),
+                               CURRENT_TIMESTAMP+make_interval(secs=>p_lease_ms::double precision/1000.0)),
+        update_ts=CURRENT_TIMESTAMP
+      FROM candidate c
+     WHERE t.host_id=c.host_id AND t.task_id=c.task_id
+    RETURNING t.host_id,t.task_id,t.task_type,t.process_id,t.wf_instance_id,
+              t.wf_task_id,t.status_code,t.result_code,t.lease_owner,
+              t.lease_fencing_token,t.lease_expires_ts;
+END
+$body$;
+
+REVOKE ALL ON FUNCTION workflow_claim_host_task_v1(UUID,INTEGER) FROM PUBLIC;
+
+COMMIT;
+-- END WORKFLOW BACKED MCP PHASE 1 RUNTIME
+-- BEGIN WORKFLOW BACKED MCP PHASE 2 ORCHESTRATION
+BEGIN;
+
+ALTER TABLE workflow_invocation_t
+    ADD COLUMN cancellation_policy VARCHAR(32) NOT NULL DEFAULT 'BEFORE_EFFECTS_ONLY'
+        CHECK(cancellation_policy IN ('BEFORE_EFFECTS_ONLY','COOPERATIVE','DISABLED')),
+    ADD COLUMN cancel_requested_ts TIMESTAMPTZ,
+    ADD COLUMN non_cancellable_reason TEXT,
+    ADD COLUMN response_policy_snapshot JSONB NOT NULL DEFAULT '{}'::JSONB
+        CHECK(jsonb_typeof(response_policy_snapshot)='object');
+ALTER TABLE workflow_invocation_t DROP CONSTRAINT workflow_invocation_t_state_check;
+ALTER TABLE workflow_invocation_t ADD CONSTRAINT workflow_invocation_state_v2_ck
+    CHECK(state IN ('ACCEPTED','RUNNING','WAITING','COMPENSATING','COMPLETED','FAILED','CANCELLED'));
+
+ALTER TABLE task_info_t
+    ADD COLUMN attempt_no INTEGER NOT NULL DEFAULT 1 CHECK(attempt_no>0),
+    ADD COLUMN maximum_attempts INTEGER NOT NULL DEFAULT 1 CHECK(maximum_attempts>0),
+    ADD COLUMN next_attempt_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    ADD COLUMN effect_state VARCHAR(16) NOT NULL DEFAULT 'none'
+        CHECK(effect_state IN ('none','possible','confirmed')),
+    ADD COLUMN downstream_idempotency_key VARCHAR(255),
+    ADD COLUMN compensation_task VARCHAR(255),
+    ADD COLUMN is_compensation BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN fork_join_id UUID,
+    ADD COLUMN branch_name VARCHAR(255);
+CREATE INDEX task_info_phase2_claim_idx
+    ON task_info_t(execution_class,next_attempt_ts,priority DESC,started_ts,host_id)
+    WHERE active AND execution_placement='host' AND status_code IN ('A','C');
+
+CREATE TABLE workflow_fork_join_t (
+    host_id UUID NOT NULL,
+    join_id UUID NOT NULL,
+    workflow_instance_id UUID NOT NULL,
+    process_id UUID NOT NULL,
+    fork_task_id UUID NOT NULL,
+    fork_task_name VARCHAR(255) NOT NULL,
+    continuation_task VARCHAR(255),
+    compete BOOLEAN NOT NULL DEFAULT FALSE,
+    expected_branches INTEGER NOT NULL CHECK(expected_branches BETWEEN 1 AND 64),
+    completed_branches INTEGER NOT NULL DEFAULT 0 CHECK(completed_branches>=0),
+    failed_branches INTEGER NOT NULL DEFAULT 0 CHECK(failed_branches>=0),
+    state VARCHAR(16) NOT NULL DEFAULT 'RUNNING'
+        CHECK(state IN ('RUNNING','COMPLETED','FAILED','CANCELLED')),
+    branch_results JSONB NOT NULL DEFAULT '{}'::JSONB CHECK(jsonb_typeof(branch_results)='object'),
+    created_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_ts TIMESTAMPTZ,
+    PRIMARY KEY(host_id,join_id),
+    UNIQUE(host_id,fork_task_id),
+    FOREIGN KEY(host_id,workflow_instance_id)
+        REFERENCES workflow_invocation_t(host_id,workflow_instance_id) ON DELETE RESTRICT,
+    FOREIGN KEY(host_id,process_id) REFERENCES process_info_t(host_id,process_id) ON DELETE RESTRICT,
+    FOREIGN KEY(host_id,fork_task_id) REFERENCES task_info_t(host_id,task_id) ON DELETE RESTRICT
+);
+
+CREATE TABLE workflow_fork_branch_t (
+    host_id UUID NOT NULL,
+    join_id UUID NOT NULL,
+    branch_name VARCHAR(255) NOT NULL,
+    task_id UUID NOT NULL,
+    state VARCHAR(16) NOT NULL DEFAULT 'RUNNING'
+        CHECK(state IN ('RUNNING','COMPLETED','FAILED','CANCELLED')),
+    result JSONB,
+    completed_ts TIMESTAMPTZ,
+    PRIMARY KEY(host_id,join_id,branch_name),
+    UNIQUE(host_id,task_id),
+    FOREIGN KEY(host_id,join_id) REFERENCES workflow_fork_join_t(host_id,join_id) ON DELETE RESTRICT,
+    FOREIGN KEY(host_id,task_id) REFERENCES task_info_t(host_id,task_id) ON DELETE RESTRICT
+);
+
+CREATE TABLE workflow_tool_approval_evidence_t (
+    host_id UUID NOT NULL,
+    binding_id UUID NOT NULL,
+    task_name VARCHAR(255) NOT NULL,
+    evidence_digest VARCHAR(71) NOT NULL CHECK(evidence_digest ~ '^sha256:[0-9a-f]{64}$'),
+    approved_by VARCHAR(255) NOT NULL,
+    approved_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    PRIMARY KEY(host_id,binding_id,task_name,evidence_digest),
+    FOREIGN KEY(host_id,binding_id)
+        REFERENCES workflow_tool_binding_t(host_id,binding_id) ON DELETE RESTRICT
+);
+
+
+CREATE TABLE workflow_task_effect_t (
+    host_id UUID NOT NULL,
+    workflow_instance_id UUID NOT NULL,
+    task_name VARCHAR(255) NOT NULL,
+    idempotency_key VARCHAR(255) NOT NULL,
+    request_digest VARCHAR(71) NOT NULL CHECK(request_digest ~ '^sha256:[0-9a-f]{64}$'),
+    effect_state VARCHAR(16) NOT NULL DEFAULT 'possible'
+        CHECK(effect_state IN ('possible','confirmed')),
+    result JSONB,
+    first_attempt_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    confirmed_ts TIMESTAMPTZ,
+    PRIMARY KEY(host_id,workflow_instance_id,task_name,idempotency_key),
+    FOREIGN KEY(host_id,workflow_instance_id)
+        REFERENCES workflow_invocation_t(host_id,workflow_instance_id) ON DELETE RESTRICT
+);
+
+CREATE OR REPLACE FUNCTION workflow_claim_task_effect_v1(
+    p_host_id UUID,p_workflow_instance_id UUID,p_task_name VARCHAR,
+    p_idempotency_key VARCHAR,p_request_digest VARCHAR
+) RETURNS TABLE(claimed BOOLEAN,replayed BOOLEAN,result JSONB,effect_state VARCHAR)
+LANGUAGE plpgsql AS $body$
+DECLARE existing workflow_task_effect_t%ROWTYPE;
+BEGIN
+    INSERT INTO workflow_task_effect_t(
+        host_id,workflow_instance_id,task_name,idempotency_key,request_digest)
+    VALUES(p_host_id,p_workflow_instance_id,p_task_name,p_idempotency_key,p_request_digest)
+    ON CONFLICT DO NOTHING;
+    SELECT * INTO existing FROM workflow_task_effect_t
+     WHERE host_id=p_host_id AND workflow_instance_id=p_workflow_instance_id
+       AND task_name=p_task_name AND idempotency_key=p_idempotency_key FOR UPDATE;
+    IF existing.request_digest<>p_request_digest THEN
+        RAISE EXCEPTION 'WORKFLOW_TASK_IDEMPOTENCY_CONFLICT';
+    END IF;
+    RETURN QUERY SELECT existing.confirmed_ts IS NULL,existing.confirmed_ts IS NOT NULL,
+                        existing.result,existing.effect_state;
+END
+$body$;
+
+CREATE OR REPLACE FUNCTION workflow_confirm_task_effect_v1(
+    p_host_id UUID,p_workflow_instance_id UUID,p_task_name VARCHAR,
+    p_idempotency_key VARCHAR,p_request_digest VARCHAR,p_result JSONB
+) RETURNS BOOLEAN LANGUAGE plpgsql AS $body$
+BEGIN
+    UPDATE workflow_task_effect_t SET effect_state='confirmed',result=p_result,
+           confirmed_ts=COALESCE(confirmed_ts,CURRENT_TIMESTAMP)
+     WHERE host_id=p_host_id AND workflow_instance_id=p_workflow_instance_id
+       AND task_name=p_task_name AND idempotency_key=p_idempotency_key
+       AND request_digest=p_request_digest;
+    RETURN FOUND;
+END
+$body$;
+
+CREATE OR REPLACE FUNCTION workflow_claim_host_task_v1(
+    p_worker_id UUID,p_lease_ms INTEGER
+) RETURNS TABLE(
+    host_id UUID,task_id UUID,task_type VARCHAR,process_id UUID,
+    wf_instance_id VARCHAR,wf_task_id VARCHAR,status_code CHAR,result_code VARCHAR,
+    lease_owner UUID,lease_fencing_token BIGINT,lease_expires_ts TIMESTAMPTZ
+) LANGUAGE plpgsql AS $body$
+DECLARE claimed_host UUID;
+BEGIN
+    IF p_lease_ms<100 OR p_lease_ms>30000 THEN RAISE EXCEPTION 'WORKFLOW_HOST_LEASE_MS_OUT_OF_RANGE'; END IF;
+    SELECT candidates.host_id INTO claimed_host FROM (
+        SELECT t.host_id,
+               MIN(CASE t.execution_class WHEN 'interactive' THEN 0 WHEN 'standard' THEN 1 ELSE 2 END) class_rank,
+               MAX(t.priority) maximum_priority,MIN(t.started_ts) oldest_task
+          FROM task_info_t t
+         WHERE t.active AND t.execution_placement='host'
+           AND ((t.status_code='A' AND t.task_type IN ('ask','assert','call','set','switch','fork'))
+             OR (t.status_code='C' AND t.task_type='ask' AND t.completed_ts IS NOT NULL
+                 AND (t.task_output IS NULL OR t.task_output->>'status'='waiting_for_input')))
+           AND t.next_attempt_ts<=CURRENT_TIMESTAMP
+           AND (t.effect_state='none' OR t.downstream_idempotency_key IS NOT NULL)
+           AND (t.locked='N' OR (t.locked='Y' AND t.lease_expires_ts<=CURRENT_TIMESTAMP))
+           AND (t.deadline_ts IS NULL OR t.deadline_ts>CURRENT_TIMESTAMP)
+         GROUP BY t.host_id
+    ) candidates LEFT JOIN workflow_executor_tenant_turn_t turn ON turn.host_id=candidates.host_id
+    ORDER BY candidates.class_rank,COALESCE(turn.last_claim_ts,'-infinity'::timestamptz),
+             candidates.maximum_priority DESC,candidates.oldest_task,candidates.host_id LIMIT 1;
+    IF claimed_host IS NULL THEN RETURN; END IF;
+    IF NOT pg_try_advisory_xact_lock(hashtext(claimed_host::text)) THEN RETURN; END IF;
+    INSERT INTO workflow_executor_tenant_turn_t(host_id,last_claim_ts,claim_count)
+    VALUES(claimed_host,CURRENT_TIMESTAMP,1)
+    ON CONFLICT ON CONSTRAINT workflow_executor_tenant_turn_t_pkey DO UPDATE SET
+      last_claim_ts=EXCLUDED.last_claim_ts,claim_count=workflow_executor_tenant_turn_t.claim_count+1,
+      updated_ts=CURRENT_TIMESTAMP;
+    RETURN QUERY WITH candidate AS (
+      SELECT t.host_id,t.task_id FROM task_info_t t
+       WHERE t.host_id=claimed_host AND t.active AND t.execution_placement='host'
+         AND ((t.status_code='A' AND t.task_type IN ('ask','assert','call','set','switch','fork'))
+           OR (t.status_code='C' AND t.task_type='ask' AND t.completed_ts IS NOT NULL
+               AND (t.task_output IS NULL OR t.task_output->>'status'='waiting_for_input')))
+         AND t.next_attempt_ts<=CURRENT_TIMESTAMP
+         AND (t.effect_state='none' OR t.downstream_idempotency_key IS NOT NULL)
+         AND (t.locked='N' OR (t.locked='Y' AND t.lease_expires_ts<=CURRENT_TIMESTAMP))
+         AND (t.deadline_ts IS NULL OR t.deadline_ts>CURRENT_TIMESTAMP)
+       ORDER BY CASE t.execution_class WHEN 'interactive' THEN 0 WHEN 'standard' THEN 1 ELSE 2 END,
+                t.priority DESC,t.started_ts,t.task_id LIMIT 1 FOR UPDATE SKIP LOCKED
+    ) UPDATE task_info_t t SET locked='Y',lease_owner=p_worker_id,
+      lease_fencing_token=t.lease_fencing_token+1,
+      lease_expires_ts=LEAST(COALESCE(t.deadline_ts,'infinity'::timestamptz),
+        CURRENT_TIMESTAMP+make_interval(secs=>p_lease_ms::double precision/1000.0)),update_ts=CURRENT_TIMESTAMP
+      FROM candidate c WHERE t.host_id=c.host_id AND t.task_id=c.task_id
+    RETURNING t.host_id,t.task_id,t.task_type,t.process_id,t.wf_instance_id,t.wf_task_id,
+              t.status_code,t.result_code,t.lease_owner,t.lease_fencing_token,t.lease_expires_ts;
+END
+$body$;
+
+CREATE OR REPLACE FUNCTION workflow_promote_tool_binding_v1(
+    p_host_id UUID,p_tool_id UUID,p_binding_id UUID
+) RETURNS BOOLEAN LANGUAGE plpgsql AS $body$
+DECLARE current_mode VARCHAR; target_mode VARCHAR; affected BIGINT;
+BEGIN
+    PERFORM pg_advisory_xact_lock(hashtext(p_host_id::text||':'||p_tool_id::text));
+    SELECT invocation_mode INTO current_mode FROM workflow_tool_binding_t
+     WHERE host_id=p_host_id AND tool_id=p_tool_id AND active FOR UPDATE;
+    SELECT invocation_mode INTO target_mode FROM workflow_tool_binding_t
+     WHERE host_id=p_host_id AND tool_id=p_tool_id AND binding_id=p_binding_id FOR UPDATE;
+    IF target_mode IS NULL THEN RAISE EXCEPTION 'WORKFLOW_BINDING_NOT_FOUND'; END IF;
+    IF current_mode IS NOT NULL AND current_mode<>target_mode THEN
+        RAISE EXCEPTION 'WORKFLOW_BINDING_MODE_CHANGE_REQUIRES_NEW_TOOL';
+    END IF;
+    UPDATE workflow_tool_binding_t SET active=FALSE,aggregate_version=aggregate_version+1,
+           update_ts=CURRENT_TIMESTAMP WHERE host_id=p_host_id AND tool_id=p_tool_id AND active;
+    UPDATE workflow_tool_binding_t SET active=TRUE,aggregate_version=aggregate_version+1,
+           update_ts=CURRENT_TIMESTAMP WHERE host_id=p_host_id AND binding_id=p_binding_id;
+    GET DIAGNOSTICS affected=ROW_COUNT;
+    RETURN affected=1;
+END
+$body$;
+
+CREATE OR REPLACE FUNCTION workflow_set_nested_target_lifecycle_v1(
+    p_host_id UUID,p_nested_tool_id UUID,p_nested_tool_version VARCHAR,
+    p_lifecycle_status VARCHAR,p_emergency_revocation BOOLEAN,p_impact_report_digest VARCHAR
+) RETURNS BIGINT LANGUAGE plpgsql AS $body$
+DECLARE active_references BIGINT; affected BIGINT;
+BEGIN
+    IF p_lifecycle_status NOT IN ('active','superseded','retirement-candidate','revoked') THEN
+        RAISE EXCEPTION 'WORKFLOW_NESTED_TARGET_LIFECYCLE_INVALID';
+    END IF;
+    IF p_impact_report_digest !~ '^sha256:[0-9a-f]{64}$' THEN
+        RAISE EXCEPTION 'WORKFLOW_IMPACT_REPORT_DIGEST_INVALID';
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtext(p_host_id::text||':'||p_nested_tool_id::text));
+    SELECT count(*) INTO active_references FROM workflow_tool_dependency_t dependency
+      JOIN workflow_tool_binding_t binding ON binding.host_id=dependency.host_id
+       AND binding.binding_id=dependency.outer_binding_id
+     WHERE dependency.host_id=p_host_id AND dependency.nested_tool_id=p_nested_tool_id
+       AND dependency.nested_tool_version=p_nested_tool_version
+       AND dependency.active AND binding.active;
+    IF p_lifecycle_status='retirement-candidate' AND active_references>0 THEN
+        RAISE EXCEPTION 'WORKFLOW_NESTED_TARGET_STILL_REFERENCED:%',active_references;
+    END IF;
+    IF p_lifecycle_status='revoked' AND NOT p_emergency_revocation THEN
+        RAISE EXCEPTION 'WORKFLOW_EMERGENCY_REVOCATION_CONFIRMATION_REQUIRED';
+    END IF;
+    UPDATE workflow_tool_dependency_t SET lifecycle_status=p_lifecycle_status,
+           dispatch_target=jsonb_set(dispatch_target,'{impactReportDigest}',to_jsonb(p_impact_report_digest),TRUE),
+           update_ts=CURRENT_TIMESTAMP
+     WHERE host_id=p_host_id AND nested_tool_id=p_nested_tool_id
+       AND nested_tool_version=p_nested_tool_version;
+    GET DIAGNOSTICS affected=ROW_COUNT;
+    RETURN affected;
+END
+$body$;
+
+REVOKE ALL ON FUNCTION workflow_claim_task_effect_v1(UUID,UUID,VARCHAR,VARCHAR,VARCHAR) FROM PUBLIC;
+REVOKE ALL ON FUNCTION workflow_confirm_task_effect_v1(UUID,UUID,VARCHAR,VARCHAR,VARCHAR,JSONB) FROM PUBLIC;
+REVOKE ALL ON FUNCTION workflow_claim_host_task_v1(UUID,INTEGER) FROM PUBLIC;
+REVOKE ALL ON FUNCTION workflow_promote_tool_binding_v1(UUID,UUID,UUID) FROM PUBLIC;
+REVOKE ALL ON FUNCTION workflow_set_nested_target_lifecycle_v1(UUID,UUID,VARCHAR,VARCHAR,BOOLEAN,VARCHAR) FROM PUBLIC;
+
+COMMIT;
+-- END WORKFLOW BACKED MCP PHASE 2 ORCHESTRATION
+-- BEGIN WORKFLOW BACKED MCP PHASE 4 SKILL INTEGRATION
+BEGIN;
+
+ALTER TABLE workflow_tool_binding_t
+    ADD CONSTRAINT workflow_tool_binding_skill_target_uq
+        UNIQUE(host_id,binding_id,wf_def_id,tool_id);
+
+ALTER TABLE skill_workflow_t
+    ADD COLUMN workflow_binding_id UUID,
+    ADD COLUMN workflow_tool_id UUID,
+    ADD CONSTRAINT skill_workflow_binding_pair_ck
+        CHECK((workflow_binding_id IS NULL)=(workflow_tool_id IS NULL)),
+    ADD CONSTRAINT skill_workflow_binding_target_fk
+        FOREIGN KEY(host_id,workflow_binding_id,wf_def_id,workflow_tool_id)
+        REFERENCES workflow_tool_binding_t(host_id,binding_id,wf_def_id,tool_id)
+        ON DELETE RESTRICT,
+    ADD CONSTRAINT skill_workflow_disclosed_tool_fk
+        FOREIGN KEY(host_id,skill_id,workflow_tool_id)
+        REFERENCES skill_tool_t(host_id,skill_id,tool_id)
+        ON DELETE RESTRICT;
+
+CREATE INDEX skill_workflow_binding_idx
+    ON skill_workflow_t(host_id,workflow_binding_id)
+    WHERE workflow_binding_id IS NOT NULL;
+
+COMMIT;
+-- END WORKFLOW BACKED MCP PHASE 4 SKILL INTEGRATION
+-- BEGIN INLINED patch_20260813_02_gateway_tool_publication.sql
+BEGIN;
+
+CREATE TABLE gateway_tool_publication_t (
+    host_id UUID NOT NULL,
+    publication_id UUID NOT NULL,
+    instance_id UUID NOT NULL,
+    property_id UUID NOT NULL,
+    publication_version BIGINT NOT NULL CHECK(publication_version > 0),
+    publication_mode VARCHAR(32) NOT NULL
+        CHECK(publication_mode IN ('ADD_OR_UPDATE','REPLACE_API_SCOPE')),
+    scope_api_version_id UUID,
+    candidate_digest VARCHAR(71) NOT NULL
+        CHECK(candidate_digest ~ '^sha256:[0-9a-f]{64}$'),
+    compiled_tools JSONB NOT NULL CHECK(jsonb_typeof(compiled_tools)='array'),
+    bindings JSONB NOT NULL CHECK(jsonb_typeof(bindings)='array'),
+    aggregate_version BIGINT NOT NULL DEFAULT 1 CHECK(aggregate_version > 0),
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(host_id,publication_id),
+    UNIQUE(host_id,instance_id,publication_version),
+    FOREIGN KEY(host_id,instance_id)
+        REFERENCES instance_t(host_id,instance_id) ON DELETE RESTRICT,
+    FOREIGN KEY(property_id)
+        REFERENCES config_property_t(property_id) ON DELETE RESTRICT,
+    FOREIGN KEY(host_id,scope_api_version_id)
+        REFERENCES api_version_t(host_id,api_version_id) ON DELETE RESTRICT,
+    CHECK((publication_mode='REPLACE_API_SCOPE')=(scope_api_version_id IS NOT NULL))
+);
+CREATE INDEX gateway_tool_publication_instance_idx
+    ON gateway_tool_publication_t(host_id,instance_id,publication_version DESC);
+
+CREATE TABLE gateway_tool_binding_t (
+    host_id UUID NOT NULL,
+    instance_id UUID NOT NULL,
+    tool_id UUID NOT NULL,
+    publication_id UUID NOT NULL,
+    publication_version BIGINT NOT NULL CHECK(publication_version > 0),
+    source_type VARCHAR(16) NOT NULL CHECK(source_type IN ('ENDPOINT','WORKFLOW')),
+    source_aggregate_version BIGINT NOT NULL CHECK(source_aggregate_version > 0),
+    source_tool_version VARCHAR(20),
+    api_version_id UUID,
+    endpoint_id UUID,
+    stable_tool_ref UUID,
+    workflow_binding_id UUID,
+    workflow_definition_id UUID,
+    workflow_version VARCHAR(64),
+    definition_digest VARCHAR(71),
+    schema_digest VARCHAR(71),
+    policy_digest VARCHAR(71),
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    delete_user VARCHAR(126),
+    delete_ts TIMESTAMPTZ,
+    update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(host_id,instance_id,tool_id),
+    FOREIGN KEY(host_id,instance_id)
+        REFERENCES instance_t(host_id,instance_id) ON DELETE RESTRICT,
+    FOREIGN KEY(host_id,publication_id)
+        REFERENCES gateway_tool_publication_t(host_id,publication_id) ON DELETE RESTRICT,
+    FOREIGN KEY(host_id,tool_id)
+        REFERENCES tool_t(host_id,tool_id) ON DELETE RESTRICT,
+    FOREIGN KEY(host_id,api_version_id)
+        REFERENCES api_version_t(host_id,api_version_id) ON DELETE RESTRICT,
+    FOREIGN KEY(host_id,endpoint_id)
+        REFERENCES api_endpoint_t(host_id,endpoint_id) ON DELETE RESTRICT,
+    FOREIGN KEY(host_id,workflow_binding_id)
+        REFERENCES workflow_tool_binding_t(host_id,binding_id) ON DELETE RESTRICT,
+    FOREIGN KEY(host_id,workflow_definition_id,workflow_version)
+        REFERENCES wf_definition_version_t(host_id,wf_def_id,version) ON DELETE RESTRICT,
+    CHECK(
+        (source_type='ENDPOINT' AND api_version_id IS NOT NULL AND endpoint_id IS NOT NULL
+            AND stable_tool_ref IS NULL AND workflow_binding_id IS NULL)
+        OR
+        (source_type='WORKFLOW' AND api_version_id IS NULL AND endpoint_id IS NULL
+            AND stable_tool_ref IS NOT NULL AND workflow_binding_id IS NOT NULL
+            AND workflow_definition_id IS NOT NULL AND workflow_version IS NOT NULL
+            AND definition_digest ~ '^sha256:[0-9a-f]{64}$'
+            AND schema_digest ~ '^sha256:[0-9a-f]{64}$'
+            AND policy_digest ~ '^sha256:[0-9a-f]{64}$')
+    )
+);
+CREATE INDEX gateway_tool_binding_source_idx
+    ON gateway_tool_binding_t(host_id,instance_id,source_type,api_version_id,active);
+
+COMMIT;
+-- END INLINED patch_20260813_02_gateway_tool_publication.sql
 
 
 -- create a view to simplify the foreign key relationship.
@@ -7903,161 +12704,6 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-
--- BEGIN patch_20260810_01_llm_remove_conformance_lifecycle.sql
-BEGIN;
-
--- Preserve the immutable embedding-space contract before retiring live
--- conformance. Existing deployments that route to one exact Alias space can
--- inherit that operator-declared space into the global model declaration.
-WITH model_spaces AS (
-    SELECT registration.model_id,
-           (jsonb_agg(DISTINCT alias.required_capabilities->'embeddingSpace'))->0 AS space
-      FROM llm_public_alias_t alias
-      JOIN llm_alias_route_t route ON route.host_id=alias.host_id
-       AND route.public_alias_id=alias.public_alias_id AND route.active IS TRUE
-      JOIN llm_provider_deployment_t deployment ON deployment.host_id=route.host_id
-       AND deployment.provider_deployment_id=route.provider_deployment_id
-       AND deployment.active IS TRUE AND deployment.provider_protocol='openai_embeddings'
-      JOIN llm_model_registration_t registration ON registration.host_id=deployment.host_id
-       AND registration.model_registration_id=deployment.model_registration_id
-     WHERE alias.active IS TRUE
-       AND jsonb_typeof(alias.required_capabilities->'embeddingSpace')='object'
-     GROUP BY registration.model_id
-    HAVING count(DISTINCT alias.required_capabilities->'embeddingSpace')=1
-)
-UPDATE llm_model_t model
-   SET declared_capabilities=jsonb_set(
-       model.declared_capabilities,
-       '{embedding}',
-       COALESCE(model.declared_capabilities->'embedding','{}'::jsonb)
-           || jsonb_build_object('space',spaces.space),
-       TRUE)
-  FROM model_spaces spaces
- WHERE model.model_id=spaces.model_id
-   AND model.operations ? 'embed'
-   AND NOT (model.declared_capabilities->'embedding' ? 'space');
-
--- Lifecycle is no longer an authoring workflow, but terminal historical states
--- still express an operator's intent that a resource must not be published.
--- Preserve that intent through the existing soft-delete flag before dropping
--- the lifecycle columns. Draft/pending/validating rows remain active by design.
-DO $preserve_terminal_lifecycle$
-BEGIN
-    IF EXISTS (SELECT 1 FROM pg_attribute
-                WHERE attrelid='llm_model_t'::regclass
-                  AND attname='lifecycle_status' AND NOT attisdropped) THEN
-        EXECUTE $sql$UPDATE llm_model_t SET active=FALSE
-                     WHERE lifecycle_status IN ('DEPRECATED','RETIRED')$sql$;
-    END IF;
-    IF EXISTS (SELECT 1 FROM pg_attribute
-                WHERE attrelid='llm_model_registration_t'::regclass
-                  AND attname='lifecycle_status' AND NOT attisdropped) THEN
-        EXECUTE $sql$UPDATE llm_model_registration_t SET active=FALSE
-                     WHERE lifecycle_status IN ('SUSPENDED','RETIRED')$sql$;
-    END IF;
-    IF EXISTS (SELECT 1 FROM pg_attribute
-                WHERE attrelid='llm_provider_account_t'::regclass
-                  AND attname='lifecycle_status' AND NOT attisdropped) THEN
-        EXECUTE $sql$UPDATE llm_provider_account_t SET active=FALSE
-                     WHERE lifecycle_status IN ('SUSPENDED','RETIRED')$sql$;
-    END IF;
-    IF EXISTS (SELECT 1 FROM pg_attribute
-                WHERE attrelid='llm_network_zone_t'::regclass
-                  AND attname='lifecycle_status' AND NOT attisdropped) THEN
-        EXECUTE $sql$UPDATE llm_network_zone_t SET active=FALSE
-                     WHERE lifecycle_status IN ('SUSPENDED','RETIRED')$sql$;
-    END IF;
-    IF EXISTS (SELECT 1 FROM pg_attribute
-                WHERE attrelid='llm_provider_endpoint_t'::regclass
-                  AND attname='lifecycle_status' AND NOT attisdropped) THEN
-        EXECUTE $sql$UPDATE llm_provider_endpoint_t SET active=FALSE
-                     WHERE lifecycle_status IN ('SUSPENDED','RETIRED')$sql$;
-    END IF;
-    IF EXISTS (SELECT 1 FROM pg_attribute
-                WHERE attrelid='llm_provider_credential_t'::regclass
-                  AND attname='lifecycle_status' AND NOT attisdropped) THEN
-        EXECUTE $sql$UPDATE llm_provider_credential_t SET active=FALSE
-                     WHERE lifecycle_status IN ('REVOKED','EXPIRED')$sql$;
-    END IF;
-    IF EXISTS (SELECT 1 FROM pg_attribute
-                WHERE attrelid='llm_public_alias_t'::regclass
-                  AND attname='lifecycle_status' AND NOT attisdropped) THEN
-        EXECUTE $sql$UPDATE llm_public_alias_t SET active=FALSE
-                     WHERE lifecycle_status IN ('DEPRECATED','RETIRED')$sql$;
-    END IF;
-    IF EXISTS (SELECT 1 FROM pg_attribute
-                WHERE attrelid='llm_model_policy_t'::regclass
-                  AND attname='lifecycle_status' AND NOT attisdropped) THEN
-        EXECUTE $sql$UPDATE llm_model_policy_t SET active=FALSE
-                     WHERE lifecycle_status IN ('SUSPENDED','RETIRED')$sql$;
-    END IF;
-    IF EXISTS (SELECT 1 FROM pg_attribute
-                WHERE attrelid='llm_provider_deployment_t'::regclass
-                  AND attname='lifecycle_status' AND NOT attisdropped) THEN
-        EXECUTE $sql$UPDATE llm_provider_deployment_t SET active=FALSE
-                     WHERE lifecycle_status IN ('SUSPENDED','RETIRED')$sql$;
-    END IF;
-END
-$preserve_terminal_lifecycle$;
-
--- Preserve dependent views such as knowledge_embedding_profile_runtime_v.
--- The replacement exposes the same columns while releasing its dependencies
--- on the lifecycle and conformance columns before those columns are dropped.
-CREATE OR REPLACE VIEW knowledge_qualified_embedding_alias_v AS
-SELECT alias.host_id,alias.host_id AS alias_owner_host_id,alias.public_alias_id,alias.alias_name,
-       alias.required_capabilities->'embeddingSpace' AS embedding_space,
-       TRUE AS active,alias.update_ts,count(*) AS eligible_route_count
-  FROM llm_public_alias_t alias
-  JOIN llm_alias_route_t route ON route.host_id=alias.host_id
-   AND route.public_alias_id=alias.public_alias_id AND route.active IS TRUE
-  JOIN llm_provider_deployment_t deployment ON deployment.host_id=route.host_id
-   AND deployment.provider_deployment_id=route.provider_deployment_id
-   AND deployment.active IS TRUE AND deployment.provider_protocol='openai_embeddings'
-  JOIN llm_model_registration_t registration ON registration.host_id=deployment.host_id
-   AND registration.model_registration_id=deployment.model_registration_id AND registration.active IS TRUE
-  JOIN llm_model_t model ON model.model_id=registration.model_id AND model.active IS TRUE
- WHERE alias.active IS TRUE AND alias.operations ? 'embed'
-   AND alias.require_expected_embedding_space IS TRUE
-   AND (model.declared_capabilities || registration.capability_restrictions)
-       ->'embedding'->'space'=alias.required_capabilities->'embeddingSpace'
- GROUP BY alias.host_id,alias.public_alias_id,alias.alias_name,
-          alias.required_capabilities->'embeddingSpace',alias.update_ts
-HAVING bool_and(
-    jsonb_array_length(COALESCE(
-        (model.declared_capabilities || registration.capability_restrictions)
-            ->'embedding'->'supportedDimensions',
-        (model.declared_capabilities || registration.capability_restrictions)
-            ->'embedding'->'dimensions'))=1
-    AND COALESCE(
-        (model.declared_capabilities || registration.capability_restrictions)
-            ->'embedding'->'supportedDimensions',
-        (model.declared_capabilities || registration.capability_restrictions)
-            ->'embedding'->'dimensions')
-        @> jsonb_build_array((alias.required_capabilities->'embeddingSpace'->>'dimension')::integer)
-);
-
-DROP INDEX IF EXISTS llm_deployment_conformance_due_idx;
-
-ALTER TABLE llm_model_t DROP COLUMN IF EXISTS lifecycle_status;
-ALTER TABLE llm_model_registration_t DROP COLUMN IF EXISTS lifecycle_status;
-ALTER TABLE llm_provider_account_t DROP COLUMN IF EXISTS lifecycle_status;
-ALTER TABLE llm_network_zone_t DROP COLUMN IF EXISTS lifecycle_status;
-ALTER TABLE llm_provider_endpoint_t DROP COLUMN IF EXISTS lifecycle_status;
-ALTER TABLE llm_provider_credential_t DROP COLUMN IF EXISTS lifecycle_status;
-ALTER TABLE llm_public_alias_t DROP COLUMN IF EXISTS lifecycle_status;
-ALTER TABLE llm_model_policy_t DROP COLUMN IF EXISTS lifecycle_status;
-ALTER TABLE llm_provider_deployment_t
-    DROP COLUMN IF EXISTS lifecycle_status,
-    DROP COLUMN IF EXISTS conformance_state,
-    DROP COLUMN IF EXISTS conformance_digest,
-    DROP COLUMN IF EXISTS conformance_valid_until,
-    DROP COLUMN IF EXISTS conformance_result,
-    DROP COLUMN IF EXISTS qualification_contract,
-    DROP COLUMN IF EXISTS refresh_before_seconds;
-
-COMMIT;
--- END patch_20260810_01_llm_remove_conformance_lifecycle.sql
 
 INSERT INTO user_t (user_id, language, first_name, last_name, email, user_type, verified, password)
 VALUES ('01964b05-5532-7c79-8cde-191dcbd421b8', 'en', 'Steve', 'Hu', 'steve.hu@lightapi.net', 'E', true, '1000:5b39342c202d37372c203132302c202d3132302c2034372c2032332c2034352c202d34342c202d31362c2034372c202d35392c202d35362c2039302c202d352c202d38322c202d32385d:949e6fcf9c4bb8a3d6a8c141a3a9182a572fb95fe8ccdc93b54ba53df8ef2e930f7b0348590df0d53f242ccceeae03aef6d273a34638b49c559ada110ec06992');
