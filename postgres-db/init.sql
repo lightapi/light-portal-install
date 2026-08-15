@@ -7915,7 +7915,7 @@ CREATE TABLE IF NOT EXISTS llm_gateway_publication_ack_t (
     pod_uid VARCHAR(255) NOT NULL,
     sequence_id BIGINT CHECK(sequence_id > 0),
     root_digest VARCHAR(64) CHECK(root_digest IS NULL OR root_digest ~ '^[0-9a-f]{64}$'),
-    applied_schema_version INTEGER CHECK(applied_schema_version IN (2,3)),
+    applied_schema_version INTEGER CHECK(applied_schema_version = 4),
     gateway_version VARCHAR(32),
     reader_version VARCHAR(64),
     material_generation BIGINT CHECK(material_generation >= 0),
@@ -7924,6 +7924,9 @@ CREATE TABLE IF NOT EXISTS llm_gateway_publication_ack_t (
     evidence_key_set_version VARCHAR(255),
     evidence_key_set_digest VARCHAR(64) CHECK(
         evidence_key_set_digest IS NULL OR evidence_key_set_digest ~ '^[0-9a-f]{64}$'),
+    reasoning_key_set_generation BIGINT CHECK(reasoning_key_set_generation >= 0),
+    reasoning_key_set_digest VARCHAR(64) CHECK(
+        reasoning_key_set_digest IS NULL OR reasoning_key_set_digest ~ '^[0-9a-f]{64}$'),
     acknowledgement_state VARCHAR(16) NOT NULL DEFAULT 'PENDING',
     failure_category VARCHAR(32),
     failure_code VARCHAR(64),
@@ -7948,7 +7951,8 @@ CREATE TABLE IF NOT EXISTS llm_gateway_publication_ack_t (
            AND applied_schema_version IS NOT NULL AND gateway_version IS NOT NULL
            AND reader_version IS NOT NULL AND material_generation IS NOT NULL
            AND resolved_trust_digest IS NOT NULL AND evidence_key_set_version IS NOT NULL
-           AND evidence_key_set_digest IS NOT NULL AND failure_category IS NULL AND failure_code IS NULL)
+           AND evidence_key_set_digest IS NOT NULL AND reasoning_key_set_generation IS NOT NULL
+           AND reasoning_key_set_digest IS NOT NULL AND failure_category IS NULL AND failure_code IS NULL)
        OR (acknowledgement_state IN ('FAILED','DIVERGENT') AND acknowledgement_digest IS NOT NULL
            AND applied_at IS NOT NULL AND failure_category IS NOT NULL AND failure_code IS NOT NULL))
 );
