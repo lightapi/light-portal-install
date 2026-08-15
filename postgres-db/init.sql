@@ -102,10 +102,7 @@ DROP TABLE IF EXISTS llm_gateway_instance_property_ownership_t CASCADE;
 DROP TABLE IF EXISTS gateway_tool_binding_t CASCADE;
 DROP TABLE IF EXISTS gateway_tool_publication_t CASCADE;
 DROP TABLE IF EXISTS llm_gateway_instance_publication_t CASCADE;
-DROP TABLE IF EXISTS llm_gateway_publication_ack_t CASCADE;
 DROP TABLE IF EXISTS llm_gateway_publication_t CASCADE;
-DROP TABLE IF EXISTS llm_gateway_replica_inventory_member_t CASCADE;
-DROP TABLE IF EXISTS llm_gateway_replica_inventory_t CASCADE;
 DROP TABLE IF EXISTS llm_projection_resource_t CASCADE;
 DROP TABLE IF EXISTS llm_model_policy_binding_t CASCADE;
 DROP TABLE IF EXISTS agent_definition_t CASCADE;
@@ -6980,7 +6977,7 @@ CREATE TABLE IF NOT EXISTS llm_projection_resource_t (
     CHECK(lifecycle_status IN ('CANDIDATE','PUBLISHED','RETIRED'))
 );
 
--- Records each validated gateway configuration publication, delivery status, and rollback relationship.
+-- Records each validated values-backed gateway configuration publication and rollback relationship.
 CREATE TABLE IF NOT EXISTS llm_gateway_publication_t (
     host_id UUID NOT NULL,
     environment VARCHAR(32) NOT NULL,
@@ -6993,12 +6990,10 @@ CREATE TABLE IF NOT EXISTS llm_gateway_publication_t (
     validation_result JSONB NOT NULL DEFAULT '{}'::jsonb CHECK(jsonb_typeof(validation_result) = 'object'),
     publication_state VARCHAR(16) NOT NULL DEFAULT 'CANDIDATE',
     rollback_of_publication_id UUID,
-    delivery_state VARCHAR(16) NOT NULL DEFAULT 'PENDING',
-    delivery_evidence JSONB,
     source_digest VARCHAR(71),
     config_properties JSONB,
     config_properties_digest VARCHAR(71),
-    delivery_mode VARCHAR(32) NOT NULL DEFAULT 'LEGACY_PROJECTION',
+    delivery_mode VARCHAR(32) NOT NULL DEFAULT 'INSTANCE_PROPERTIES',
     aggregate_version BIGINT NOT NULL DEFAULT 1 CHECK(aggregate_version > 0),
     active BOOLEAN NOT NULL DEFAULT TRUE,
     update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -7009,7 +7004,6 @@ CREATE TABLE IF NOT EXISTS llm_gateway_publication_t (
     UNIQUE(host_id, environment, publication_version),
     UNIQUE(host_id, environment, manifest_digest),
     CHECK(publication_state IN ('CANDIDATE','VALIDATED','PUBLISHED','FAILED','ROLLED_BACK')),
-    CHECK(delivery_state IN ('PENDING','ACKNOWLEDGED','FAILED')),
     CONSTRAINT llm_gateway_publication_source_digest_ck CHECK(
         source_digest IS NULL OR source_digest ~ '^sha256:[0-9a-f]{64}$'),
     CONSTRAINT llm_gateway_publication_properties_shape_ck CHECK(
@@ -7017,9 +7011,10 @@ CREATE TABLE IF NOT EXISTS llm_gateway_publication_t (
     CONSTRAINT llm_gateway_publication_properties_digest_ck CHECK(
         config_properties_digest IS NULL OR config_properties_digest ~ '^sha256:[0-9a-f]{64}$'),
     CONSTRAINT llm_gateway_publication_delivery_mode_ck CHECK(
-        delivery_mode IN ('LEGACY_PROJECTION','INSTANCE_PROPERTIES')
-        AND (delivery_mode <> 'INSTANCE_PROPERTIES' OR
-            (source_digest IS NOT NULL AND config_properties IS NOT NULL AND config_properties_digest IS NOT NULL)))
+        delivery_mode = 'INSTANCE_PROPERTIES'
+        AND source_digest IS NOT NULL
+        AND config_properties IS NOT NULL
+        AND config_properties_digest IS NOT NULL)
 );
 
 CREATE TABLE IF NOT EXISTS llm_gateway_instance_publication_t (
@@ -7823,139 +7818,6 @@ ALTER TABLE llm_provider_deployment_t
                 AND jsonb_typeof(conformance_result->'liveEvidence') = 'object'
             ))
         ));
-
-CREATE TABLE IF NOT EXISTS llm_gateway_replica_inventory_t (
-    host_id UUID NOT NULL,
-    environment VARCHAR(32) NOT NULL,
-    replica_inventory_id UUID NOT NULL,
-    inventory_generation BIGINT NOT NULL CHECK(inventory_generation > 0),
-    inventory_digest VARCHAR(64) NOT NULL CHECK(inventory_digest ~ '^[0-9a-f]{64}$'),
-    desired_count INTEGER NOT NULL CHECK(desired_count > 0),
-    workload_kind VARCHAR(64) NOT NULL,
-    workload_name VARCHAR(255) NOT NULL,
-    workload_uid VARCHAR(255) NOT NULL,
-    workload_resource_version VARCHAR(255) NOT NULL,
-    valid_from TIMESTAMPTZ NOT NULL,
-    valid_until TIMESTAMPTZ NOT NULL,
-    lifecycle_status VARCHAR(16) NOT NULL DEFAULT 'FROZEN',
-    frozen_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    aggregate_version BIGINT NOT NULL DEFAULT 1 CHECK(aggregate_version > 0),
-    active BOOLEAN NOT NULL DEFAULT TRUE,
-    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
-    PRIMARY KEY(host_id, environment, replica_inventory_id, inventory_generation),
-    FOREIGN KEY(host_id) REFERENCES host_t(host_id) ON DELETE CASCADE,
-    UNIQUE(host_id, environment, replica_inventory_id, inventory_generation, inventory_digest),
-    CHECK(valid_until > valid_from),
-    CHECK(lifecycle_status IN ('FROZEN','INVALIDATED','RETIRED'))
-);
-
-CREATE TABLE IF NOT EXISTS llm_gateway_replica_inventory_member_t (
-    host_id UUID NOT NULL,
-    environment VARCHAR(32) NOT NULL,
-    replica_inventory_id UUID NOT NULL,
-    inventory_generation BIGINT NOT NULL,
-    gateway_instance VARCHAR(255) NOT NULL CHECK(length(gateway_instance) > 0 AND gateway_instance <> 'gateway-local'),
-    namespace VARCHAR(255) NOT NULL,
-    service_account VARCHAR(255) NOT NULL,
-    pod_uid VARCHAR(255) NOT NULL,
-    required BOOLEAN NOT NULL DEFAULT TRUE,
-    PRIMARY KEY(host_id, environment, replica_inventory_id, inventory_generation, gateway_instance),
-    FOREIGN KEY(host_id, environment, replica_inventory_id, inventory_generation)
-        REFERENCES llm_gateway_replica_inventory_t(
-            host_id, environment, replica_inventory_id, inventory_generation) ON DELETE RESTRICT,
-    UNIQUE(host_id, environment, replica_inventory_id, inventory_generation, pod_uid),
-    UNIQUE(host_id, environment, replica_inventory_id, inventory_generation, gateway_instance, pod_uid)
-);
-
-ALTER TABLE llm_gateway_publication_t
-    ADD COLUMN IF NOT EXISTS projection_schema_version INTEGER NOT NULL DEFAULT 2,
-    ADD COLUMN IF NOT EXISTS replica_inventory_id UUID,
-    ADD COLUMN IF NOT EXISTS replica_inventory_generation BIGINT,
-    ADD COLUMN IF NOT EXISTS replica_inventory_digest VARCHAR(64),
-    ADD COLUMN IF NOT EXISTS evidence_key_set_version VARCHAR(255),
-    ADD COLUMN IF NOT EXISTS evidence_key_set_digest VARCHAR(64);
-ALTER TABLE llm_gateway_publication_t
-    DROP CONSTRAINT IF EXISTS llm_gateway_publication_delivery_mode_ck,
-    DROP CONSTRAINT IF EXISTS llm_gateway_publication_schema_version_ck,
-    DROP CONSTRAINT IF EXISTS llm_gateway_publication_inventory_shape_ck,
-    DROP CONSTRAINT IF EXISTS llm_gateway_publication_inventory_fk;
-ALTER TABLE llm_gateway_publication_t
-    ADD CONSTRAINT llm_gateway_publication_schema_version_ck CHECK(projection_schema_version IN (2,3)),
-    ADD CONSTRAINT llm_gateway_publication_inventory_shape_ck CHECK(
-        (projection_schema_version = 2 AND replica_inventory_id IS NULL
-            AND replica_inventory_generation IS NULL AND replica_inventory_digest IS NULL)
-        OR (projection_schema_version = 3 AND replica_inventory_id IS NOT NULL
-            AND replica_inventory_generation IS NOT NULL
-            AND replica_inventory_digest ~ '^[0-9a-f]{64}$'
-            AND evidence_key_set_version IS NOT NULL
-            AND evidence_key_set_digest ~ '^[0-9a-f]{64}$')),
-    ADD CONSTRAINT llm_gateway_publication_inventory_fk
-        FOREIGN KEY(host_id, environment, replica_inventory_id,
-                    replica_inventory_generation, replica_inventory_digest)
-        REFERENCES llm_gateway_replica_inventory_t(
-                    host_id, environment, replica_inventory_id,
-                    inventory_generation, inventory_digest) ON DELETE RESTRICT;
-ALTER TABLE llm_gateway_publication_t
-    ADD CONSTRAINT llm_gateway_publication_delivery_mode_ck CHECK(
-        delivery_mode IN ('LEGACY_PROJECTION','INSTANCE_PROPERTIES','PROJECTION_V3')
-        AND (delivery_mode <> 'INSTANCE_PROPERTIES' OR
-            (source_digest IS NOT NULL AND config_properties IS NOT NULL
-             AND config_properties_digest IS NOT NULL))
-        AND (delivery_mode <> 'PROJECTION_V3' OR projection_schema_version = 3));
-
-CREATE TABLE IF NOT EXISTS llm_gateway_publication_ack_t (
-    host_id UUID NOT NULL,
-    environment VARCHAR(32) NOT NULL,
-    gateway_publication_id UUID NOT NULL,
-    replica_inventory_id UUID NOT NULL,
-    inventory_generation BIGINT NOT NULL,
-    inventory_digest VARCHAR(64) NOT NULL CHECK(inventory_digest ~ '^[0-9a-f]{64}$'),
-    gateway_instance VARCHAR(255) NOT NULL,
-    pod_uid VARCHAR(255) NOT NULL,
-    sequence_id BIGINT CHECK(sequence_id > 0),
-    root_digest VARCHAR(64) CHECK(root_digest IS NULL OR root_digest ~ '^[0-9a-f]{64}$'),
-    applied_schema_version INTEGER CHECK(applied_schema_version = 4),
-    gateway_version VARCHAR(32),
-    reader_version VARCHAR(64),
-    material_generation BIGINT CHECK(material_generation >= 0),
-    resolved_trust_digest VARCHAR(64) CHECK(
-        resolved_trust_digest IS NULL OR resolved_trust_digest ~ '^[0-9a-f]{64}$'),
-    evidence_key_set_version VARCHAR(255),
-    evidence_key_set_digest VARCHAR(64) CHECK(
-        evidence_key_set_digest IS NULL OR evidence_key_set_digest ~ '^[0-9a-f]{64}$'),
-    reasoning_key_set_generation BIGINT CHECK(reasoning_key_set_generation >= 0),
-    reasoning_key_set_digest VARCHAR(64) CHECK(
-        reasoning_key_set_digest IS NULL OR reasoning_key_set_digest ~ '^[0-9a-f]{64}$'),
-    acknowledgement_state VARCHAR(16) NOT NULL DEFAULT 'PENDING',
-    failure_category VARCHAR(32),
-    failure_code VARCHAR(64),
-    acknowledgement_digest VARCHAR(64) CHECK(acknowledgement_digest IS NULL OR acknowledgement_digest ~ '^[0-9a-f]{64}$'),
-    authenticated_principal VARCHAR(255),
-    authenticated_audience VARCHAR(255),
-    applied_at TIMESTAMPTZ,
-    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY(host_id, environment, gateway_publication_id, gateway_instance),
-    FOREIGN KEY(host_id, environment, gateway_publication_id)
-        REFERENCES llm_gateway_publication_t(host_id, environment, gateway_publication_id) ON DELETE RESTRICT,
-    FOREIGN KEY(host_id, environment, replica_inventory_id, inventory_generation,
-                gateway_instance, pod_uid)
-        REFERENCES llm_gateway_replica_inventory_member_t(
-                host_id, environment, replica_inventory_id, inventory_generation,
-                gateway_instance, pod_uid) ON DELETE RESTRICT,
-    CHECK(acknowledgement_state IN ('PENDING','ACKNOWLEDGED','FAILED','DIVERGENT')),
-    CHECK((acknowledgement_state = 'PENDING' AND acknowledgement_digest IS NULL AND applied_at IS NULL
-            AND sequence_id IS NULL AND root_digest IS NULL AND applied_schema_version IS NULL)
-       OR (acknowledgement_state = 'ACKNOWLEDGED' AND acknowledgement_digest IS NOT NULL
-           AND applied_at IS NOT NULL AND sequence_id IS NOT NULL AND root_digest IS NOT NULL
-           AND applied_schema_version IS NOT NULL AND gateway_version IS NOT NULL
-           AND reader_version IS NOT NULL AND material_generation IS NOT NULL
-           AND resolved_trust_digest IS NOT NULL AND evidence_key_set_version IS NOT NULL
-           AND evidence_key_set_digest IS NOT NULL AND reasoning_key_set_generation IS NOT NULL
-           AND reasoning_key_set_digest IS NOT NULL AND failure_category IS NULL AND failure_code IS NULL)
-       OR (acknowledgement_state IN ('FAILED','DIVERGENT') AND acknowledgement_digest IS NOT NULL
-           AND applied_at IS NOT NULL AND failure_category IS NOT NULL AND failure_code IS NOT NULL))
-);
 
 COMMIT;
 -- END INLINED patch_20260808_03_llm_local_provider_transport.sql

@@ -26,10 +26,6 @@ services:
       INSTANCE_CLONE_PLAN_HMAC_KEY: ${INSTANCE_CLONE_PLAN_HMAC_KEY:-light-portal-development-only-instance-clone-hmac-key-v1}
       INSTANCE_CLONE_PLAN_HMAC_KEY_ID: ${INSTANCE_CLONE_PLAN_HMAC_KEY_ID:-v1}
       KNOWLEDGE_WORKLOAD_PRINCIPALS: ${KNOWLEDGE_WORKLOAD_PRINCIPALS:-light-knowledge-worker}
-      LLM_GATEWAY_ACK_AUDIENCE: ${LLM_GATEWAY_ACK_AUDIENCE:-llm-gateway-control-plane}
-      LLM_GATEWAY_ACK_NAMESPACES: ${LLM_GATEWAY_ACK_NAMESPACES:-local}
-      LLM_GATEWAY_ACK_SERVICE_ACCOUNTS: ${LLM_GATEWAY_ACK_SERVICE_ACCOUNTS:-llm-gateway}
-      LLM_GATEWAY_ACK_EVENT_USER_ID: ${LLM_GATEWAY_ACK_EVENT_USER_ID:-01964b05-5532-7c79-8cde-191dcbd421b8}
     volumes:
       - ./hybrid-command/config:/config:Z
       - ./hybrid-command/service:/service:Z
