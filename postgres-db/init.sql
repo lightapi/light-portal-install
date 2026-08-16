@@ -979,6 +979,7 @@ CREATE INDEX idx_api_endpoint_routing ON api_endpoint_t(host_id, active, routing
 CREATE INDEX idx_api_endpoint_source_protocol ON api_endpoint_t(host_id, source_protocol);
 CREATE INDEX idx_api_endpoint_lifecycle_cost ON api_endpoint_t(host_id, active, lifecycle_status, cost_tier);
 CREATE INDEX idx_api_endpoint_version_active ON api_endpoint_t(host_id, api_version_id, active);
+ALTER TABLE api_endpoint_t ADD CONSTRAINT api_endpoint_natural_uk UNIQUE(host_id, api_version_id, endpoint);
 
 
 CREATE TABLE api_endpoint_scope_t (
@@ -3380,6 +3381,12 @@ CREATE TABLE tool_t (
     api_endpoint        VARCHAR(1024),         -- URL if 'rest'
     api_method          VARCHAR(10),           -- HTTP Method if 'rest'
     endpoint_id         UUID,                  -- Reference to fine-grained auth endpoint
+    capability_ref      VARCHAR(512),          -- Stable LightAPI endpointId used by workflows
+    lightapi_document   JSONB,                 -- Validated LightAPI profile:endpoint document
+    lightapi_digest     VARCHAR(71),            -- Digest pinned by workflow grants
+    lightapi_validation_status VARCHAR(16),     -- VALID or INVALID
+    lightapi_validation_errors JSONB DEFAULT '[]'::JSONB,
+    lightapi_validated_ts TIMESTAMPTZ,
     script_content      TEXT,                  -- Source code if 'python'/'javascript'
     response_schema     JSONB,                 -- Strict output schema for tool results
     tool_metadata       JSONB,                 -- Canonical MCP/catalog metadata for manually authored tools
@@ -3411,9 +3418,14 @@ CREATE TABLE tool_t (
 ALTER TABLE tool_t
     ADD CONSTRAINT chk_tool_source_protocol CHECK (source_protocol IN ('openapi', 'mcp', 'lightapi', 'http') OR source_protocol IS NULL),
     ADD CONSTRAINT chk_tool_lifecycle CHECK (lifecycle_status IS NOT NULL AND lifecycle_status IN ('active', 'deprecated', 'retired')),
-    ADD CONSTRAINT chk_tool_cost CHECK (cost_tier IN ('low', 'medium', 'high') OR cost_tier IS NULL);
+    ADD CONSTRAINT chk_tool_cost CHECK (cost_tier IN ('low', 'medium', 'high') OR cost_tier IS NULL),
+    ADD CONSTRAINT chk_tool_lightapi_digest CHECK (lightapi_digest IS NULL OR lightapi_digest ~ '^sha256:[0-9a-f]{64}$'),
+    ADD CONSTRAINT chk_tool_lightapi_status CHECK (lightapi_validation_status IS NULL OR lightapi_validation_status IN ('VALID', 'INVALID')),
+    ADD CONSTRAINT chk_tool_lightapi_errors CHECK (lightapi_validation_errors IS NULL OR jsonb_typeof(lightapi_validation_errors) = 'array');
 
 CREATE INDEX idx_tool_host_endpoint ON tool_t(host_id, endpoint_id);
+CREATE UNIQUE INDEX tool_endpoint_uq ON tool_t(host_id, endpoint_id) WHERE endpoint_id IS NOT NULL AND active;
+CREATE UNIQUE INDEX tool_capability_version_uq ON tool_t(host_id, capability_ref, version) WHERE capability_ref IS NOT NULL AND active;
 CREATE INDEX idx_tool_active ON tool_t(active);
 CREATE INDEX idx_tool_name ON tool_t(name);
 CREATE INDEX idx_tool_routing ON tool_t(host_id, active, routing_domain, semantic_namespace, sensitivity_tier);
@@ -6701,7 +6713,7 @@ CREATE TABLE IF NOT EXISTS llm_provider_deployment_t (
     FOREIGN KEY(host_id, provider_account_id) REFERENCES llm_provider_account_t(host_id, provider_account_id) ON DELETE RESTRICT,
     UNIQUE(host_id, deployment_name),
     CONSTRAINT llm_provider_deployment_provider_protocol_ck
-        CHECK(provider_protocol IN ('openai_chat','openai_responses','openai_embeddings','anthropic_messages')),
+        CHECK(provider_protocol IN ('openai_chat','openai_responses','openai_embeddings','anthropic_messages','bedrock_converse')),
     CHECK(conformance_state IN ('UNKNOWN','PENDING','PASS','FAIL','EXPIRED','QUARANTINED')),
     CHECK(lifecycle_status IN ('DRAFT','VALIDATING','ACTIVE','SUSPENDED','RETIRED')),
     CHECK(conformance_valid_until IS NULL OR conformance_digest IS NOT NULL)
@@ -7377,7 +7389,7 @@ BEGIN
         SELECT 1 FROM llm_provider_deployment_t
          WHERE lower(provider_protocol) NOT IN (
              'openai','anthropic','openai_chat','openai_responses',
-             'openai_embeddings','anthropic_messages')) THEN
+             'openai_embeddings','anthropic_messages','bedrock_converse')) THEN
         RAISE EXCEPTION USING MESSAGE =
             'legacy LLM transport migration found an unsupported provider protocol';
     END IF;
@@ -7460,7 +7472,7 @@ UPDATE llm_provider_deployment_t deployment
 ALTER TABLE llm_provider_deployment_t
     ADD CONSTRAINT llm_provider_deployment_provider_protocol_ck CHECK(
         provider_protocol IN (
-            'openai_chat','openai_responses','openai_embeddings','anthropic_messages'));
+            'openai_chat','openai_responses','openai_embeddings','anthropic_messages','bedrock_converse'));
 
 -- Existing PASS evidence names the legacy protocol and cannot attest to the
 -- exact protocol contract. Preserve the row but require requalification.
@@ -7638,7 +7650,9 @@ CREATE TABLE IF NOT EXISTS llm_provider_endpoint_t (
     provider_endpoint_id UUID NOT NULL,
     provider_account_id UUID NOT NULL,
     endpoint_name VARCHAR(126) NOT NULL,
+    provider_type VARCHAR(32) NOT NULL,
     provider_protocol VARCHAR(32) NOT NULL,
+    aws_region VARCHAR(64),
     base_url TEXT NOT NULL,
     headers JSONB NOT NULL DEFAULT '{}'::jsonb CHECK(jsonb_typeof(headers) = 'object'),
     endpoint_auth_mode VARCHAR(16) NOT NULL DEFAULT 'BEARER',
@@ -7662,11 +7676,18 @@ CREATE TABLE IF NOT EXISTS llm_provider_endpoint_t (
         REFERENCES llm_network_zone_t(host_id, network_zone_id) ON DELETE RESTRICT,
     UNIQUE(host_id, endpoint_name),
     CONSTRAINT llm_provider_endpoint_protocol_ck CHECK(
-        provider_protocol IN ('openai_chat','openai_responses','openai_embeddings','anthropic_messages')),
+        provider_protocol IN ('openai_chat','openai_responses','openai_embeddings','anthropic_messages','bedrock_converse')),
     CONSTRAINT llm_provider_endpoint_auth_ck CHECK(
-        endpoint_auth_mode IN ('NONE','BEARER','API_KEY')
+        endpoint_auth_mode IN ('NONE','BEARER','API_KEY','BEDROCK_API_KEY','AWS_SIGV4')
         AND (endpoint_auth_mode = 'API_KEY') = (api_key_header IS NOT NULL)
         AND (api_key_header IS NULL OR api_key_header IN ('authorization','x-api-key'))),
+    CONSTRAINT llm_provider_endpoint_bedrock_ck CHECK(
+        (provider_type = 'aws_bedrock') = (provider_protocol = 'bedrock_converse')
+        AND ((provider_type = 'aws_bedrock'
+              AND aws_region ~ '^[a-z0-9]+(-[a-z0-9]+)+-[0-9]+$'
+              AND endpoint_auth_mode IN ('BEDROCK_API_KEY','AWS_SIGV4'))
+          OR (provider_type <> 'aws_bedrock' AND aws_region IS NULL
+              AND endpoint_auth_mode NOT IN ('BEDROCK_API_KEY','AWS_SIGV4')))),
     CONSTRAINT llm_provider_endpoint_profile_ck CHECK(
         network_profile_mode IN ('PUBLIC_TLS','PRIVATE_TLS','PRIVATE_PLAINTEXT')
         AND network_termination IN ('NATIVE','LIGHT_GATEWAY_SIDECAR')
@@ -7691,17 +7712,18 @@ ALTER TABLE llm_provider_deployment_t
     ADD COLUMN IF NOT EXISTS runtime_capacity JSONB,
     ADD COLUMN IF NOT EXISTS readiness_policy VARCHAR(32),
     ADD COLUMN IF NOT EXISTS expected_sidecar JSONB,
-    ADD COLUMN IF NOT EXISTS qualification_contract JSONB;
+    ADD COLUMN IF NOT EXISTS qualification_contract JSONB,
+    ADD COLUMN IF NOT EXISTS bedrock_policy JSONB;
 
 INSERT INTO llm_provider_endpoint_t(
     host_id, provider_endpoint_id, provider_account_id, endpoint_name,
-    provider_protocol, base_url, endpoint_auth_mode, network_profile_mode,
+    provider_type, provider_protocol, base_url, endpoint_auth_mode, network_profile_mode,
     network_termination, lifecycle_status, active, update_ts, update_user)
 SELECT d.host_id,
        d.provider_deployment_id,
        d.provider_account_id,
        'backfill-' || d.provider_deployment_id::text,
-       d.provider_protocol, rtrim(d.base_url, '/'), 'BEARER', 'PUBLIC_TLS', 'NATIVE',
+       d.provider_type, d.provider_protocol, rtrim(d.base_url, '/'), 'BEARER', 'PUBLIC_TLS', 'NATIVE',
        CASE WHEN d.lifecycle_status = 'ACTIVE' THEN 'ACTIVE' ELSE 'DRAFT' END,
        d.active, d.update_ts, d.update_user
   FROM llm_provider_deployment_t d
@@ -7740,6 +7762,8 @@ ALTER TABLE llm_provider_deployment_t
 ALTER TABLE llm_provider_deployment_t
     DROP CONSTRAINT IF EXISTS llm_provider_deployment_qualification_shape_ck;
 ALTER TABLE llm_provider_deployment_t
+    DROP CONSTRAINT IF EXISTS llm_provider_deployment_bedrock_policy_shape_ck;
+ALTER TABLE llm_provider_deployment_t
     ADD CONSTRAINT llm_provider_deployment_endpoint_fk
         FOREIGN KEY(host_id, provider_endpoint_id)
         REFERENCES llm_provider_endpoint_t(host_id, provider_endpoint_id) ON DELETE RESTRICT,
@@ -7755,14 +7779,24 @@ ALTER TABLE llm_provider_deployment_t
     ADD CONSTRAINT llm_provider_deployment_sidecar_shape_ck CHECK(
         expected_sidecar IS NULL OR jsonb_typeof(expected_sidecar) = 'object'),
     ADD CONSTRAINT llm_provider_deployment_qualification_shape_ck CHECK(
-        qualification_contract IS NULL OR jsonb_typeof(qualification_contract) = 'object');
+        qualification_contract IS NULL OR jsonb_typeof(qualification_contract) = 'object'),
+    ADD CONSTRAINT llm_provider_deployment_bedrock_policy_shape_ck CHECK(
+        (provider_protocol = 'bedrock_converse') = (bedrock_policy IS NOT NULL)
+        AND (bedrock_policy IS NULL OR jsonb_typeof(bedrock_policy) = 'object'));
 
 ALTER TABLE llm_provider_credential_t
     ALTER COLUMN provider_deployment_id DROP NOT NULL,
     ADD COLUMN IF NOT EXISTS provider_endpoint_id UUID,
-    ADD COLUMN IF NOT EXISTS credential_purpose VARCHAR(24) NOT NULL DEFAULT 'ENDPOINT';
+    ADD COLUMN IF NOT EXISTS credential_purpose VARCHAR(24) NOT NULL DEFAULT 'ENDPOINT',
+    ADD COLUMN IF NOT EXISTS environment VARCHAR(32),
+    ADD COLUMN IF NOT EXISTS reasoning_key_id VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS reasoning_key_role VARCHAR(16),
+    ADD COLUMN IF NOT EXISTS reasoning_key_set_generation BIGINT,
+    ADD COLUMN IF NOT EXISTS reasoning_key_set_state VARCHAR(16),
+    ADD COLUMN IF NOT EXISTS reasoning_state_limits JSONB;
 UPDATE llm_provider_credential_t c
-   SET provider_endpoint_id = d.provider_endpoint_id
+   SET provider_endpoint_id = d.provider_endpoint_id,
+       provider_deployment_id = NULL
   FROM llm_provider_deployment_t d
  WHERE c.host_id=d.host_id AND c.provider_deployment_id=d.provider_deployment_id
    AND c.provider_endpoint_id IS NULL;
@@ -7775,13 +7809,27 @@ ALTER TABLE llm_provider_credential_t
         FOREIGN KEY(host_id, provider_endpoint_id)
         REFERENCES llm_provider_endpoint_t(host_id, provider_endpoint_id) ON DELETE RESTRICT,
     ADD CONSTRAINT llm_provider_credential_purpose_ck CHECK(
-        credential_purpose IN ('ENDPOINT','SIDECAR_RUNTIME')),
+        credential_purpose IN ('ENDPOINT','SIDECAR_RUNTIME','REASONING_SEAL')),
     ADD CONSTRAINT llm_provider_credential_owner_ck CHECK(
-        (credential_purpose = 'ENDPOINT' AND provider_endpoint_id IS NOT NULL)
-        OR (credential_purpose = 'SIDECAR_RUNTIME' AND provider_deployment_id IS NOT NULL));
+        (credential_purpose = 'ENDPOINT' AND provider_endpoint_id IS NOT NULL
+            AND provider_deployment_id IS NULL AND environment IS NULL AND reasoning_key_id IS NULL)
+        OR (credential_purpose = 'SIDECAR_RUNTIME' AND provider_deployment_id IS NOT NULL
+            AND provider_endpoint_id IS NULL AND environment IS NULL AND reasoning_key_id IS NULL)
+        OR (credential_purpose = 'REASONING_SEAL' AND provider_endpoint_id IS NULL
+            AND provider_deployment_id IS NULL AND environment IS NOT NULL
+            AND reasoning_key_id IS NOT NULL AND reasoning_key_role IN ('CURRENT','PREVIOUS')
+            AND reasoning_key_set_generation > 0
+            AND reasoning_key_set_state IN ('PREPARED','ACTIVE')
+            AND jsonb_typeof(reasoning_state_limits) = 'object'));
 CREATE UNIQUE INDEX IF NOT EXISTS llm_provider_credential_endpoint_version_uq
     ON llm_provider_credential_t(host_id, provider_endpoint_id, credential_version)
     WHERE provider_endpoint_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS llm_reasoning_seal_role_generation_uq
+    ON llm_provider_credential_t(host_id,environment,reasoning_key_set_generation,reasoning_key_role)
+    WHERE credential_purpose='REASONING_SEAL' AND active IS TRUE;
+CREATE UNIQUE INDEX IF NOT EXISTS llm_reasoning_seal_key_id_uq
+    ON llm_provider_credential_t(host_id,environment,reasoning_key_id)
+    WHERE credential_purpose='REASONING_SEAL' AND active IS TRUE;
 
 ALTER TABLE llm_pricing_version_t
     ADD COLUMN IF NOT EXISTS pricing_basis VARCHAR(24) NOT NULL DEFAULT 'EXTERNAL_PROVIDER';
@@ -10873,6 +10921,31 @@ CREATE TABLE workflow_tool_binding_t (
 );
 CREATE UNIQUE INDEX workflow_tool_binding_active_tool_uq
     ON workflow_tool_binding_t(host_id,tool_id) WHERE active;
+
+-- A Tool granted to a workflow is independent from a Tool implemented by a workflow.
+CREATE TABLE workflow_tool_grant_t (
+    host_id UUID NOT NULL,
+    grant_id UUID NOT NULL,
+    tool_id UUID NOT NULL,
+    wf_def_id UUID NOT NULL,
+    workflow_version VARCHAR(64),
+    tool_version VARCHAR(20) NOT NULL,
+    lightapi_digest VARCHAR(71) NOT NULL CHECK(lightapi_digest ~ '^sha256:[0-9a-f]{64}$'),
+    allowed_environments TEXT[] NOT NULL CHECK(cardinality(allowed_environments) > 0),
+    aggregate_version BIGINT NOT NULL DEFAULT 1 CHECK(aggregate_version > 0),
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    update_user VARCHAR(126) NOT NULL DEFAULT SESSION_USER,
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(host_id,grant_id),
+    FOREIGN KEY(host_id,tool_id) REFERENCES tool_t(host_id,tool_id) ON DELETE RESTRICT,
+    FOREIGN KEY(host_id,wf_def_id) REFERENCES wf_definition_t(host_id,wf_def_id) ON DELETE RESTRICT,
+    FOREIGN KEY(host_id,wf_def_id,workflow_version) REFERENCES wf_definition_version_t(host_id,wf_def_id,version) ON DELETE RESTRICT
+);
+CREATE UNIQUE INDEX workflow_tool_grant_active_scope_uq
+    ON workflow_tool_grant_t(host_id,tool_id,wf_def_id)
+    WHERE active;
+CREATE INDEX workflow_tool_grant_callable_idx
+    ON workflow_tool_grant_t(host_id,wf_def_id,workflow_version,active,tool_id);
 
 CREATE TABLE workflow_tool_dependency_t (
     host_id UUID NOT NULL,
