@@ -11836,6 +11836,17 @@ CREATE INDEX gateway_tool_binding_source_idx
 
 COMMIT;
 -- END INLINED patch_20260813_02_gateway_tool_publication.sql
+-- BEGIN WORKFLOW EVENT FORK COMPATIBILITY
+BEGIN;
+
+-- Event-started workflows own a process_info_t row but intentionally do not
+-- fabricate a workflow-backed MCP invocation. The existing process FK remains
+-- the durable ownership boundary for both invocation and event entry points.
+ALTER TABLE workflow_fork_join_t
+    DROP CONSTRAINT IF EXISTS workflow_fork_join_t_host_id_workflow_instance_id_fkey;
+
+COMMIT;
+-- END WORKFLOW EVENT FORK COMPATIBILITY
 
 
 -- create a view to simplify the foreign key relationship.
