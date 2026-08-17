@@ -188,6 +188,8 @@ services:
       - "8436:8436"
     env_file:
       - ./light-workflow-rust/config/light-workflow.env
+    volumes:
+      - ./light-gateway-rust/config/ca.pem:/config/ca.pem:ro
     environment:
       LIGHT_PORTAL_AUTHORIZATION: "${LIGHT_WORKFLOW_LIGHT_PORTAL_AUTHORIZATION:-Bearer eyJhbGciOiJSUzI1NiIsImtpZCI6IkFacDAyTUN1Y3J1WmZGSmJ5eUZ3dWcifQ.eyJpc3MiOiJ1cm46Y29tOm5ldHdvcmtudDpvYXV0aDI6djEiLCJhdWQiOiJ1cm46Y29tLm5ldHdvcmtudCIsImV4cCI6MjA5NTEyNDYwNCwianRpIjoidlBoMk9FeWdTT1d2QVRGZnloVzhKUSIsImlhdCI6MTc3OTc2NDYwNCwibmJmIjoxNzc5NzY0NDg0LCJ2ZXIiOiIxLjAiLCJjaWQiOiIwMTllNjIzYi1mZDcyLTdhNDMtYmJjYy04YmJhNTJiMTU5NTMiLCJzY3AiOlsicG9ydGFsLnIiLCJwb3J0YWwudyJdLCJob3N0IjoiMDE5NjRiMDUtNTUyYS03YzRiLTkxODQtNjg1N2U3ZjNkYzVmIiwic2lkIjoiY29tLm5ldHdvcmtudC53b3JrZmxvdy0xLjAuMCJ9.bPDJLqUkODxQkIYeNN89t7fEjg2s_wEcHD6iY6ogVTNLCt_-mv_jmRyQ_aQZxnH9AzmzlO8xdQLjJeXQ2LvzpbNU7diuQyDDDkhYU-25b10tJWZ30eDOZ8xiTqMp3Yrt9heT_H6yXXLIXugmBVJR3-mdTXvoPUyhzDMz_Zwu-vtYKQaFPcog8H9K92Wk3uut4l0iKinCPob4LQJF7nxtjXZkWOJkWao9qLax000i2JstSexpzROTRMVVQZsqevLTZ0R0MEkFEQUUB2PfrmUNj3RzTS3xqUrbO9t6l5JPHfSuHjxQ330PIRqxIkX5wOZnxKoQkwOcsFLTVybMtvPgrA}"
       RUST_LOG: ${RUST_LOG:-light_workflow=debug,info}

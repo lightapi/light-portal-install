@@ -282,3 +282,8 @@ INSTANCE_CLONE_PLAN_HMAC_KEY_ID=v1
 Never commit the populated `.env`, print a real key in compose output, or store
 it in a portal configuration snapshot. Command and query must use the same key
 and key identifier.
+
+Each service has one `LIGHT_PORTAL_AUTHORIZATION` token for its own identity.
+When `light-gateway` invokes `light-workflow`, it sends its existing token in
+`X-Scope-Token` while preserving the original user JWT in `Authorization`.
+`light-workflow` uses its own independent token for downstream API calls.
