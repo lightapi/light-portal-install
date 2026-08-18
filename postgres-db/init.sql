@@ -4,6 +4,7 @@ CREATE DATABASE configserver;
 -- Enable pgvector extension
 CREATE EXTENSION IF NOT EXISTS vector;
 
+DROP TABLE IF EXISTS cascade_relationship_policy_t CASCADE;
 DROP TABLE IF EXISTS event_replay_retention_log_t CASCADE;
 DROP TABLE IF EXISTS event_replay_audit_t CASCADE;
 DROP TABLE IF EXISTS event_replay_action_request_t CASCADE;
@@ -510,6 +511,34 @@ CREATE TABLE dead_letter_queue (
   payload JSONB,
   exception TEXT,
   created_dt TIMESTAMP DEFAULT NOW()
+);
+
+-- Release-owned policy for projection cascades triggered by parent soft deletes.
+-- Column shape validates a policy; it never selects a destructive action.
+CREATE TABLE cascade_relationship_policy_t (
+    parent_schema       VARCHAR(63) NOT NULL DEFAULT 'public',
+    parent_table        VARCHAR(63) NOT NULL,
+    child_schema        VARCHAR(63) NOT NULL DEFAULT 'public',
+    child_table         VARCHAR(63) NOT NULL,
+    constraint_name     VARCHAR(63) NOT NULL,
+    delete_action       VARCHAR(16) NOT NULL,
+    restore_action      VARCHAR(16) NOT NULL DEFAULT 'NONE',
+    policy_description  VARCHAR(1024),
+    update_user         VARCHAR(255) NOT NULL DEFAULT SESSION_USER,
+    update_ts           TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (
+        parent_schema,
+        parent_table,
+        child_schema,
+        child_table,
+        constraint_name
+    ),
+    CHECK (delete_action IN ('SOFT_DELETE', 'HARD_DELETE', 'IGNORE')),
+    CHECK (restore_action IN ('RESTORE', 'NONE')),
+    CHECK (
+        (delete_action = 'SOFT_DELETE' AND restore_action = 'RESTORE')
+        OR (delete_action IN ('HARD_DELETE', 'IGNORE') AND restore_action = 'NONE')
+    )
 );
 
 CREATE TABLE scheduler_lock_t (
@@ -2734,12 +2763,12 @@ CREATE INDEX idx_auth_session_t_auth_host_client_provider ON auth_session_t(auth
 ALTER TABLE auth_refresh_token_t
     ADD CONSTRAINT auth_refresh_token_session_fk
     FOREIGN KEY (host_id, session_id)
-    REFERENCES auth_session_t(host_id, session_id);
+    REFERENCES auth_session_t(host_id, session_id) ON DELETE CASCADE;
 
 ALTER TABLE auth_code_t
     ADD CONSTRAINT auth_code_session_fk
     FOREIGN KEY (host_id, session_id)
-    REFERENCES auth_session_t(host_id, session_id);
+    REFERENCES auth_session_t(host_id, session_id) ON DELETE CASCADE;
 
 CREATE TABLE auth_session_audit_t (
     audit_id             UUID NOT NULL,
@@ -11903,9 +11932,331 @@ ALTER TABLE workflow_fork_join_t
 
 COMMIT;
 -- END WORKFLOW EVENT FORK COMPATIBILITY
+-- BEGIN WORKFLOW USER AUTHORIZATION PASS THROUGH
+BEGIN;
+
+-- The current end-user bearer credential is kept separate from workflow
+-- definitions, inputs, events, and snapshots. It is used only by a
+-- workflow-backed invocation when dispatching a protected API request.
+-- An active pre-upgrade invocation cannot be backfilled safely because its
+-- original user credential was never persisted. Drain or cancel it first.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+          FROM workflow_invocation_t
+         WHERE state NOT IN ('CANCELLED','COMPLETED','FAILED')
+    ) THEN
+        RAISE EXCEPTION
+            'active workflow invocations must be drained or cancelled before adding user authorization pass-through';
+    END IF;
+END $$;
+
+ALTER TABLE workflow_invocation_t
+    ADD COLUMN user_authorization TEXT
+        CHECK(user_authorization IS NULL OR user_authorization ~ '^Bearer [^[:space:]]+$'),
+    ADD COLUMN user_authorization_exp BIGINT
+        CHECK(user_authorization_exp IS NULL OR user_authorization_exp > 0);
+
+COMMENT ON COLUMN workflow_invocation_t.user_authorization IS
+    'Ephemeral initiating-user bearer credential for workflow HTTP calls; cleared at terminal state';
+COMMENT ON COLUMN workflow_invocation_t.user_authorization_exp IS
+    'JWT expiration used to prevent an older lifecycle credential from replacing a newer one';
+
+COMMIT;
+-- END WORKFLOW USER AUTHORIZATION PASS THROUGH
 
 
--- create a view to simplify the foreign key relationship.
+\set ON_ERROR_STOP on
+
+-- Policy-driven cascade deletion.
+--
+-- Every relationship is explicitly classified in cascade_relationship_policy_t.
+-- The generic trigger contains no domain table names.
+
+BEGIN;
+
+CREATE TABLE IF NOT EXISTS cascade_relationship_policy_t (
+    parent_schema       VARCHAR(63) NOT NULL DEFAULT 'public',
+    parent_table        VARCHAR(63) NOT NULL,
+    child_schema        VARCHAR(63) NOT NULL DEFAULT 'public',
+    child_table         VARCHAR(63) NOT NULL,
+    constraint_name     VARCHAR(63) NOT NULL,
+    delete_action       VARCHAR(16) NOT NULL,
+    restore_action      VARCHAR(16) NOT NULL DEFAULT 'NONE',
+    policy_description  VARCHAR(1024),
+    update_user         VARCHAR(255) NOT NULL DEFAULT SESSION_USER,
+    update_ts           TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (
+        parent_schema,
+        parent_table,
+        child_schema,
+        child_table,
+        constraint_name
+    ),
+    CHECK (delete_action IN ('SOFT_DELETE', 'HARD_DELETE', 'IGNORE')),
+    CHECK (restore_action IN ('RESTORE', 'NONE')),
+    CHECK (
+        (delete_action = 'SOFT_DELETE' AND restore_action = 'RESTORE')
+        OR (delete_action IN ('HARD_DELETE', 'IGNORE') AND restore_action = 'NONE')
+    )
+);
+
+DROP VIEW IF EXISTS cascade_relationships_v;
+
+ALTER TABLE cascade_relationship_policy_t
+    DROP COLUMN IF EXISTS enabled;
+
+CREATE TEMP TABLE cascade_relationship_policy_seed_t
+(LIKE cascade_relationship_policy_t INCLUDING DEFAULTS INCLUDING CONSTRAINTS)
+ON COMMIT DROP;
+
+INSERT INTO cascade_relationship_policy_seed_t (
+    parent_schema,
+    parent_table,
+    child_schema,
+    child_table,
+    constraint_name,
+    delete_action,
+    restore_action,
+    policy_description
+)
+VALUES
+('public', 'api_endpoint_scope_t', 'public', 'app_api_t', 'app_api_t_host_id_endpoint_id_scope_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'api_endpoint_t', 'public', 'api_endpoint_rule_t', 'endpoint_fk', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'api_endpoint_t', 'public', 'api_endpoint_scope_t', 'api_ver_fk', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'api_endpoint_t', 'public', 'attribute_col_filter_t', 'attribute_col_filter_t_host_id_endpoint_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'api_endpoint_t', 'public', 'attribute_permission_t', 'attribute_permission_t_host_id_endpoint_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'api_endpoint_t', 'public', 'attribute_row_filter_t', 'attribute_row_filter_t_host_id_endpoint_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'api_endpoint_t', 'public', 'gateway_tool_binding_t', 'gateway_tool_binding_t_host_id_endpoint_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'api_endpoint_t', 'public', 'group_col_filter_t', 'group_col_filter_t_host_id_endpoint_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'api_endpoint_t', 'public', 'group_permission_t', 'group_permission_t_host_id_endpoint_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'api_endpoint_t', 'public', 'group_row_filter_t', 'group_row_filter_t_host_id_endpoint_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'api_endpoint_t', 'public', 'position_col_filter_t', 'position_col_filter_t_host_id_endpoint_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'api_endpoint_t', 'public', 'position_permission_t', 'position_permission_t_host_id_endpoint_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'api_endpoint_t', 'public', 'position_row_filter_t', 'position_row_filter_t_host_id_endpoint_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'api_endpoint_t', 'public', 'role_col_filter_t', 'role_col_filter_t_host_id_endpoint_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'api_endpoint_t', 'public', 'role_permission_t', 'role_permission_t_host_id_endpoint_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'api_endpoint_t', 'public', 'role_row_filter_t', 'role_row_filter_t_host_id_endpoint_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'api_endpoint_t', 'public', 'user_col_filter_t', 'user_col_filter_t_host_id_endpoint_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'api_endpoint_t', 'public', 'user_permission_t', 'user_permission_t_host_id_endpoint_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'api_endpoint_t', 'public', 'user_row_filter_t', 'user_row_filter_t_host_id_endpoint_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'api_endpoint_t', 'public', 'tool_t', 'tool_t_host_id_endpoint_id_fkey', 'IGNORE', 'NONE', 'Tool lifecycle is command-owned until it implements the complete soft-delete audit contract'),
+    ('public', 'api_t', 'public', 'api_version_t', 'api_version_t_host_id_api_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'api_t', 'public', 'auth_provider_api_t', 'auth_provider_api_t_host_id_api_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'api_version_t', 'public', 'api_endpoint_t', 'api_endpoint_t_host_id_api_version_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'api_version_t', 'public', 'agent_definition_t', 'agent_definition_api_version_fk', 'IGNORE', 'NONE', 'Agent definition lifecycle is command-owned and independently audited'),
+    ('public', 'api_version_t', 'public', 'auth_client_owner_t', 'auth_client_owner_t_host_id_api_version_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'api_version_t', 'public', 'auth_client_t', 'auth_client_t_host_id_api_version_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'api_version_t', 'public', 'gateway_tool_binding_t', 'gateway_tool_binding_t_host_id_api_version_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'api_version_t', 'public', 'gateway_tool_publication_t', 'gateway_tool_publication_t_host_id_scope_api_version_id_fkey', 'IGNORE', 'NONE', 'Publication lifecycle is immutable and command-owned'),
+    ('public', 'api_version_t', 'public', 'instance_api_t', 'instance_api_t_host_id_api_version_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'app_t', 'public', 'app_api_t', 'app_fk', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'app_t', 'public', 'auth_client_owner_t', 'auth_client_owner_t_host_id_app_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'app_t', 'public', 'auth_client_t', 'auth_client_t_host_id_app_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'app_t', 'public', 'instance_app_t', 'instance_app_t_host_id_app_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'attribute_t', 'public', 'attribute_col_filter_t', 'attribute_col_filter_t_host_id_attribute_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'attribute_t', 'public', 'attribute_permission_t', 'attribute_permission_t_host_id_attribute_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'attribute_t', 'public', 'attribute_row_filter_t', 'attribute_row_filter_t_host_id_attribute_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'attribute_t', 'public', 'attribute_user_t', 'attribute_user_t_host_id_attribute_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'auth_client_owner_t', 'public', 'auth_client_t', 'auth_client_t_host_id_owner_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'auth_client_t', 'public', 'auth_client_token_t', 'auth_client_token_t_host_id_client_id_fkey', 'HARD_DELETE', 'NONE', 'Non-restorable authentication runtime state'),
+    ('public', 'auth_client_t', 'public', 'auth_provider_client_t', 'auth_provider_client_t_host_id_client_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'auth_client_t', 'public', 'auth_ref_token_t', 'auth_ref_token_t_host_id_client_id_fkey', 'HARD_DELETE', 'NONE', 'Client deactivation revokes stored bearer JWT reference tokens'),
+    ('public', 'auth_provider_client_t', 'public', 'auth_code_t', 'auth_code_t_auth_host_id_client_id_provider_id_fkey', 'HARD_DELETE', 'NONE', 'Non-restorable authentication runtime state'),
+    ('public', 'auth_provider_client_t', 'public', 'auth_refresh_token_t', 'auth_refresh_token_t_auth_host_id_client_id_provider_id_fkey', 'HARD_DELETE', 'NONE', 'Non-restorable authentication runtime state'),
+    ('public', 'auth_provider_client_t', 'public', 'auth_session_t', 'auth_session_t_auth_host_id_client_id_provider_id_fkey', 'HARD_DELETE', 'NONE', 'Provider-client retirement revokes non-restorable authorization sessions'),
+    ('public', 'auth_provider_t', 'public', 'auth_provider_api_t', 'auth_provider_api_t_host_id_provider_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'auth_provider_t', 'public', 'auth_provider_client_t', 'auth_provider_client_t_host_id_provider_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'auth_provider_t', 'public', 'auth_provider_key_t', 'auth_provider_key_t_host_id_provider_id_fkey', 'IGNORE', 'NONE', 'Preserve keys across parent-driven provider retirement; runtime requires an active provider'),
+    ('public', 'category_t', 'public', 'category_t', 'category_t_parent_category_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'category_t', 'public', 'entity_category_t', 'entity_category_t_category_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'config_profile_t', 'public', 'config_profile_config_t', 'config_profile_config_t_profile_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'config_profile_t', 'public', 'config_profile_property_t', 'config_profile_property_t_profile_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'config_profile_t', 'public', 'product_version_config_profile_t', 'product_version_config_profile_t_profile_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'config_property_t', 'public', 'config_profile_property_t', 'config_profile_property_t_property_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'config_property_t', 'public', 'deployment_instance_property_t', 'deployment_instance_property_t_property_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'config_property_t', 'public', 'environment_property_t', 'environment_property_t_property_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'config_property_t', 'public', 'gateway_tool_publication_t', 'gateway_tool_publication_t_property_id_fkey', 'IGNORE', 'NONE', 'Publication lifecycle is immutable and command-owned'),
+    ('public', 'config_property_t', 'public', 'instance_api_property_t', 'instance_api_property_t_property_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'config_property_t', 'public', 'instance_app_api_property_t', 'config_property_fk1', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'config_property_t', 'public', 'instance_app_property_t', 'instance_app_property_t_property_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'config_property_t', 'public', 'instance_property_t', 'config_property_fkv1', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'config_property_t', 'public', 'llm_gateway_instance_property_ownership_t', 'llm_gateway_instance_property_ownership_t_property_id_fkey', 'IGNORE', 'NONE', 'Ownership lifecycle is release-managed and lacks the soft-delete audit contract'),
+    ('public', 'config_property_t', 'public', 'product_property_t', 'config_property_fkv2', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'config_property_t', 'public', 'product_version_config_property_t', 'product_version_config_property_t_property_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'config_property_t', 'public', 'product_version_property_t', 'product_version_property_t_property_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'config_t', 'public', 'chain_handler_t', 'configuration_fk', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'config_t', 'public', 'config_profile_config_t', 'config_profile_config_t_config_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'config_t', 'public', 'config_property_t', 'config_fkv2', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'config_t', 'public', 'product_version_config_t', 'product_version_config_t_config_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'customer_t', 'public', 'customer_t', 'customer_t_host_id_referral_id_fkey', 'IGNORE', 'NONE', 'Referral topology does not own customer identity lifecycle'),
+    ('public', 'deployment_instance_t', 'public', 'deployment_instance_property_t', 'deployment_instance_property__host_id_deployment_instance__fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'deployment_instance_t', 'public', 'deployment_t', 'deployment_t_host_id_deployment_instance_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'deployment_t', 'public', 'config_snapshot_t', 'config_snapshot_t_host_id_deployment_id_fkey', 'IGNORE', 'NONE', 'Immutable configuration snapshots are retained independently'),
+    ('public', 'employee_t', 'public', 'employee_t', 'employee_t_host_id_manager_id_fkey', 'IGNORE', 'NONE', 'Management topology does not own employee identity lifecycle'),
+    ('public', 'group_t', 'public', 'group_col_filter_t', 'group_col_filter_t_host_id_group_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'group_t', 'public', 'group_permission_t', 'group_permission_t_host_id_group_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'group_t', 'public', 'group_row_filter_t', 'group_row_filter_t_host_id_group_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'group_t', 'public', 'group_user_t', 'group_user_t_host_id_group_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'host_t', 'public', 'auth_client_owner_t', 'auth_client_owner_t_host_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'host_t', 'public', 'auth_client_t', 'auth_client_t_host_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'host_t', 'public', 'auth_code_t', 'auth_code_t_host_id_fkey', 'HARD_DELETE', 'NONE', 'Tenant host deactivation revokes authorization codes even when auth_host_id differs'),
+    ('public', 'host_t', 'public', 'auth_provider_t', 'auth_provider_t_host_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'host_t', 'public', 'auth_ref_token_t', 'auth_ref_token_t_host_id_fkey', 'HARD_DELETE', 'NONE', 'Host deactivation revokes stored bearer JWT reference tokens'),
+    ('public', 'host_t', 'public', 'auth_refresh_token_t', 'auth_refresh_token_t_host_id_fkey', 'HARD_DELETE', 'NONE', 'Tenant host deactivation revokes refresh tokens even when auth_host_id differs'),
+    ('public', 'host_t', 'public', 'agent_memory_bank_t', 'agent_memory_bank_t_host_id_fkey', 'IGNORE', 'NONE', 'Memory-bank lifecycle is independently retained and lacks the soft-delete audit contract'),
+    ('public', 'host_t', 'public', 'agent_model_rate_t', 'agent_model_rate_t_host_id_fkey', 'IGNORE', 'NONE', 'Immutable agent model rate history is retained independently'),
+    ('public', 'host_t', 'public', 'agent_policy_snapshot_t', 'agent_policy_snapshot_t_host_id_fkey', 'IGNORE', 'NONE', 'Immutable agent policy snapshots are retained independently'),
+    ('public', 'host_t', 'public', 'agent_session_t', 'agent_session_t_host_id_fkey', 'IGNORE', 'NONE', 'Agent session lifecycle is command-owned and status-driven'),
+    ('public', 'host_t', 'public', 'auth_session_audit_t', 'auth_session_audit_t_auth_host_id_fkey', 'IGNORE', 'NONE', 'Authentication audit history is retained independently'),
+    ('public', 'host_t', 'public', 'auth_session_audit_t', 'auth_session_audit_t_host_id_fkey', 'IGNORE', 'NONE', 'Authentication audit history is retained independently'),
+    ('public', 'host_t', 'public', 'auth_session_t', 'auth_session_t_host_id_fkey', 'HARD_DELETE', 'NONE', 'Tenant host deactivation revokes non-restorable authorization sessions'),
+    ('public', 'host_t', 'public', 'config_snapshot_t', 'config_snapshot_t_host_id_fkey', 'IGNORE', 'NONE', 'Immutable configuration snapshots are retained independently'),
+    ('public', 'host_t', 'public', 'environment_property_t', 'host_fk', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'host_t', 'public', 'event_failure_transaction_t', 'event_failure_transaction_host_fk', 'IGNORE', 'NONE', 'Failure evidence is retained independently'),
+    ('public', 'host_t', 'public', 'event_projection_worker_t', 'event_projection_worker_host_fk', 'IGNORE', 'NONE', 'Projection worker lifecycle is operationally managed'),
+    ('public', 'host_t', 'public', 'event_replay_action_request_t', 'event_replay_action_request_host_fk', 'IGNORE', 'NONE', 'Replay action audit history is retained independently'),
+    ('public', 'host_t', 'public', 'event_replay_audit_t', 'event_replay_audit_host_fk', 'IGNORE', 'NONE', 'Replay audit history is retained independently'),
+    ('public', 'host_t', 'public', 'event_replay_request_t', 'event_replay_request_host_fk', 'IGNORE', 'NONE', 'Replay request lifecycle is operationally managed'),
+    ('public', 'host_t', 'public', 'event_replay_retention_log_t', 'event_replay_retention_log_host_fk', 'IGNORE', 'NONE', 'Retention audit history is retained independently'),
+    ('public', 'host_t', 'public', 'instance_clone_request_t', 'instance_clone_request_host_fk', 'IGNORE', 'NONE', 'Clone request lifecycle is command-owned and status-driven'),
+    ('public', 'host_t', 'public', 'instance_graph_revision_t', 'instance_graph_revision_host_fk', 'IGNORE', 'NONE', 'Graph revision coordination state is retained independently'),
+    ('public', 'host_t', 'public', 'knowledge_base_import_t', 'knowledge_base_import_t_host_id_fkey', 'IGNORE', 'NONE', 'Knowledge import lifecycle is command-owned and status-driven'),
+    ('public', 'host_t', 'public', 'knowledge_base_manifest_export_t', 'knowledge_base_manifest_export_t_host_id_fkey', 'IGNORE', 'NONE', 'Knowledge export history is retained independently'),
+    ('public', 'host_t', 'public', 'knowledge_base_t', 'knowledge_base_t_host_id_fkey', 'IGNORE', 'NONE', 'Knowledge base lifecycle is command-owned'),
+    ('public', 'host_t', 'public', 'knowledge_embedding_artifact_t', 'knowledge_embedding_artifact_t_owner_host_id_fkey', 'IGNORE', 'NONE', 'Embedding artifacts are immutable and retained independently'),
+    ('public', 'host_t', 'public', 'knowledge_query_audit_t', 'knowledge_query_audit_t_consumer_host_id_fkey', 'IGNORE', 'NONE', 'Knowledge query audit history is retained independently'),
+    ('public', 'host_t', 'public', 'knowledge_consumer_quota_t', 'knowledge_consumer_quota_t_consumer_host_id_fkey', 'IGNORE', 'NONE', 'Quota lifecycle is independently retained and lacks the soft-delete audit contract'),
+    ('public', 'host_t', 'public', 'knowledge_embedding_profile_t', 'knowledge_embedding_profile_t_host_id_fkey', 'IGNORE', 'NONE', 'Embedding profile lifecycle is command-owned until it implements the complete soft-delete audit contract'),
+    ('public', 'host_t', 'public', 'knowledge_ingestion_policy_t', 'knowledge_ingestion_policy_t_host_id_fkey', 'IGNORE', 'NONE', 'Ingestion policy lifecycle is command-owned until it implements the complete soft-delete audit contract'),
+    ('public', 'host_t', 'public', 'knowledge_retrieval_profile_t', 'knowledge_retrieval_profile_t_host_id_fkey', 'IGNORE', 'NONE', 'Retrieval profile lifecycle is command-owned until it implements the complete soft-delete audit contract'),
+    ('public', 'host_t', 'public', 'knowledge_runtime_authorization_t', 'knowledge_runtime_authorization_t_consumer_host_id_fkey', 'IGNORE', 'NONE', 'Runtime authorization lifecycle is independently enforced and lacks the soft-delete audit contract'),
+    ('public', 'host_t', 'public', 'llm_gateway_publication_t', 'llm_gateway_publication_t_host_id_fkey', 'IGNORE', 'NONE', 'Publication lifecycle is immutable and command-owned'),
+    ('public', 'host_t', 'public', 'llm_model_policy_t', 'llm_model_policy_t_host_id_fkey', 'IGNORE', 'NONE', 'Model policy lifecycle is command-owned until it implements the complete soft-delete audit contract'),
+    ('public', 'host_t', 'public', 'llm_model_registration_t', 'llm_model_registration_t_host_id_fkey', 'IGNORE', 'NONE', 'Model registration lifecycle is command-owned until it implements the complete soft-delete audit contract'),
+    ('public', 'host_t', 'public', 'llm_network_zone_t', 'llm_network_zone_t_host_id_fkey', 'IGNORE', 'NONE', 'Network-zone lifecycle is command-owned until it implements the complete soft-delete audit contract'),
+    ('public', 'host_t', 'public', 'llm_projection_resource_t', 'llm_projection_resource_t_host_id_fkey', 'IGNORE', 'NONE', 'Projection resources are immutable and release-owned'),
+    ('public', 'host_t', 'public', 'llm_provider_account_t', 'llm_provider_account_t_host_id_fkey', 'IGNORE', 'NONE', 'Provider-account lifecycle is command-owned until it implements the complete soft-delete audit contract'),
+    ('public', 'host_t', 'public', 'llm_public_alias_t', 'llm_public_alias_t_host_id_fkey', 'IGNORE', 'NONE', 'Public-alias lifecycle is command-owned until it implements the complete soft-delete audit contract'),
+    ('public', 'host_t', 'public', 'message_t', 'message_host_fk', 'IGNORE', 'NONE', 'Message history is retained independently'),
+    ('public', 'host_t', 'public', 'notification_t', 'notification_t_host_id_fkey', 'IGNORE', 'NONE', 'Notification history is retained independently'),
+    ('public', 'host_t', 'public', 'pii_token_vault_t', 'pii_token_vault_t_host_id_fkey', 'IGNORE', 'NONE', 'PII vault records remain retained and access-controlled while a host is inactive'),
+    ('public', 'host_t', 'public', 'private_conversation_t', 'private_conversation_t_host_id_fkey', 'IGNORE', 'NONE', 'Conversation history is retained independently'),
+    ('public', 'host_t', 'public', 'product_version_t', 'host_id_fk', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'host_t', 'public', 'role_t', 'role_t_host_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'host_t', 'public', 'runner_session_t', 'runner_session_t_host_id_fkey', 'IGNORE', 'NONE', 'Runner session lifecycle is operationally managed'),
+    ('public', 'host_t', 'public', 'skill_package_t', 'skill_package_t_host_id_fkey', 'IGNORE', 'NONE', 'Skill package lifecycle is command-owned'),
+    ('public', 'host_t', 'public', 'user_host_t', 'user_host_t_host_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'host_t', 'public', 'workflow_endpoint_target_t', 'workflow_endpoint_target_t_host_id_fkey', 'IGNORE', 'NONE', 'Workflow endpoint lifecycle is command-owned until it implements the complete soft-delete audit contract'),
+    ('public', 'host_t', 'public', 'workflow_execution_policy_t', 'workflow_execution_policy_t_host_id_fkey', 'IGNORE', 'NONE', 'Workflow execution policy lifecycle is command-owned'),
+    ('public', 'host_t', 'public', 'workflow_executor_tenant_turn_t', 'workflow_executor_tenant_turn_t_host_id_fkey', 'IGNORE', 'NONE', 'Workflow executor turn history is retained independently'),
+    ('public', 'instance_api_t', 'public', 'instance_api_path_prefix_t', 'instance_api_path_prefix_t_host_id_instance_api_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'instance_api_t', 'public', 'instance_api_property_t', 'instance_api_property_t_host_id_instance_api_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'instance_api_t', 'public', 'instance_app_api_t', 'instance_app_api_t_host_id_instance_api_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'instance_app_api_t', 'public', 'instance_app_api_property_t', 'instance_app_api_property_fk', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'instance_app_t', 'public', 'instance_app_api_t', 'instance_app_api_t_host_id_instance_app_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'instance_app_t', 'public', 'instance_app_property_t', 'instance_app_property_t_host_id_instance_app_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'instance_t', 'public', 'auth_client_owner_t', 'auth_client_owner_t_host_id_instance_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'instance_t', 'public', 'config_snapshot_t', 'config_snapshot_t_host_id_instance_id_fkey', 'IGNORE', 'NONE', 'Immutable configuration snapshots are retained independently'),
+    ('public', 'instance_t', 'public', 'deployment_instance_t', 'deployment_instance_t_host_id_instance_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'instance_t', 'public', 'gateway_tool_binding_t', 'gateway_tool_binding_t_host_id_instance_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'instance_t', 'public', 'gateway_tool_publication_t', 'gateway_tool_publication_t_host_id_instance_id_fkey', 'IGNORE', 'NONE', 'Publication lifecycle is immutable and command-owned'),
+    ('public', 'instance_t', 'public', 'instance_api_t', 'instance_api_t_host_id_instance_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'instance_t', 'public', 'instance_app_t', 'instance_app_t_host_id_instance_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'instance_t', 'public', 'instance_file_t', 'instance_file_fk', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'instance_t', 'public', 'instance_property_t', 'instance_fkv2', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'instance_t', 'public', 'llm_gateway_instance_property_ownership_t', 'llm_gateway_instance_property_ownershi_host_id_instance_id_fkey', 'IGNORE', 'NONE', 'Ownership lifecycle is release-managed and lacks the soft-delete audit contract'),
+    ('public', 'instance_t', 'public', 'llm_gateway_instance_publication_t', 'llm_gateway_instance_publication_t_host_id_instance_id_fkey', 'IGNORE', 'NONE', 'Instance publication lifecycle is immutable and command-owned'),
+    ('public', 'org_t', 'public', 'host_t', 'host_t_domain_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'pipeline_t', 'public', 'product_version_pipeline_t', 'product_version_pipeline_t_host_id_pipeline_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'platform_t', 'public', 'pipeline_t', 'pipeline_t_host_id_platform_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'position_t', 'public', 'position_col_filter_t', 'position_col_filter_t_host_id_position_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'position_t', 'public', 'position_permission_t', 'position_permission_t_host_id_position_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'position_t', 'public', 'position_row_filter_t', 'position_row_filter_t_host_id_position_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'position_t', 'public', 'user_position_t', 'user_position_t_host_id_position_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'product_version_t', 'public', 'instance_t', 'product_version_fk', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'product_version_t', 'public', 'product_version_config_profile_t', 'product_version_config_profile__host_id_product_version_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'product_version_t', 'public', 'product_version_config_property_t', 'product_version_config_property_host_id_product_version_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'product_version_t', 'public', 'product_version_config_t', 'product_version_config_t_host_id_product_version_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'product_version_t', 'public', 'product_version_environment_t', 'product_version_environment_t_host_id_product_version_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'product_version_t', 'public', 'product_version_pipeline_t', 'product_version_pipeline_t_host_id_product_version_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'product_version_t', 'public', 'product_version_property_t', 'product_version_property_t_host_id_product_version_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'ref_table_t', 'public', 'ref_value_t', 'ref_value_t_table_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'ref_value_t', 'public', 'relation_t', 'relation_t_value_id_from_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'ref_value_t', 'public', 'relation_t', 'relation_t_value_id_to_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'ref_value_t', 'public', 'value_locale_t', 'value_locale_t_value_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'relation_type_t', 'public', 'relation_t', 'relation_t_relation_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'role_t', 'public', 'role_col_filter_t', 'role_col_filter_t_host_id_role_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'role_t', 'public', 'role_permission_t', 'role_permission_t_host_id_role_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'role_t', 'public', 'role_row_filter_t', 'role_row_filter_t_host_id_role_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'role_t', 'public', 'role_user_t', 'role_user_t_host_id_role_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'rule_t', 'public', 'api_endpoint_rule_t', 'rule_fk', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'rule_t', 'public', 'rule_test_case_t', 'rule_test_case_rule_fk', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'tag_t', 'public', 'entity_tag_t', 'entity_tag_t_tag_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'user_host_t', 'public', 'customer_t', 'customer_t_host_id_user_id_fkey', 'IGNORE', 'NONE', 'Preserve recoverable customer identity while host membership is inactive'),
+    ('public', 'user_host_t', 'public', 'employee_t', 'employee_t_host_id_user_id_fkey', 'IGNORE', 'NONE', 'Preserve recoverable employee identity while host membership is inactive'),
+    ('public', 'user_t', 'public', 'attribute_user_t', 'attribute_user_t_user_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'user_t', 'public', 'agent_memory_bank_t', 'agent_memory_bank_t_user_id_fkey', 'IGNORE', 'NONE', 'Memory-bank lifecycle is independently retained and lacks the soft-delete audit contract'),
+    ('public', 'user_t', 'public', 'agent_memory_entity_t', 'agent_memory_entity_t_user_id_fkey', 'IGNORE', 'NONE', 'Memory-entity lifecycle is independently retained and lacks the soft-delete audit contract'),
+    ('public', 'user_t', 'public', 'auth_code_t', 'auth_code_t_user_id_fkey', 'HARD_DELETE', 'NONE', 'User deactivation revokes non-restorable authorization codes'),
+    ('public', 'user_t', 'public', 'auth_refresh_token_t', 'auth_refresh_token_t_user_id_fkey', 'HARD_DELETE', 'NONE', 'User deactivation revokes non-restorable refresh tokens'),
+    ('public', 'user_t', 'public', 'auth_session_t', 'auth_session_t_user_id_fkey', 'HARD_DELETE', 'NONE', 'User deactivation revokes non-restorable authorization sessions'),
+    ('public', 'user_t', 'public', 'config_snapshot_t', 'config_snapshot_t_user_id_fkey', 'IGNORE', 'NONE', 'Immutable configuration snapshots are retained independently'),
+    ('public', 'user_t', 'public', 'group_user_t', 'group_user_t_user_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'user_t', 'public', 'role_user_t', 'role_user_t_user_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'user_t', 'public', 'user_col_filter_t', 'user_col_filter_t_user_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'user_t', 'public', 'user_crypto_wallet_t', 'user_crypto_wallet_t_user_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'user_t', 'public', 'user_host_t', 'user_host_t_user_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'user_t', 'public', 'user_permission_t', 'user_permission_t_user_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'user_t', 'public', 'user_row_filter_t', 'user_row_filter_t_user_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship')
+;
+
+INSERT INTO cascade_relationship_policy_t (
+    parent_schema,
+    parent_table,
+    child_schema,
+    child_table,
+    constraint_name,
+    delete_action,
+    restore_action,
+    policy_description
+)
+SELECT
+    parent_schema,
+    parent_table,
+    child_schema,
+    child_table,
+    constraint_name,
+    delete_action,
+    restore_action,
+    policy_description
+FROM cascade_relationship_policy_seed_t
+ON CONFLICT (
+    parent_schema,
+    parent_table,
+    child_schema,
+    child_table,
+    constraint_name
+) DO UPDATE
+SET delete_action = EXCLUDED.delete_action,
+    restore_action = EXCLUDED.restore_action,
+    policy_description = EXCLUDED.policy_description,
+    update_user = SESSION_USER,
+    update_ts = CURRENT_TIMESTAMP;
+
+DELETE FROM cascade_relationship_policy_t policy
+WHERE policy.parent_schema = 'public'
+  AND policy.child_schema = 'public'
+  AND NOT EXISTS (
+    SELECT 1
+    FROM cascade_relationship_policy_seed_t seed
+    WHERE seed.parent_schema = policy.parent_schema
+      AND seed.parent_table = policy.parent_table
+      AND seed.child_schema = policy.child_schema
+      AND seed.child_table = policy.child_table
+      AND seed.constraint_name = policy.constraint_name
+);
 
 DROP VIEW IF EXISTS cascade_relationships_v;
 
@@ -11920,340 +12271,585 @@ WITH fk_details AS (
         c.oid AS constraint_id,
         cc.oid AS child_table_oid,
         pc.oid AS parent_table_oid,
-        unnest.parent_col,
-        unnest.child_col,
-        unnest.ord
+        c.confdeltype,
+        array_agg(pa.attname::text ORDER BY keys.ord) AS parent_columns,
+        array_agg(ca.attname::text ORDER BY keys.ord) AS child_columns,
+        count(*)::integer AS column_count
     FROM pg_constraint c
-    JOIN pg_class pc ON c.confrelid = pc.oid
-    JOIN pg_namespace pn ON pc.relnamespace = pn.oid
-    JOIN pg_class cc ON c.conrelid = cc.oid
-    JOIN pg_namespace cn ON cc.relnamespace = cn.oid
-    CROSS JOIN LATERAL (
-        SELECT
-            unnest(c.confkey) AS parent_col,
-            unnest(c.conkey) AS child_col,
-            generate_series(1, array_length(c.conkey, 1)) AS ord
-    ) unnest
+    JOIN pg_class pc ON pc.oid = c.confrelid
+    JOIN pg_namespace pn ON pn.oid = pc.relnamespace
+    JOIN pg_class cc ON cc.oid = c.conrelid
+    JOIN pg_namespace cn ON cn.oid = cc.relnamespace
+    JOIN LATERAL unnest(c.confkey, c.conkey)
+        WITH ORDINALITY AS keys(parent_attnum, child_attnum, ord) ON TRUE
+    JOIN pg_attribute pa
+      ON pa.attrelid = pc.oid
+     AND pa.attnum = keys.parent_attnum
+     AND NOT pa.attisdropped
+    JOIN pg_attribute ca
+      ON ca.attrelid = cc.oid
+     AND ca.attnum = keys.child_attnum
+     AND NOT ca.attisdropped
     WHERE c.contype = 'f'
+    GROUP BY
+        pn.nspname,
+        pc.relname,
+        cn.nspname,
+        cc.relname,
+        c.conname,
+        c.oid,
+        cc.oid,
+        pc.oid,
+        c.confdeltype
 )
 SELECT
-    fd.parent_schema,
-    fd.parent_table,
-    fd.child_schema,
-    fd.child_table,
-    fd.constraint_name,
-    -- Human readable mapping
-    string_agg(
-        format('%I → %I', 
-            (SELECT attname FROM pg_attribute 
-             WHERE attrelid = fd.parent_table_oid
-               AND attnum = fd.parent_col),
-            (SELECT attname FROM pg_attribute 
-             WHERE attrelid = fd.child_table_oid
-               AND attnum = fd.child_col)
-        ), 
-        ', ' ORDER BY fd.ord
-    ) AS foreign_key_mapping,
-    -- Structured data for trigger
-    jsonb_object_agg(
-        (SELECT attname FROM pg_attribute 
-         WHERE attrelid = fd.parent_table_oid
-           AND attnum = fd.parent_col),
-        (SELECT attname FROM pg_attribute 
-         WHERE attrelid = fd.child_table_oid
-           AND attnum = fd.child_col)
-    ) AS foreign_key_json,
-    -- Arrays for easier processing
-    array_agg(
-        (SELECT attname FROM pg_attribute 
-         WHERE attrelid = fd.parent_table_oid
-           AND attnum = fd.parent_col)
-        ORDER BY fd.ord
-    ) AS parent_columns,
-    array_agg(
-        (SELECT attname FROM pg_attribute 
-         WHERE attrelid = fd.child_table_oid
-           AND attnum = fd.child_col)
-        ORDER BY fd.ord
-    ) AS child_columns,
-    COUNT(*) AS column_count,
-    fd.child_table_oid,
-    fd.parent_table_oid,
-    -- Check for required columns
+    fk.parent_schema,
+    fk.parent_table,
+    fk.child_schema,
+    fk.child_table,
+    fk.constraint_name,
+    fk.constraint_id,
+    fk.parent_columns,
+    fk.child_columns,
+    fk.column_count,
+    fk.child_table_oid,
+    fk.parent_table_oid,
+    CASE fk.confdeltype
+        WHEN 'a' THEN 'NO ACTION'
+        WHEN 'r' THEN 'RESTRICT'
+        WHEN 'c' THEN 'CASCADE'
+        WHEN 'n' THEN 'SET NULL'
+        WHEN 'd' THEN 'SET DEFAULT'
+        ELSE 'UNKNOWN'
+    END AS foreign_key_delete_action,
+    policy.delete_action,
+    policy.restore_action,
     EXISTS (
-        SELECT 1 FROM pg_attribute a
-        WHERE a.attrelid = fd.parent_table_oid
+        SELECT 1
+        FROM pg_attribute a
+        WHERE a.attrelid = fk.parent_table_oid
+          AND a.attname = 'active'
+          AND NOT a.attisdropped
+    ) AS parent_has_active,
+    EXISTS (
+        SELECT 1
+        FROM pg_attribute a
+        WHERE a.attrelid = fk.parent_table_oid
           AND a.attname = 'delete_ts'
           AND NOT a.attisdropped
     ) AS parent_has_delete_ts,
     EXISTS (
-        SELECT 1 FROM pg_attribute a
-        WHERE a.attrelid = fd.child_table_oid
-          AND a.attname = 'delete_ts'
-          AND NOT a.attisdropped
-    ) AS child_has_delete_ts,
-    EXISTS (
-        SELECT 1 FROM pg_attribute a
-        WHERE a.attrelid = fd.parent_table_oid
+        SELECT 1
+        FROM pg_attribute a
+        WHERE a.attrelid = fk.parent_table_oid
           AND a.attname = 'delete_user'
           AND NOT a.attisdropped
     ) AS parent_has_delete_user,
     EXISTS (
-        SELECT 1 FROM pg_attribute a
-        WHERE a.attrelid = fd.child_table_oid
+        SELECT 1
+        FROM pg_attribute a
+        WHERE a.attrelid = fk.parent_table_oid
+          AND a.attname = 'update_ts'
+          AND NOT a.attisdropped
+    ) AS parent_has_update_ts,
+    EXISTS (
+        SELECT 1
+        FROM pg_attribute a
+        WHERE a.attrelid = fk.parent_table_oid
+          AND a.attname = 'update_user'
+          AND NOT a.attisdropped
+    ) AS parent_has_update_user,
+    EXISTS (
+        SELECT 1
+        FROM pg_attribute a
+        WHERE a.attrelid = fk.child_table_oid
+          AND a.attname = 'active'
+          AND NOT a.attisdropped
+    ) AS child_has_active,
+    EXISTS (
+        SELECT 1
+        FROM pg_attribute a
+        WHERE a.attrelid = fk.child_table_oid
+          AND a.attname = 'delete_ts'
+          AND NOT a.attisdropped
+    ) AS child_has_delete_ts,
+    EXISTS (
+        SELECT 1
+        FROM pg_attribute a
+        WHERE a.attrelid = fk.child_table_oid
           AND a.attname = 'delete_user'
           AND NOT a.attisdropped
-    ) AS child_has_delete_user
-FROM fk_details fd
--- Only include relationships where both tables have deletion tracking
-WHERE EXISTS (
-    SELECT 1 FROM pg_attribute a
-    WHERE a.attrelid = fd.parent_table_oid
-      AND a.attname = 'delete_ts'
-      AND NOT a.attisdropped
-) AND EXISTS (
-    SELECT 1 FROM pg_attribute a
-    WHERE a.attrelid = fd.child_table_oid
-      AND a.attname = 'delete_ts'
-      AND NOT a.attisdropped
-)
-GROUP BY 
-    fd.parent_schema, fd.parent_table,
-    fd.child_schema, fd.child_table,
-    fd.constraint_name, fd.constraint_id, 
-    fd.child_table_oid, fd.parent_table_oid
-ORDER BY fd.parent_schema, fd.parent_table, fd.child_schema, fd.child_table;
+    ) AS child_has_delete_user,
+    EXISTS (
+        SELECT 1
+        FROM pg_attribute a
+        WHERE a.attrelid = fk.child_table_oid
+          AND a.attname = 'update_ts'
+          AND NOT a.attisdropped
+    ) AS child_has_update_ts,
+    EXISTS (
+        SELECT 1
+        FROM pg_attribute a
+        WHERE a.attrelid = fk.child_table_oid
+          AND a.attname = 'update_user'
+          AND NOT a.attisdropped
+    ) AS child_has_update_user
+FROM fk_details fk
+JOIN cascade_relationship_policy_t policy
+  ON policy.parent_schema = fk.parent_schema
+ AND policy.parent_table = fk.parent_table
+ AND policy.child_schema = fk.child_schema
+ AND policy.child_table = fk.child_table
+ AND policy.constraint_name = fk.constraint_name;
 
-CREATE OR REPLACE FUNCTION smart_cascade_soft_delete()
+CREATE OR REPLACE FUNCTION validate_cascade_relationship_policies()
+RETURNS void AS $$
+DECLARE
+    invalid_policy RECORD;
+    invalid_width RECORD;
+    unclassified_relationship RECORD;
+BEGIN
+    SELECT policy.*
+      INTO invalid_policy
+      FROM cascade_relationship_policy_t policy
+      LEFT JOIN pg_namespace pn
+        ON pn.nspname = policy.parent_schema
+      LEFT JOIN pg_class pc
+        ON pc.relnamespace = pn.oid
+       AND pc.relname = policy.parent_table
+      LEFT JOIN pg_namespace cn
+        ON cn.nspname = policy.child_schema
+      LEFT JOIN pg_class cc
+        ON cc.relnamespace = cn.oid
+       AND cc.relname = policy.child_table
+      LEFT JOIN pg_constraint constraint_row
+        ON constraint_row.contype = 'f'
+       AND constraint_row.conname = policy.constraint_name
+       AND constraint_row.confrelid = pc.oid
+       AND constraint_row.conrelid = cc.oid
+     WHERE constraint_row.oid IS NULL
+     ORDER BY
+        policy.parent_schema,
+        policy.parent_table,
+        policy.child_schema,
+        policy.child_table,
+        policy.constraint_name
+     LIMIT 1;
+
+    IF FOUND THEN
+        RAISE EXCEPTION
+            'cascade policy references missing or mismatched foreign key: %.% -> %.% (%)',
+            invalid_policy.parent_schema,
+            invalid_policy.parent_table,
+            invalid_policy.child_schema,
+            invalid_policy.child_table,
+            invalid_policy.constraint_name;
+    END IF;
+
+    SELECT *
+      INTO invalid_policy
+      FROM cascade_relationships_v
+     WHERE delete_action IN ('SOFT_DELETE', 'HARD_DELETE')
+       AND NOT (
+           parent_has_active
+           AND parent_has_delete_ts
+           AND parent_has_delete_user
+           AND parent_has_update_ts
+           AND parent_has_update_user
+       )
+     ORDER BY parent_schema, parent_table, child_schema, child_table, constraint_name
+     LIMIT 1;
+
+    IF FOUND THEN
+        RAISE EXCEPTION
+            'cascade parent %.% does not implement the complete soft-delete contract for constraint %',
+            invalid_policy.parent_schema,
+            invalid_policy.parent_table,
+            invalid_policy.constraint_name;
+    END IF;
+
+    SELECT *
+      INTO invalid_policy
+      FROM cascade_relationships_v
+     WHERE delete_action = 'SOFT_DELETE'
+       AND NOT (
+           child_has_active
+           AND child_has_delete_ts
+           AND child_has_delete_user
+           AND child_has_update_ts
+           AND child_has_update_user
+       )
+     ORDER BY parent_schema, parent_table, child_schema, child_table, constraint_name
+     LIMIT 1;
+
+    IF FOUND THEN
+        RAISE EXCEPTION
+            'soft-delete child %.% does not implement the complete contract for constraint %',
+            invalid_policy.child_schema,
+            invalid_policy.child_table,
+            invalid_policy.constraint_name;
+    END IF;
+
+    WITH soft_child_requirements AS (
+        SELECT
+            child_schema,
+            child_table,
+            count(*)::integer AS relationship_count,
+            (14 + 33 * count(*))::integer AS required_length
+        FROM cascade_relationships_v
+        WHERE delete_action = 'SOFT_DELETE'
+        GROUP BY child_schema, child_table
+    )
+    SELECT
+        requirement.child_schema,
+        requirement.child_table,
+        requirement.relationship_count,
+        requirement.required_length,
+        (attribute_row.atttypmod - 4)::integer AS actual_length
+      INTO invalid_width
+      FROM soft_child_requirements requirement
+      JOIN pg_namespace namespace_row
+        ON namespace_row.nspname = requirement.child_schema
+      JOIN pg_class class_row
+        ON class_row.relnamespace = namespace_row.oid
+       AND class_row.relname = requirement.child_table
+      JOIN pg_attribute attribute_row
+        ON attribute_row.attrelid = class_row.oid
+       AND attribute_row.attname = 'delete_user'
+       AND NOT attribute_row.attisdropped
+     WHERE attribute_row.atttypid IN ('varchar'::regtype, 'bpchar'::regtype)
+       AND attribute_row.atttypmod >= 0
+       AND attribute_row.atttypmod - 4 < requirement.required_length
+     ORDER BY requirement.child_schema, requirement.child_table
+     LIMIT 1;
+
+    IF FOUND THEN
+        RAISE EXCEPTION
+            'soft-delete child %.% delete_user width % is smaller than required % for % cascade relationships',
+            invalid_width.child_schema,
+            invalid_width.child_table,
+            invalid_width.actual_length,
+            invalid_width.required_length,
+            invalid_width.relationship_count;
+    END IF;
+
+    SELECT *
+      INTO invalid_policy
+      FROM cascade_relationships_v
+     WHERE delete_action = 'HARD_DELETE'
+       AND foreign_key_delete_action <> 'CASCADE'
+     ORDER BY parent_schema, parent_table, child_schema, child_table, constraint_name
+     LIMIT 1;
+
+    IF FOUND THEN
+        RAISE EXCEPTION
+            'hard-delete policy requires ON DELETE CASCADE for constraint %',
+            invalid_policy.constraint_name;
+    END IF;
+
+    SELECT
+        relationship.child_schema,
+        relationship.child_table,
+        downstream_namespace.nspname::text AS downstream_schema,
+        downstream_table.relname::text AS downstream_table,
+        downstream_constraint.conname::text AS downstream_constraint
+      INTO invalid_policy
+      FROM cascade_relationships_v relationship
+      JOIN pg_constraint downstream_constraint
+        ON downstream_constraint.contype = 'f'
+       AND downstream_constraint.confrelid = relationship.child_table_oid
+      JOIN pg_class downstream_table
+        ON downstream_table.oid = downstream_constraint.conrelid
+      JOIN pg_namespace downstream_namespace
+        ON downstream_namespace.oid = downstream_table.relnamespace
+     WHERE relationship.delete_action = 'HARD_DELETE'
+       AND downstream_constraint.confdeltype <> 'c'
+     ORDER BY
+        relationship.child_schema,
+        relationship.child_table,
+        downstream_namespace.nspname,
+        downstream_table.relname,
+        downstream_constraint.conname
+     LIMIT 1;
+
+    IF FOUND THEN
+        RAISE EXCEPTION
+            'hard-delete child %.% is referenced by non-cascading constraint %.% (%)',
+            invalid_policy.child_schema,
+            invalid_policy.child_table,
+            invalid_policy.downstream_schema,
+            invalid_policy.downstream_table,
+            invalid_policy.downstream_constraint;
+    END IF;
+
+    WITH candidate_relationships AS (
+        SELECT
+            pn.nspname::text AS parent_schema,
+            pc.relname::text AS parent_table,
+            cn.nspname::text AS child_schema,
+            cc.relname::text AS child_table,
+            constraint_row.conname::text AS constraint_name
+        FROM pg_constraint constraint_row
+        JOIN pg_class pc ON pc.oid = constraint_row.confrelid
+        JOIN pg_namespace pn ON pn.oid = pc.relnamespace
+        JOIN pg_class cc ON cc.oid = constraint_row.conrelid
+        JOIN pg_namespace cn ON cn.oid = cc.relnamespace
+        WHERE constraint_row.contype = 'f'
+          AND pn.nspname = 'public'
+          AND cn.nspname = 'public'
+          AND EXISTS (
+              SELECT 1
+              FROM pg_attribute a
+              WHERE a.attrelid = pc.oid
+                AND a.attname = 'delete_ts'
+                AND NOT a.attisdropped
+          )
+          AND EXISTS (
+              SELECT 1
+              FROM pg_attribute a
+              WHERE a.attrelid = pc.oid
+                AND a.attname = 'active'
+                AND NOT a.attisdropped
+          )
+    )
+    SELECT candidate.*
+      INTO unclassified_relationship
+      FROM candidate_relationships candidate
+      LEFT JOIN cascade_relationship_policy_t policy
+        ON policy.parent_schema = candidate.parent_schema
+       AND policy.parent_table = candidate.parent_table
+       AND policy.child_schema = candidate.child_schema
+       AND policy.child_table = candidate.child_table
+       AND policy.constraint_name = candidate.constraint_name
+     WHERE policy.constraint_name IS NULL
+     ORDER BY
+        candidate.parent_schema,
+        candidate.parent_table,
+        candidate.child_schema,
+        candidate.child_table,
+        candidate.constraint_name
+     LIMIT 1;
+
+    IF FOUND THEN
+        RAISE EXCEPTION
+            'unclassified cascade relationship: %.% -> %.% (%)',
+            unclassified_relationship.parent_schema,
+            unclassified_relationship.parent_table,
+            unclassified_relationship.child_schema,
+            unclassified_relationship.child_table,
+            unclassified_relationship.constraint_name;
+    END IF;
+END;
+$$ LANGUAGE plpgsql;
+CREATE OR REPLACE FUNCTION smart_cascade_delete()
 RETURNS TRIGGER AS $$
 DECLARE
-    fk_record RECORD;
+    relationship RECORD;
     where_clause TEXT;
     query_text TEXT;
-    column_index INT;
-    current_user_name TEXT;
-    deletion_context TEXT;
-    deletion_context_pattern TEXT;
-    delete_timestamp TIMESTAMP;
+    column_index INTEGER;
+    deletion_context_token TEXT;
+    delete_timestamp TIMESTAMP WITH TIME ZONE;
 BEGIN
-    -- Get current user
-    current_user_name := current_user;
-    
-    -- Handle SOFT DELETE (active = false)
     IF NEW.active = FALSE AND OLD.active = TRUE THEN
-        -- Generate deletion timestamp
         delete_timestamp := CURRENT_TIMESTAMP;
-        
-        -- Set deletion context
-        deletion_context := format('PARENT_CASCADE_%s_%s', 
-            TG_TABLE_NAME, 
-            to_char(delete_timestamp, 'YYYYMMDD_HH24MISSMS')
-        );
-        
-        -- Update parent with deletion context if columns exist
-        IF EXISTS (
-            SELECT 1 FROM information_schema.columns 
-            WHERE table_schema = TG_TABLE_SCHEMA 
-              AND table_name = TG_TABLE_NAME 
-              AND column_name = 'delete_user'
-        ) THEN
-            NEW.delete_user := deletion_context;
-        END IF;
-        
-        IF EXISTS (
-            SELECT 1 FROM information_schema.columns 
-            WHERE table_schema = TG_TABLE_SCHEMA 
-              AND table_name = TG_TABLE_NAME 
-              AND column_name = 'delete_ts'
-        ) THEN
-            NEW.delete_ts := delete_timestamp;
-        END IF;
-        
-        -- Update parent's update columns
-        NEW.update_ts := delete_timestamp;
-        NEW.update_user := current_user_name;
-        
-        FOR fk_record IN
+        FOR relationship IN
             SELECT *
             FROM cascade_relationships_v
             WHERE parent_schema = TG_TABLE_SCHEMA
               AND parent_table = TG_TABLE_NAME
-        LOOP
-            -- Build WHERE clause
+            ORDER BY constraint_name
+            LOOP
             where_clause := '';
-            FOR column_index IN 1..fk_record.column_count LOOP
+
+            FOR column_index IN 1..relationship.column_count LOOP
                 IF column_index > 1 THEN
                     where_clause := where_clause || ' AND ';
                 END IF;
+
                 where_clause := where_clause || format(
                     '%I = ($1).%I',
-                    fk_record.child_columns[column_index],
-                    fk_record.parent_columns[column_index]
+                    relationship.child_columns[column_index],
+                    relationship.parent_columns[column_index]
                 );
             END LOOP;
-            
-            -- Add condition to only update currently active records
-            where_clause := where_clause || ' AND active = TRUE';
-            
-            -- Cascade the soft delete with context
-            query_text := format(
-                'UPDATE %I.%I 
-                 SET active = FALSE,
-                     delete_ts = $2, 
-                     delete_user = $3,
-                     update_ts = $2,
-                     update_user = $4
-                 WHERE %s',
-                fk_record.child_schema,
-                fk_record.child_table,
-                where_clause
-            );
-            
-            EXECUTE query_text USING OLD, delete_timestamp, deletion_context, current_user_name;
+
+            deletion_context_token := md5(format(
+                '%s.%s:%s',
+                relationship.parent_schema,
+                relationship.parent_table,
+                relationship.constraint_name
+            ));
+
+            IF relationship.delete_action = 'SOFT_DELETE' THEN
+                query_text := format(
+                    'UPDATE %I.%I
+                        SET active = FALSE,
+                            delete_ts = CASE WHEN active THEN $2 ELSE delete_ts END,
+                            delete_user = CASE
+                                WHEN active THEN ''PARENT_CASCADE:'' || $3
+                                WHEN NOT ($3 = ANY(string_to_array(substring(delete_user FROM 16), '','')))
+                                    THEN delete_user || '','' || $3
+                                ELSE delete_user
+                            END,
+                            update_ts = $2,
+                            update_user = $4
+                      WHERE %s
+                        AND (
+                            active = TRUE
+                            OR left(delete_user, 15) = ''PARENT_CASCADE:''
+                        )',
+                    relationship.child_schema,
+                    relationship.child_table,
+                    where_clause
+                );
+
+                EXECUTE query_text
+                    USING OLD, delete_timestamp, deletion_context_token, current_user;
+            ELSIF relationship.delete_action = 'HARD_DELETE' THEN
+                query_text := format(
+                    'DELETE FROM %I.%I WHERE %s',
+                    relationship.child_schema,
+                    relationship.child_table,
+                    where_clause
+                );
+
+                EXECUTE query_text USING OLD;
+            END IF;
         END LOOP;
-        
-    -- Handle RESTORE (active = true)
     ELSIF NEW.active = TRUE AND OLD.active = FALSE THEN
-        -- Only restore children that were deleted by parent cascade
-        
-        FOR fk_record IN
+        FOR relationship IN
             SELECT *
             FROM cascade_relationships_v
             WHERE parent_schema = TG_TABLE_SCHEMA
               AND parent_table = TG_TABLE_NAME
-        LOOP
-            -- Pattern to match cascade deletions
-            deletion_context_pattern := format('PARENT_CASCADE_%s_%%', TG_TABLE_NAME);
-            
-            -- Build WHERE clause
+              AND delete_action = 'SOFT_DELETE'
+              AND restore_action = 'RESTORE'
+            ORDER BY constraint_name
+            LOOP
             where_clause := '';
-            FOR column_index IN 1..fk_record.column_count LOOP
+
+            FOR column_index IN 1..relationship.column_count LOOP
                 IF column_index > 1 THEN
                     where_clause := where_clause || ' AND ';
                 END IF;
+
                 where_clause := where_clause || format(
                     '%I = ($1).%I',
-                    fk_record.child_columns[column_index],
-                    fk_record.parent_columns[column_index]
+                    relationship.child_columns[column_index],
+                    relationship.parent_columns[column_index]
                 );
             END LOOP;
-            
-            -- Only restore cascade-deleted records
-            where_clause := where_clause || 
-                ' AND delete_user LIKE $2 AND active = FALSE';
-            
-            -- Restore the records
+
+            deletion_context_token := md5(format(
+                '%s.%s:%s',
+                relationship.parent_schema,
+                relationship.parent_table,
+                relationship.constraint_name
+            ));
+
             query_text := format(
-                'UPDATE %I.%I 
-                 SET active = TRUE,
-                     delete_ts = NULL, 
-                     delete_user = NULL,
-                     update_ts = CURRENT_TIMESTAMP,
-                     update_user = $3
-                 WHERE %s',
-                fk_record.child_schema,
-                fk_record.child_table,
+                'UPDATE %I.%I
+                    SET active = CASE
+                            WHEN left(delete_user, 15) = ''PARENT_CASCADE:''
+                                THEN cardinality(array_remove(
+                                    string_to_array(substring(delete_user FROM 16), '',''), $2
+                                )) = 0
+                            ELSE TRUE
+                        END,
+                        delete_ts = CASE
+                            WHEN left(delete_user, 15) = ''PARENT_CASCADE:''
+                             AND cardinality(array_remove(
+                                    string_to_array(substring(delete_user FROM 16), '',''), $2
+                                 )) > 0
+                                THEN delete_ts
+                            ELSE NULL
+                        END,
+                        delete_user = CASE
+                            WHEN left(delete_user, 15) = ''PARENT_CASCADE:''
+                             AND cardinality(array_remove(
+                                    string_to_array(substring(delete_user FROM 16), '',''), $2
+                                 )) > 0
+                                THEN ''PARENT_CASCADE:'' || array_to_string(
+                                    array_remove(string_to_array(substring(delete_user FROM 16), '',''), $2), '',''
+                                )
+                            ELSE NULL
+                        END,
+                        update_ts = CURRENT_TIMESTAMP,
+                        update_user = $3
+                  WHERE %s
+                    AND active = FALSE
+                    AND (
+                        (
+                            left(delete_user, 15) = ''PARENT_CASCADE:''
+                            AND $2 = ANY(string_to_array(substring(delete_user FROM 16), '',''))
+                        )
+                        OR left(delete_user, length($4)) = $4
+                    )',
+                relationship.child_schema,
+                relationship.child_table,
                 where_clause
             );
-            
-            EXECUTE query_text USING OLD, deletion_context_pattern, current_user_name;
+
+            EXECUTE query_text
+                USING OLD, deletion_context_token, current_user,
+                    'PARENT_CASCADE_' || TG_TABLE_NAME || '_';
         END LOOP;
-        
-        -- Clear parent's deletion context
-        IF EXISTS (
-            SELECT 1 FROM information_schema.columns 
-            WHERE table_schema = TG_TABLE_SCHEMA 
-              AND table_name = TG_TABLE_NAME 
-              AND column_name = 'delete_user'
-        ) THEN
-            NEW.delete_user := NULL;
-        END IF;
-        
-        IF EXISTS (
-            SELECT 1 FROM information_schema.columns 
-            WHERE table_schema = TG_TABLE_SCHEMA 
-              AND table_name = TG_TABLE_NAME 
-              AND column_name = 'delete_ts'
-        ) THEN
-            NEW.delete_ts := NULL;
-        END IF;
-        
-        -- Update parent's update columns
-        NEW.update_ts := CURRENT_TIMESTAMP;
-        NEW.update_user := current_user_name;
     END IF;
-    
+
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
 
-
-
--- Apply cascade triggers only to tables that have BOTH active AND delete_ts columns
 DO $$
 DECLARE
+    trigger_record RECORD;
     table_record RECORD;
-    has_active_column BOOLEAN;
-    has_delete_ts_column BOOLEAN;
 BEGIN
-    FOR table_record IN
-        SELECT 
-            n.nspname AS schema_name,
-            c.relname AS table_name,
-            c.oid AS table_oid
-        FROM pg_class c
-        JOIN pg_namespace n ON c.relnamespace = n.oid
-        WHERE c.relkind = 'r'  -- Regular tables only
-          AND n.nspname NOT IN ('pg_catalog', 'information_schema')
-          AND EXISTS (
-              SELECT 1 FROM pg_constraint con
-              JOIN pg_class ref ON con.confrelid = ref.oid
-              WHERE con.contype = 'f'
-                AND ref.oid = c.oid
-          )
+    -- Validation and trigger replacement are part of the surrounding
+    -- transaction. Any failure aborts installation and preserves the prior
+    -- committed policy, function, and trigger set.
+    PERFORM validate_cascade_relationship_policies();
+
+    FOR trigger_record IN
+        SELECT
+            trigger_namespace.nspname AS schema_name,
+            trigger_table.relname AS table_name,
+            trigger_row.tgname AS trigger_name
+        FROM pg_trigger trigger_row
+        JOIN pg_class trigger_table ON trigger_table.oid = trigger_row.tgrelid
+        JOIN pg_namespace trigger_namespace ON trigger_namespace.oid = trigger_table.relnamespace
+        WHERE NOT trigger_row.tgisinternal
+          AND trigger_row.tgname = 'trg_cascade_soft_ops'
     LOOP
-        -- Check if table has required columns
-        SELECT EXISTS (
-            SELECT 1 FROM pg_attribute a
-            WHERE a.attrelid = table_record.table_oid
-              AND a.attname = 'active'
-              AND NOT a.attisdropped
-        ) INTO has_active_column;
-        
-        SELECT EXISTS (
-            SELECT 1 FROM pg_attribute a
-            WHERE a.attrelid = table_record.table_oid
-              AND a.attname = 'delete_ts'
-              AND NOT a.attisdropped
-        ) INTO has_delete_ts_column;
-        
-        IF NOT (has_active_column AND has_delete_ts_column) THEN
-            RAISE NOTICE 'Skipping %.% - missing required columns (active: %, delete_ts: %)', 
-                table_record.schema_name, table_record.table_name,
-                has_active_column, has_delete_ts_column;
-            CONTINUE;
-        END IF;
-        
-        -- Drop existing trigger if it exists
         EXECUTE format(
-            'DROP TRIGGER IF EXISTS trg_cascade_soft_ops ON %I.%I',
-            table_record.schema_name, table_record.table_name
+            'DROP TRIGGER %I ON %I.%I',
+            trigger_record.trigger_name,
+            trigger_record.schema_name,
+            trigger_record.table_name
         );
-        
-        -- Create new trigger
+    END LOOP;
+
+    FOR table_record IN
+        SELECT DISTINCT parent_schema AS schema_name, parent_table AS table_name
+        FROM cascade_relationships_v
+        WHERE delete_action <> 'IGNORE'
+        ORDER BY parent_schema, parent_table
+    LOOP
         EXECUTE format(
             'CREATE TRIGGER trg_cascade_soft_ops
              AFTER UPDATE OF active ON %I.%I
              FOR EACH ROW
-             EXECUTE FUNCTION smart_cascade_soft_delete()',
-            table_record.schema_name, table_record.table_name
+             EXECUTE FUNCTION smart_cascade_delete()',
+            table_record.schema_name,
+            table_record.table_name
         );
-        
-        RAISE NOTICE 'Created cascade trigger on %.%', 
-            table_record.schema_name, table_record.table_name;
     END LOOP;
 END $$;
 
+DROP FUNCTION IF EXISTS smart_cascade_soft_delete();
+
+COMMIT;
 
 -- DDL for the Stored Procedure (Requires PostgreSQL 11+ for PROCEDURE support)
 CREATE OR REPLACE PROCEDURE create_snapshot(
