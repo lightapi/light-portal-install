@@ -10928,7 +10928,6 @@ CREATE TABLE workflow_tool_grant_t (
     grant_id UUID NOT NULL,
     tool_id UUID NOT NULL,
     wf_def_id UUID NOT NULL,
-    workflow_version VARCHAR(64),
     tool_version VARCHAR(20) NOT NULL,
     lightapi_digest VARCHAR(71) NOT NULL CHECK(lightapi_digest ~ '^sha256:[0-9a-f]{64}$'),
     allowed_environments TEXT[] NOT NULL CHECK(cardinality(allowed_environments) > 0),
@@ -10938,14 +10937,71 @@ CREATE TABLE workflow_tool_grant_t (
     update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(host_id,grant_id),
     FOREIGN KEY(host_id,tool_id) REFERENCES tool_t(host_id,tool_id) ON DELETE RESTRICT,
-    FOREIGN KEY(host_id,wf_def_id) REFERENCES wf_definition_t(host_id,wf_def_id) ON DELETE RESTRICT,
-    FOREIGN KEY(host_id,wf_def_id,workflow_version) REFERENCES wf_definition_version_t(host_id,wf_def_id,version) ON DELETE RESTRICT
+    FOREIGN KEY(host_id,wf_def_id) REFERENCES wf_definition_t(host_id,wf_def_id) ON DELETE RESTRICT
 );
 CREATE UNIQUE INDEX workflow_tool_grant_active_scope_uq
     ON workflow_tool_grant_t(host_id,tool_id,wf_def_id)
     WHERE active;
 CREATE INDEX workflow_tool_grant_callable_idx
-    ON workflow_tool_grant_t(host_id,wf_def_id,workflow_version,active,tool_id);
+    ON workflow_tool_grant_t(host_id,wf_def_id,active,tool_id);
+
+CREATE TABLE workflow_tool_access_request_t (
+    host_id UUID NOT NULL,
+    request_id UUID NOT NULL,
+    target_wf_def_id UUID NOT NULL,
+    requester_user_id UUID NOT NULL,
+    approval_wf_def_id UUID NOT NULL,
+    approval_wf_instance_id VARCHAR(126) NOT NULL,
+    approval_definition_digest VARCHAR(71) NOT NULL
+        CHECK(approval_definition_digest ~ '^sha256:[0-9a-f]{64}$'),
+    request_digest VARCHAR(71) NOT NULL
+        CHECK(request_digest ~ '^sha256:[0-9a-f]{64}$'),
+    justification VARCHAR(2000) NOT NULL CHECK(length(trim(justification)) > 0),
+    status VARCHAR(32) NOT NULL
+        CHECK(status IN ('REQUESTED','GRANTED','REJECTED','STALE','CANCELLED','FAILED')),
+    decision_user_id UUID,
+    decision_comment VARCHAR(2000),
+    requested_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    decided_ts TIMESTAMPTZ,
+    error_code VARCHAR(64),
+    error_message VARCHAR(2000),
+    aggregate_version BIGINT NOT NULL DEFAULT 1 CHECK(aggregate_version > 0),
+    PRIMARY KEY(host_id,request_id),
+    UNIQUE(host_id,approval_wf_instance_id),
+    FOREIGN KEY(host_id,target_wf_def_id)
+        REFERENCES wf_definition_t(host_id,wf_def_id) ON DELETE RESTRICT,
+    FOREIGN KEY(host_id,approval_wf_def_id)
+        REFERENCES wf_definition_t(host_id,wf_def_id) ON DELETE RESTRICT,
+    CHECK((status = 'REQUESTED' AND decided_ts IS NULL)
+       OR (status <> 'REQUESTED' AND decided_ts IS NOT NULL)),
+    CHECK(status NOT IN ('STALE','FAILED') OR error_code IS NOT NULL)
+);
+CREATE INDEX workflow_tool_access_request_target_idx
+    ON workflow_tool_access_request_t(host_id,target_wf_def_id,status);
+CREATE INDEX workflow_tool_access_request_requester_idx
+    ON workflow_tool_access_request_t(host_id,requester_user_id,status);
+
+CREATE TABLE workflow_tool_access_request_item_t (
+    host_id UUID NOT NULL,
+    request_id UUID NOT NULL,
+    tool_id UUID NOT NULL,
+    capability_ref VARCHAR(512) NOT NULL,
+    tool_version VARCHAR(20) NOT NULL,
+    lightapi_digest VARCHAR(71) NOT NULL
+        CHECK(lightapi_digest ~ '^sha256:[0-9a-f]{64}$'),
+    allowed_environments TEXT[] NOT NULL
+        CHECK(cardinality(allowed_environments) BETWEEN 1 AND 16),
+    usage_locations JSONB NOT NULL DEFAULT '[]'::JSONB
+        CHECK(jsonb_typeof(usage_locations) = 'array'),
+    status VARCHAR(32) NOT NULL
+        CHECK(status IN ('REQUESTED','GRANTED','REJECTED','STALE','CANCELLED','FAILED')),
+    PRIMARY KEY(host_id,request_id,tool_id),
+    UNIQUE(host_id,request_id,capability_ref),
+    FOREIGN KEY(host_id,request_id)
+        REFERENCES workflow_tool_access_request_t(host_id,request_id) ON DELETE CASCADE,
+    FOREIGN KEY(host_id,tool_id)
+        REFERENCES tool_t(host_id,tool_id) ON DELETE RESTRICT
+);
 
 CREATE TABLE workflow_tool_dependency_t (
     host_id UUID NOT NULL,
