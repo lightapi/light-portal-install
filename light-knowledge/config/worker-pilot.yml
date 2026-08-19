@@ -1,6 +1,9 @@
 version: 1
 workerDatabaseUrlFile: /run/secrets/knowledge-worker-database-url
 projectorDatabaseUrlFile: /run/secrets/knowledge-projector-database-url
+controlPlaneEventDatabaseUrlFile: /run/secrets/configserver-event-read-url
+expectedKnowledgeDatabase: knowledge
+expectedControlPlaneDatabase: configserver
 heartbeatSecretFile: /run/secrets/knowledge-heartbeat-secret
 portalCommandUrl: https://hybrid-command:8439/portal/command
 portalAuthorizationFile: /run/secrets/knowledge-portal-authorization

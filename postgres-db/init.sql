@@ -393,6 +393,8 @@ CREATE TABLE event_store_t (
 
 -- Index for efficient lookup by aggregate
 CREATE INDEX idx_event_store_aggregate ON event_store_t (aggregate_id);
+CREATE INDEX idx_event_store_event_ts_id ON event_store_t (event_ts, id)
+    WHERE event_type LIKE 'Knowledge%' OR event_type LIKE 'AgentKnowledgeBase%';
 
 CREATE TABLE entity_aggregate_t (
     aggregate_type   VARCHAR(255) NOT NULL,
@@ -13317,3 +13319,36 @@ INSERT INTO host_t (host_id, domain, sub_domain, host_owner) VALUES ('01964b05-5
 INSERT INTO user_host_t (host_id, user_id, current)  values ('01964b05-552a-7c4b-9184-6857e7f3dc5f', '01964b05-5532-7c79-8cde-191dcbd421b8', true);
 
 INSERT INTO employee_t (host_id, employee_id, user_id, title, manager_id, hire_date) VALUES ('01964b05-552a-7c4b-9184-6857e7f3dc5f', 'sh35', '01964b05-5532-7c79-8cde-191dcbd421b8', 'Consulant API Platform', null, '2023-06-18');
+
+-- Provision an isolated Knowledge data plane from the canonical schema, then
+-- remove Config Server-owned relations. Roles are cluster-wide; their existing
+-- Knowledge grants remain valid in the cloned database.
+CREATE TABLE IF NOT EXISTS knowledge_projection_source_cursor_t (
+    consumer_group VARCHAR(160) PRIMARY KEY,
+    last_event_ts TIMESTAMPTZ NOT NULL,
+    last_event_id UUID NOT NULL,
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK(length(trim(consumer_group)) > 0)
+);
+
+CREATE OR REPLACE FUNCTION notify_knowledge_job_eligible()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.state = 'QUEUED'
+       AND (NEW.next_attempt_ts IS NULL OR NEW.next_attempt_ts <= CURRENT_TIMESTAMP)
+       AND (TG_OP = 'INSERT'
+            OR OLD.state IS DISTINCT FROM NEW.state
+            OR OLD.next_attempt_ts IS DISTINCT FROM NEW.next_attempt_ts) THEN
+        PERFORM pg_notify('knowledge_job_channel', NEW.job_id::text);
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS knowledge_job_eligible_notify_trg ON knowledge_job_t;
+CREATE TRIGGER knowledge_job_eligible_notify_trg
+AFTER INSERT OR UPDATE OF state, next_attempt_ts ON knowledge_job_t
+FOR EACH ROW EXECUTE FUNCTION notify_knowledge_job_eligible();
+
+GRANT SELECT, INSERT, UPDATE ON knowledge_projection_source_cursor_t
+    TO light_knowledge_portal_projector_role;

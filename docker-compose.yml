@@ -5,6 +5,7 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./postgres-db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro,Z
+      - ./postgres-db/init-knowledge.sh:/docker-entrypoint-initdb.d/zz-init-knowledge.sh:ro,Z
     environment:
       POSTGRES_PASSWORD: secret
     command: postgres -c wal_level=logical -c max_replication_slots=10 -c max_wal_senders=10
@@ -19,6 +20,20 @@ services:
       retries: 5
       start_period: 5s
 
+  knowledge-schema-migration:
+    profiles: ["knowledge"]
+    image: timescale/timescaledb:latest-pg17
+    entrypoint: ["/docker-entrypoint-initdb.d/zz-init-knowledge.sh"]
+    volumes:
+      - ./postgres-db/init-knowledge.sh:/docker-entrypoint-initdb.d/zz-init-knowledge.sh:ro,Z
+    environment:
+      PGHOST: postgres
+      POSTGRES_USER: postgres
+      PGPASSWORD: secret
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   hybrid-command:
     image: ${PORTAL_HYBRID_COMMAND_IMAGE:-networknt/portal-hybrid-command:latest}
     environment:
@@ -28,7 +43,7 @@ services:
       WORKFLOW_TOOL_ACCESS_APPROVAL_WF_DEF_ID: 01a012f0-3ccb-792c-9aba-752269ec0b29
       WORKFLOW_TOOL_ACCESS_APPROVAL_VERSION: 1.0.0
       WORKFLOW_TOOL_ACCESS_APPROVAL_DIGEST: sha256:29167fa1e53a00187685c8d459016fefbf69567dd974fc3a90d0d619ca3a887a
-      KNOWLEDGE_WORKLOAD_PRINCIPALS: ${KNOWLEDGE_WORKLOAD_PRINCIPALS:-light-knowledge-worker}
+      KNOWLEDGE_WORKLOAD_PRINCIPALS: ${KNOWLEDGE_WORKLOAD_PRINCIPALS:-light-knowledge-worker,light-knowledge}
     volumes:
       - ./hybrid-command/config:/config:Z
       - ./hybrid-command/service:/service:Z
@@ -418,39 +433,15 @@ services:
       - ./light-knowledge/config:/config:ro,Z
       - ./light-knowledge/secrets:/run/secrets:ro,Z
       - ./light-knowledge/objects:/var/lib/light-knowledge/objects:Z
+      - ./light-knowledge/checkouts:/var/lib/light-knowledge/checkouts:Z
     environment:
       LIGHT_KNOWLEDGE_CONFIG_FILE: ${LIGHT_KNOWLEDGE_CONFIG_FILE:-/config/knowledge.yml}
     depends_on:
       postgres:
         condition: service_healthy
+      knowledge-schema-migration:
+        condition: service_completed_successfully
 
-  light-knowledge-projector:
-    profiles: ["knowledge"]
-    image: ${LIGHT_KNOWLEDGE_WORKER_IMAGE:-networknt/light-knowledge-worker:latest}
-    command: ["project-loop"]
-    volumes:
-      - ./light-knowledge/config:/config:ro,Z
-      - ./light-knowledge/secrets:/run/secrets:ro,Z
-    environment:
-      LIGHT_KNOWLEDGE_WORKER_CONFIG_FILE: ${LIGHT_KNOWLEDGE_PROJECTOR_CONFIG_FILE:-/config/projector.yml}
-    depends_on:
-      postgres:
-        condition: service_healthy
-
-  light-knowledge-builder:
-    profiles: ["knowledge"]
-    image: ${LIGHT_KNOWLEDGE_WORKER_IMAGE:-networknt/light-knowledge-worker:latest}
-    command: ["build-loop"]
-    volumes:
-      - ./light-knowledge/config:/config:ro,Z
-      - ./light-knowledge/secrets:/run/secrets:ro,Z
-      - ./light-knowledge/objects:/var/lib/light-knowledge/objects:Z
-      - ./light-knowledge/checkouts:/var/lib/light-knowledge/checkouts:Z
-    environment:
-      LIGHT_KNOWLEDGE_WORKER_CONFIG_FILE: ${LIGHT_KNOWLEDGE_WORKER_CONFIG_FILE:-/config/worker.yml}
-    depends_on:
-      postgres:
-        condition: service_healthy
 
 volumes:
   postgres-data:

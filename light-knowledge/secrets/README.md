@@ -1,5 +1,6 @@
 When the `knowledge` Compose profile is enabled, `install.sh` creates separate
-local PostgreSQL login identities for the API, projector, and builder and
+local PostgreSQL login identities for the API, projector, and embedded job
+engine and
 materializes their URL files. It also generates the cache and heartbeat keys.
 Provide the externally issued delegation and workload tokens through `.env`;
 the installer copies them into mode-0600 runtime-only files. The complete file
@@ -8,6 +9,7 @@ set is:
 - `knowledge-database-url`
 - `knowledge-worker-database-url`
 - `knowledge-projector-database-url`
+- `configserver-event-read-url`
 - `agent-delegation-secret`
 - `knowledge-query-cache-key`
 - `knowledge-heartbeat-secret`
@@ -27,8 +29,9 @@ The `kb_index` lane must enforce `x-light-maximum-billed-cost-micros` and return
 `x-light-billed-cost-micros`; a response without bounded cost evidence is
 rejected after the worker has reserved the approved budget.
 
-Do not commit their values. The three database identities must use the API,
-worker, and projector roles created by the Phase 2 schema.
+Do not commit their values. The three Knowledge database URLs target the
+isolated `knowledge` database; `configserver-event-read-url` targets
+`configserver` through the read-only projector role.
 
 `knowledge-query-cache-key` must contain at least 32 random bytes and must be
 independent of `agent-delegation-secret`. Rotating it invalidates cache keys
@@ -43,14 +46,15 @@ The `agent-delegation-secret` value must match
 `LIGHT_AGENT_DELEGATION_SECRET`. The bearer token stored in
 `knowledge-portal-authorization` must have a `sub` included in
 `KNOWLEDGE_WORKLOAD_PRINCIPALS`; the local default principal is
-`light-knowledge-worker`. Promotion acknowledgements do not require an
+both `light-knowledge-worker` and `light-knowledge` during the rollback
+window. Promotion acknowledgements do not require an
 end-user tenant or platform-admin role: the allowlisted workload identity and
 the exact pending-outbox generation, pointer, and evidence digest authorize the
 operation.
 
 The checked-in `portal-config-dev` and `portal-config-loc` fixtures remain
 explicit deterministic pilots. Do not copy their fake 32-dimensional space
-into this installer. Builders form a shared job pool: a claimed job resolves a
+into this installer. Embedded executors form a shared job pool: a claimed job resolves a
 versioned source/policy/profile snapshot from PostgreSQL, enforces the policy
 concurrency ceiling, and rebuilds one complete BASE across every active Git
 source in the Knowledge Base. Job leases are renewed while work is running and

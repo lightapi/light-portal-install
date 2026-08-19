@@ -339,6 +339,125 @@ write_secret() {
   chmod 600 "$path"
 }
 
+ensure_knowledge_database() {
+  local exists
+  exists="$(docker exec postgres psql -U postgres -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='knowledge'" | tr -d '[:space:]')"
+  if [[ "$exists" == "1" ]]; then
+    local ready
+    ready="$(docker exec postgres psql -U postgres -d knowledge -tAc \
+      "SELECT to_regclass('knowledge_job_t') IS NOT NULL
+           AND to_regclass('knowledge_projection_source_cursor_t') IS NOT NULL
+           AND to_regclass('knowledge_embedding_profile_runtime_v') IS NOT NULL
+           AND to_regclass('event_store_t') IS NULL" | tr -d '[:space:]')"
+    [[ "$ready" == "t" ]] || fail \
+      "existing knowledge database failed the boundary contract"
+    return 0
+  fi
+
+  log "creating isolated Knowledge database"
+  docker exec postgres psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
+    -c "CREATE DATABASE knowledge"
+  docker exec postgres pg_dump -U postgres -d configserver --schema-only --no-owner \
+    | docker exec -i postgres psql -U postgres -d knowledge -v ON_ERROR_STOP=1 >/dev/null
+  docker exec postgres pg_dump -U postgres -d configserver --data-only --no-owner \
+    --disable-triggers --table='public.knowledge_*' \
+    --table='public.agent_knowledge_base_t' \
+    | docker exec -i postgres psql -U postgres -d knowledge -v ON_ERROR_STOP=1 >/dev/null
+  docker exec postgres psql -U postgres -d configserver -v ON_ERROR_STOP=1 \
+    -c "COPY cascade_relationship_policy_t TO STDOUT" \
+    | docker exec -i postgres psql -U postgres -d knowledge -v ON_ERROR_STOP=1 \
+        -c "COPY cascade_relationship_policy_t FROM STDIN"
+  docker exec -i postgres psql -U postgres -d knowledge -v ON_ERROR_STOP=1 <<'SQL'
+DROP VIEW IF EXISTS knowledge_embedding_profile_runtime_v;
+DROP TRIGGER IF EXISTS knowledge_embedding_profile_qualification_trg
+    ON knowledge_embedding_profile_t;
+ALTER TABLE knowledge_embedding_profile_t
+    ADD COLUMN IF NOT EXISTS alias_name VARCHAR(255);
+UPDATE knowledge_embedding_profile_t
+   SET alias_name = 'kb-index'
+ WHERE alias_name IS NULL;
+ALTER TABLE knowledge_embedding_profile_t
+    ALTER COLUMN alias_name SET DEFAULT 'kb-index',
+    ALTER COLUMN alias_name SET NOT NULL;
+
+DO $$
+DECLARE relation RECORD;
+BEGIN
+    FOR relation IN
+        SELECT tablename AS name, 'TABLE' AS kind
+          FROM pg_tables
+         WHERE schemaname = 'public'
+           AND tablename NOT LIKE 'knowledge\_%' ESCAPE '\'
+           AND tablename NOT IN ('agent_knowledge_base_t',
+                                 'cascade_relationship_policy_t')
+        UNION ALL
+        SELECT viewname AS name, 'VIEW' AS kind
+          FROM pg_views
+         WHERE schemaname = 'public'
+           AND viewname NOT LIKE 'knowledge\_%' ESCAPE '\'
+           AND viewname <> 'cascade_relationships_v'
+    LOOP
+        EXECUTE format('DROP %s IF EXISTS %I CASCADE', relation.kind, relation.name);
+    END LOOP;
+END
+$$;
+
+CREATE VIEW knowledge_embedding_profile_runtime_v
+WITH (security_barrier = true) AS
+SELECT profile.profile_id, profile.profile_revision,
+       profile.expected_space_id, profile.expected_space_revision,
+       profile.dimension, profile.document_input_transform_version,
+       profile.query_input_transform_version, profile.alias_name
+  FROM knowledge_embedding_profile_t profile
+ WHERE profile.active = TRUE;
+
+GRANT SELECT ON TABLE knowledge_embedding_profile_runtime_v
+    TO light_knowledge_api_role,
+       light_knowledge_portal_projector_role,
+       light_knowledge_worker_role;
+
+DELETE FROM cascade_relationship_policy_t policy
+ WHERE NOT EXISTS (
+    SELECT 1
+      FROM pg_constraint constraint_row
+      JOIN pg_class child ON child.oid = constraint_row.conrelid
+     WHERE constraint_row.contype = 'f'
+       AND constraint_row.conname = policy.constraint_name
+       AND child.relname = policy.child_table
+ );
+
+CREATE TABLE IF NOT EXISTS knowledge_projection_source_cursor_t (
+    consumer_group VARCHAR(160) PRIMARY KEY,
+    last_event_ts TIMESTAMPTZ NOT NULL,
+    last_event_id UUID NOT NULL,
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK(length(trim(consumer_group)) > 0)
+);
+
+CREATE OR REPLACE FUNCTION notify_knowledge_job_eligible()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.state = 'QUEUED'
+       AND (NEW.next_attempt_ts IS NULL OR NEW.next_attempt_ts <= CURRENT_TIMESTAMP)
+       AND (TG_OP = 'INSERT'
+            OR OLD.state IS DISTINCT FROM NEW.state
+            OR OLD.next_attempt_ts IS DISTINCT FROM NEW.next_attempt_ts) THEN
+        PERFORM pg_notify('knowledge_job_channel', NEW.job_id::text);
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS knowledge_job_eligible_notify_trg ON knowledge_job_t;
+CREATE TRIGGER knowledge_job_eligible_notify_trg
+AFTER INSERT OR UPDATE OF state, next_attempt_ts ON knowledge_job_t
+FOR EACH ROW EXECUTE FUNCTION notify_knowledge_job_eligible();
+
+GRANT SELECT, INSERT, UPDATE ON knowledge_projection_source_cursor_t
+    TO light_knowledge_portal_projector_role;
+SQL
+}
+
 ensure_knowledge_runtime() {
   knowledge_profile_enabled || return 0
   require_command openssl
@@ -346,6 +465,7 @@ ensure_knowledge_runtime() {
   local api_password worker_password projector_password delegation_secret
   local portal_token query_embedding_token index_embedding_token
   mkdir -p "$secret_dir"
+  ensure_knowledge_database
 
   api_password="$(openssl rand -hex 32)"
   worker_password="$(openssl rand -hex 32)"
@@ -360,9 +480,15 @@ ensure_knowledge_runtime() {
   docker exec postgres psql -U postgres -d configserver -v ON_ERROR_STOP=1 \
     -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='light_knowledge_api') THEN CREATE ROLE light_knowledge_api LOGIN; END IF; IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='light_knowledge_worker') THEN CREATE ROLE light_knowledge_worker LOGIN; END IF; IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='light_knowledge_projector') THEN CREATE ROLE light_knowledge_projector LOGIN; END IF; END \$\$; ALTER ROLE light_knowledge_api PASSWORD '$api_password'; ALTER ROLE light_knowledge_worker PASSWORD '$worker_password'; ALTER ROLE light_knowledge_projector PASSWORD '$projector_password'; GRANT light_knowledge_api_role TO light_knowledge_api; GRANT light_knowledge_worker_role TO light_knowledge_worker; GRANT light_knowledge_portal_projector_role TO light_knowledge_projector;" >/dev/null
 
-  write_secret_once "$secret_dir/knowledge-database-url" "postgres://light_knowledge_api:$api_password@postgres:5432/configserver"
-  write_secret_once "$secret_dir/knowledge-worker-database-url" "postgres://light_knowledge_worker:$worker_password@postgres:5432/configserver"
-  write_secret_once "$secret_dir/knowledge-projector-database-url" "postgres://light_knowledge_projector:$projector_password@postgres:5432/configserver"
+  write_secret_once "$secret_dir/knowledge-database-url" "postgres://light_knowledge_api:$api_password@postgres:5432/knowledge"
+  write_secret_once "$secret_dir/knowledge-worker-database-url" "postgres://light_knowledge_worker:$worker_password@postgres:5432/knowledge"
+  write_secret_once "$secret_dir/knowledge-projector-database-url" "postgres://light_knowledge_projector:$projector_password@postgres:5432/knowledge"
+  write_secret_once "$secret_dir/configserver-event-read-url" "postgres://light_knowledge_projector:$projector_password@postgres:5432/configserver"
+  for database_secret in knowledge-database-url knowledge-worker-database-url knowledge-projector-database-url; do
+    if [[ -s "$secret_dir/$database_secret" ]] && grep -q '/configserver$' "$secret_dir/$database_secret"; then
+      sed -i 's#/configserver$#/knowledge#' "$secret_dir/$database_secret"
+    fi
+  done
   write_secret_once "$secret_dir/knowledge-query-cache-key" "$(openssl rand -hex 48)"
   write_secret_once "$secret_dir/knowledge-heartbeat-secret" "$(openssl rand -hex 48)"
 
