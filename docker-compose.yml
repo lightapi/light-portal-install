@@ -430,17 +430,23 @@ services:
     ports:
       - "${LIGHT_KNOWLEDGE_PORT:-8092}:8092"
     volumes:
-      - ./light-knowledge/config:/config:ro,Z
+      - ./light-controller-rust/ca.pem:/keystore/ca.pem:ro,Z
       - ./light-knowledge/secrets:/run/secrets:ro,Z
       - ./light-knowledge/objects:/var/lib/light-knowledge/objects:Z
       - ./light-knowledge/checkouts:/var/lib/light-knowledge/checkouts:Z
     environment:
-      LIGHT_KNOWLEDGE_CONFIG_FILE: ${LIGHT_KNOWLEDGE_CONFIG_FILE:-/config/knowledge.yml}
+      CLIENT_VERIFYHOSTNAME: "false"
+      CLIENT_CACERTPATH: /keystore/ca.pem
+      LIGHT_PORTAL_AUTHORIZATION: ${KNOWLEDGE_PORTAL_AUTHORIZATION:-}
     depends_on:
       postgres:
         condition: service_healthy
       knowledge-schema-migration:
         condition: service_completed_successfully
+      config-server:
+        condition: service_healthy
+      controller:
+        condition: service_healthy
 
 
 volumes:

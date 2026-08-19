@@ -61,8 +61,8 @@ source in the Knowledge Base. Job leases are renewed while work is running and
 expired claims are safely requeued.
 
 Start the protected installer with both `knowledge` and `llm-gateway` Compose
-profiles. For a deliberately local deterministic exercise only, set
-`LIGHT_KNOWLEDGE_CONFIG_FILE=/config/knowledge-pilot.yml` and
-`LIGHT_KNOWLEDGE_WORKER_CONFIG_FILE=/config/worker-pilot.yml`. The pilot files
-keep production operations and migrations disabled and are not release
+profiles. The image supplies the canonical Knowledge templates, while the
+Config Server snapshot supplies deployment-specific overrides. A deliberately
+deterministic exercise must use instance-scoped Config Server overrides and
+must keep production operations and migrations disabled; it is not release
 evidence.
