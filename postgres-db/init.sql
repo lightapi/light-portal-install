@@ -12057,6 +12057,21 @@ ALTER TABLE agent_definition_t
 COMMIT;
 -- END INLINED patch_20260819_01_light_agent_policy_snapshot_pointer.sql
 
+-- BEGIN INLINED patch_20260819_02_light_agent_policy_snapshot_pointer_rollback.sql
+BEGIN;
+
+ALTER TABLE agent_definition_t
+    DROP CONSTRAINT IF EXISTS agent_definition_policy_snapshot_fk;
+
+ALTER TABLE agent_definition_t
+    DROP COLUMN IF EXISTS policy_snapshot_id;
+
+ALTER TABLE agent_policy_snapshot_t
+    DROP CONSTRAINT IF EXISTS agent_policy_snapshot_agent_identity_uk;
+
+COMMIT;
+-- END INLINED patch_20260819_02_light_agent_policy_snapshot_pointer_rollback.sql
+
 
 \set ON_ERROR_STOP on
 
