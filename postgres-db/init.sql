@@ -394,7 +394,8 @@ CREATE TABLE event_store_t (
 -- Index for efficient lookup by aggregate
 CREATE INDEX idx_event_store_aggregate ON event_store_t (aggregate_id);
 CREATE INDEX idx_event_store_event_ts_id ON event_store_t (event_ts, id)
-    WHERE event_type LIKE 'Knowledge%' OR event_type LIKE 'AgentKnowledgeBase%';
+    WHERE event_type LIKE 'Knowledge%'
+       OR event_type LIKE 'AgentKnowledgeBase%';
 
 CREATE TABLE entity_aggregate_t (
     aggregate_type   VARCHAR(255) NOT NULL,
@@ -11968,6 +11969,94 @@ COMMENT ON COLUMN workflow_invocation_t.user_authorization_exp IS
 COMMIT;
 -- END WORKFLOW USER AUTHORIZATION PASS THROUGH
 
+-- BEGIN LIGHT KNOWLEDGE SINGLE CONTAINER
+BEGIN;
+
+ALTER TABLE knowledge_embedding_profile_t
+    ADD COLUMN alias_name VARCHAR(255) NOT NULL DEFAULT 'kb-index',
+    ADD CONSTRAINT knowledge_embedding_profile_alias_name_ck
+        CHECK(length(trim(alias_name)) > 0);
+
+CREATE TABLE IF NOT EXISTS knowledge_projection_source_cursor_t (
+    consumer_group VARCHAR(160) PRIMARY KEY,
+    last_event_ts TIMESTAMPTZ NOT NULL,
+    last_event_id UUID NOT NULL,
+    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK(length(trim(consumer_group)) > 0)
+);
+
+CREATE OR REPLACE FUNCTION notify_knowledge_job_eligible()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.state = 'QUEUED'
+       AND (NEW.next_attempt_ts IS NULL OR NEW.next_attempt_ts <= CURRENT_TIMESTAMP)
+       AND (TG_OP = 'INSERT'
+            OR OLD.state IS DISTINCT FROM NEW.state
+            OR OLD.next_attempt_ts IS DISTINCT FROM NEW.next_attempt_ts) THEN
+        PERFORM pg_notify('knowledge_job_channel', NEW.job_id::text);
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER knowledge_job_eligible_notify_trg
+AFTER INSERT OR UPDATE OF state, next_attempt_ts ON knowledge_job_t
+FOR EACH ROW EXECUTE FUNCTION notify_knowledge_job_eligible();
+
+GRANT SELECT, INSERT, UPDATE ON TABLE knowledge_projection_source_cursor_t
+    TO light_knowledge_portal_projector_role;
+
+COMMIT;
+-- END LIGHT KNOWLEDGE SINGLE CONTAINER
+
+-- BEGIN INLINED patch_20260819_01_light_agent_policy_snapshot_pointer.sql
+BEGIN;
+
+ALTER TABLE agent_definition_t
+    ADD COLUMN IF NOT EXISTS policy_snapshot_id UUID;
+
+UPDATE agent_definition_t definition
+   SET policy_snapshot_id = snapshot.policy_snapshot_id
+  FROM agent_policy_snapshot_t snapshot
+ WHERE definition.policy_snapshot_id IS NULL
+   AND definition.policy_digest IS NOT NULL
+   AND snapshot.host_id = definition.host_id
+   AND snapshot.agent_def_id = definition.agent_def_id
+   AND snapshot.policy_digest = definition.policy_digest
+   AND snapshot.revoked_ts IS NULL;
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+          FROM agent_definition_t definition
+         WHERE definition.policy_digest IS NOT NULL
+           AND definition.policy_snapshot_id IS NULL
+    ) THEN
+        RAISE EXCEPTION
+            'agent definitions with a policy digest must resolve to one active policy snapshot before upgrade';
+    END IF;
+END $$;
+
+ALTER TABLE agent_definition_t
+    DROP CONSTRAINT IF EXISTS agent_definition_policy_snapshot_fk;
+ALTER TABLE agent_policy_snapshot_t
+    DROP CONSTRAINT IF EXISTS agent_policy_snapshot_agent_identity_uk;
+ALTER TABLE agent_policy_snapshot_t
+    ADD CONSTRAINT agent_policy_snapshot_agent_identity_uk
+    UNIQUE(host_id, agent_def_id, policy_snapshot_id);
+
+ALTER TABLE agent_definition_t
+    ADD CONSTRAINT agent_definition_policy_snapshot_fk
+    FOREIGN KEY(host_id, agent_def_id, policy_snapshot_id)
+    REFERENCES agent_policy_snapshot_t(host_id, agent_def_id, policy_snapshot_id)
+    ON DELETE RESTRICT;
+
+COMMIT;
+-- END INLINED patch_20260819_01_light_agent_policy_snapshot_pointer.sql
+
 
 \set ON_ERROR_STOP on
 
@@ -13319,36 +13408,3 @@ INSERT INTO host_t (host_id, domain, sub_domain, host_owner) VALUES ('01964b05-5
 INSERT INTO user_host_t (host_id, user_id, current)  values ('01964b05-552a-7c4b-9184-6857e7f3dc5f', '01964b05-5532-7c79-8cde-191dcbd421b8', true);
 
 INSERT INTO employee_t (host_id, employee_id, user_id, title, manager_id, hire_date) VALUES ('01964b05-552a-7c4b-9184-6857e7f3dc5f', 'sh35', '01964b05-5532-7c79-8cde-191dcbd421b8', 'Consulant API Platform', null, '2023-06-18');
-
--- Provision an isolated Knowledge data plane from the canonical schema, then
--- remove Config Server-owned relations. Roles are cluster-wide; their existing
--- Knowledge grants remain valid in the cloned database.
-CREATE TABLE IF NOT EXISTS knowledge_projection_source_cursor_t (
-    consumer_group VARCHAR(160) PRIMARY KEY,
-    last_event_ts TIMESTAMPTZ NOT NULL,
-    last_event_id UUID NOT NULL,
-    update_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CHECK(length(trim(consumer_group)) > 0)
-);
-
-CREATE OR REPLACE FUNCTION notify_knowledge_job_eligible()
-RETURNS trigger LANGUAGE plpgsql AS $$
-BEGIN
-    IF NEW.state = 'QUEUED'
-       AND (NEW.next_attempt_ts IS NULL OR NEW.next_attempt_ts <= CURRENT_TIMESTAMP)
-       AND (TG_OP = 'INSERT'
-            OR OLD.state IS DISTINCT FROM NEW.state
-            OR OLD.next_attempt_ts IS DISTINCT FROM NEW.next_attempt_ts) THEN
-        PERFORM pg_notify('knowledge_job_channel', NEW.job_id::text);
-    END IF;
-    RETURN NEW;
-END;
-$$;
-
-DROP TRIGGER IF EXISTS knowledge_job_eligible_notify_trg ON knowledge_job_t;
-CREATE TRIGGER knowledge_job_eligible_notify_trg
-AFTER INSERT OR UPDATE OF state, next_attempt_ts ON knowledge_job_t
-FOR EACH ROW EXECUTE FUNCTION notify_knowledge_job_eligible();
-
-GRANT SELECT, INSERT, UPDATE ON knowledge_projection_source_cursor_t
-    TO light_knowledge_portal_projector_role;
