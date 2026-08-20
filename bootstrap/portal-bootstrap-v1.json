@@ -1,0 +1,53 @@
+{
+  "profile": "portal-bootstrap-v1",
+  "tables": [
+    {
+      "name": "event_store_t",
+      "columns": ["id", "host_id", "user_id", "nonce", "aggregate_id", "aggregate_version", "aggregate_type", "event_type", "event_ts", "payload", "metadata"],
+      "sortKey": ["id"]
+    },
+    {
+      "name": "outbox_message_t",
+      "columns": ["id", "host_id", "user_id", "nonce", "aggregate_id", "aggregate_version", "aggregate_type", "event_type", "event_ts", "payload", "metadata", "c_offset", "transaction_ordinal", "transaction_count"],
+      "excludedColumns": ["transaction_id"],
+      "sortKey": ["c_offset"]
+    },
+    {
+      "name": "entity_aggregate_t",
+      "columns": ["aggregate_type", "aggregate_id", "entity_status", "created_event_id", "created_ts", "retired_ts"],
+      "normalizedColumns": ["created_ts", "retired_ts"],
+      "sortKey": ["aggregate_type", "aggregate_id"]
+    },
+    {
+      "name": "entity_identity_t",
+      "columns": ["scope_type", "scope_id", "aggregate_type", "identity_schema_version", "identity_hash", "identity_explanation", "aggregate_id", "binding_status", "created_event_id", "created_ts", "demoted_ts"],
+      "normalizedColumns": ["created_ts", "demoted_ts"],
+      "sortKey": ["scope_type", "scope_id", "aggregate_type", "identity_schema_version", "identity_hash"]
+    },
+    {
+      "name": "entity_identity_materialization_t",
+      "columns": ["aggregate_type", "birth_event_type", "policy_registry_version", "normalizer_version", "covered_event_count", "input_digest", "expected_owner_count", "expected_binding_count", "verification_digest", "scope_attestation_digest", "completion_status", "completed_by", "completed_ts"],
+      "normalizedColumns": ["completed_ts"],
+      "sortKey": ["aggregate_type"]
+    },
+    {
+      "name": "instance_graph_revision_t",
+      "columns": ["host_id", "instance_id", "accepted_revision", "projected_revision", "accepted_ts", "projected_ts"],
+      "normalizedColumns": ["accepted_ts", "projected_ts"],
+      "sortKey": ["host_id", "instance_id"]
+    },
+    {
+      "name": "notification_t",
+      "columns": ["id", "host_id", "user_id", "nonce", "event_class", "event_json", "event_ts", "process_ts", "status", "error", "aggregate_id", "aggregate_type", "aggregate_version", "event_partition", "event_offset", "read_ts"],
+      "excludedColumns": ["transaction_id"],
+      "normalizedColumns": ["process_ts", "read_ts"],
+      "sortKey": ["host_id", "id"]
+    },
+    {
+      "name": "dead_letter_queue",
+      "columns": ["group_id", "host_id", "user_id", "c_offset", "transaction_id", "payload", "exception", "created_dt"],
+      "normalizedColumns": ["created_dt"],
+      "sortKey": ["c_offset", "group_id"]
+    }
+  ]
+}

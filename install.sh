@@ -38,9 +38,18 @@ Environment:
                              llm-gateway Portal service token.
   IMPORT_EVENTS              Default: auto. Use false to skip event import.
   EVENT_IMPORTER_IMAGE       Default: networknt/event-importer:latest
-  EVENT_IMPORT_BOOTSTRAP_OPERATOR_ID
-                             Override the audit operator UUID used for an
-                             automatic empty-database baseline bootstrap.
+  EVENT_IMPORT_PHYSICAL_CHUNK_EVENTS
+                             Events per physical bootstrap commit. Default and
+                             hard maximum: 500.
+  EVENT_PROJECTION_CURSOR_ATTEMPTS
+                             Maximum async projection cursor checks. Default: 300.
+  EVENT_PROJECTION_CURSOR_INTERVAL
+                             Seconds between projection cursor checks. Default: 1.
+  PORTAL_BOOTSTRAP_ARCHIVE   Default: auto. Use false to bypass archive restore.
+  LIGHT_PORTAL_BOOTSTRAP_PUBLIC_KEY
+                             Release public key used to verify manifest.sig.
+  LIGHT_PORTAL_BOOTSTRAP_CREDENTIAL_ROTATION_HOOK
+                             Executable pre-listener credential rotation hook.
   LIGHT_PORTAL_CLIENT_REDIRECT_URI
                              Default: https://local.localhost/authorization
   CLEAN_VOLUMES=true         Stop the stack and delete Docker volumes before
@@ -211,14 +220,28 @@ download_archive_file() {
 
 download_release_artifacts() {
   local release_url="$release_base_url/$version"
+  local archive_object=""
+  local signature_object=""
 
   require_command curl
   require_command unzip
+  require_command python3
 
   mkdir -p data db/patches events/deltas
   download_file "$release_url/manifest.json" data/manifest.json
   download_file "$release_url/db-patches.zip" data/db-patches.zip
   download_file "$release_url/event-deltas.zip" data/event-deltas.zip
+
+  archive_object="$(python3 scripts/bootstrap_manifest.py get \
+    --manifest data/manifest.json --path bootstrapArchive.object 2>/dev/null || true)"
+  signature_object="$(python3 scripts/bootstrap_manifest.py get \
+    --manifest data/manifest.json --path bootstrapArchive.signatureObject 2>/dev/null || true)"
+  if [[ -n "$archive_object" && -n "$signature_object" ]]; then
+    download_file "$release_url/$archive_object" "data/$(basename -- "$archive_object")"
+    download_file "$release_url/$signature_object" "data/$(basename -- "$signature_object")"
+  else
+    log "release does not publish a PostgreSQL bootstrap archive; event import remains available"
+  fi
 
   rm -rf db/patches events/deltas
   mkdir -p db events
@@ -618,8 +641,232 @@ event_store_count() {
   docker exec postgres psql -h localhost -p 5432 -U postgres -d configserver -tAc "select count(*) from event_store_t;" 2>/dev/null | tr -d '[:space:]'
 }
 
+wait_for_baseline_projection_cursor() {
+  local max_attempts="${EVENT_PROJECTION_CURSOR_ATTEMPTS:-300}"
+  local interval="${EVENT_PROJECTION_CURSOR_INTERVAL:-1}"
+  local attempt=1
+  local state
+
+  while [[ "$attempt" -le "$max_attempts" ]]; do
+    state="$(docker exec postgres psql -h localhost -p 5432 -U postgres \
+      -d configserver -tAc "
+        SELECT CASE WHEN COALESCE((
+          SELECT next_offset
+          FROM consumer_offsets
+          WHERE group_id = 'user-query-group'
+            AND topic_id = 1
+            AND partition_id = 0
+        ), 0) >= (SELECT next_offset FROM log_counter WHERE id = 1)
+        THEN 'ready' ELSE 'waiting' END;
+      " 2>/dev/null | tr -d '[:space:]' || true)"
+    [[ "$state" == "ready" ]] && return 0
+    sleep "$interval"
+    attempt=$((attempt + 1))
+  done
+
+  die "event projection cursor did not catch up after $max_attempts attempts"
+}
+
 psql_exec() {
   docker exec -i postgres psql -h localhost -p 5432 -U postgres -d configserver -v ON_ERROR_STOP=1 "$@"
+}
+
+reset_configserver_database() {
+  log "resetting configserver after an incomplete bootstrap archive restore"
+  docker exec postgres psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
+    -c "DROP DATABASE IF EXISTS configserver WITH (FORCE);"
+  docker exec postgres createdb -U postgres configserver
+  docker exec -i postgres psql -U postgres -d configserver -v ON_ERROR_STOP=1 \
+    < postgres-db/init.sql
+}
+
+verify_bootstrap_postconditions() {
+  psql_exec <<'SQL'
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM instance_graph_revision_t
+     WHERE projected_revision < accepted_revision
+  ) THEN
+    RAISE EXCEPTION 'instance graph projection has not converged';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM outbox_message_t
+     WHERE transaction_ordinal <> 0 OR transaction_count <> 1
+        OR substring(transaction_id::text, 15, 1) <> '7'
+  ) THEN
+    RAISE EXCEPTION 'outbox singleton UUIDv7 invariant failed';
+  END IF;
+  IF (SELECT count(*) FROM outbox_message_t) <>
+     (SELECT count(DISTINCT transaction_id) FROM outbox_message_t) THEN
+    RAISE EXCEPTION 'outbox transaction ids are not unique';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM outbox_message_t
+     GROUP BY c_offset HAVING count(*) <> 1
+  ) OR COALESCE((SELECT max(c_offset) - min(c_offset) + 1 FROM outbox_message_t), 0) <>
+       (SELECT count(*) FROM outbox_message_t) THEN
+    RAISE EXCEPTION 'outbox offsets are not gapless';
+  END IF;
+  IF EXISTS (SELECT 1 FROM user_t WHERE password = 'DISABLED:portal-bootstrap-v1')
+     OR EXISTS (SELECT 1 FROM auth_client_t WHERE client_secret = 'DISABLED:portal-bootstrap-v1') THEN
+    RAISE EXCEPTION 'bootstrap credential placeholders remain after rotation';
+  END IF;
+END $$;
+SQL
+}
+
+try_restore_bootstrap_archive() {
+  local mode="${PORTAL_BOOTSTRAP_ARCHIVE:-auto}"
+  local manifest="data/manifest.json"
+  local archive_object
+  local signature_object
+  local archive
+  local signature
+  local public_key="${LIGHT_PORTAL_BOOTSTRAP_PUBLIC_KEY:-bootstrap/release-public.pem}"
+  local rotation_hook="${LIGHT_PORTAL_BOOTSTRAP_CREDENTIAL_ROTATION_HOOK:-scripts/rotate-bootstrap-credentials.py}"
+  local postgres_major
+  local restore_role="${PORTAL_BOOTSTRAP_APPLICATION_ROLE:-postgres}"
+  local container_archive="/tmp/light-portal-bootstrap.dump"
+  local expected_schema_digest
+  local actual_schema_digest
+  local restored_checksums
+  local grants_verified
+  local analyze_verified
+  local existing_event_count
+  local expected_included_deltas
+  local actual_included_deltas
+
+  case "${mode,,}" in
+    false|no|0|disabled) return 1 ;;
+    auto|true|yes|1) ;;
+    *) die "invalid PORTAL_BOOTSTRAP_ARCHIVE value: $mode" ;;
+  esac
+
+  existing_event_count="$(event_store_count || true)"
+  if [[ "$existing_event_count" != "0" ]]; then
+    log "bootstrap archive requires an empty event store; preserving the existing database"
+    return 1
+  fi
+
+  [[ -f "$manifest" && -f events.json ]] || return 1
+  archive_object="$(python3 scripts/bootstrap_manifest.py get \
+    --manifest "$manifest" --path bootstrapArchive.object 2>/dev/null || true)"
+  signature_object="$(python3 scripts/bootstrap_manifest.py get \
+    --manifest "$manifest" --path bootstrapArchive.signatureObject 2>/dev/null || true)"
+  [[ -n "$archive_object" && -n "$signature_object" ]] || return 1
+  archive="data/$(basename -- "$archive_object")"
+  signature="data/$(basename -- "$signature_object")"
+
+  if [[ ! -f "$archive" || ! -f "$signature" || ! -f "$public_key" ]]; then
+    log "bootstrap archive verification inputs are incomplete; using event import"
+    return 1
+  fi
+  if [[ -z "$rotation_hook" || ! -x "$rotation_hook" ]]; then
+    log "credential rotation hook is unavailable; refusing public bootstrap archive"
+    return 1
+  fi
+
+  require_command openssl
+  require_command python3
+  if ! openssl dgst -sha256 -verify "$public_key" -signature "$signature" "$manifest" >/dev/null; then
+    log "bootstrap manifest signature verification failed; using event import"
+    return 1
+  fi
+  postgres_major="$(docker exec postgres psql -U postgres -d postgres -tAc \
+    "SELECT current_setting('server_version_num')::integer / 10000;" | tr -d '[:space:]')"
+  if ! python3 scripts/bootstrap_manifest.py verify --manifest "$manifest" \
+      --archive "$archive" --events events.json \
+      --profile bootstrap/portal-bootstrap-v1.json \
+      --postgres-major "$postgres_major"; then
+    log "bootstrap artifact contract verification failed; using event import"
+    return 1
+  fi
+  [[ "$restore_role" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] ||
+    die "invalid PORTAL_BOOTSTRAP_APPLICATION_ROLE: $restore_role"
+
+  log "restoring verified PostgreSQL bootstrap archive"
+  docker cp "$archive" "postgres:$container_archive"
+  if ! docker exec postgres pg_restore -U postgres -d configserver \
+      --clean --if-exists --no-owner --no-acl --exit-on-error \
+      --jobs "${BOOTSTRAP_RESTORE_JOBS:-4}" "$container_archive"; then
+    docker exec postgres rm -f "$container_archive" || true
+    reset_configserver_database
+    log "bootstrap restore failed; reset completed for event-import fallback"
+    return 1
+  fi
+  docker exec postgres rm -f "$container_archive"
+
+  expected_schema_digest="$(python3 scripts/bootstrap_manifest.py get \
+    --manifest "$manifest" --path schemaSha256)"
+  actual_schema_digest="$(docker exec postgres pg_dump -U postgres -d configserver \
+    --schema-only --no-owner --no-acl |
+    sed '/^\\restrict /d; /^\\unrestrict /d' | sha256sum | awk '{print $1}')"
+  if [[ "$actual_schema_digest" != "$expected_schema_digest" ]]; then
+    reset_configserver_database
+    log "restored schema digest mismatch; reset completed for event-import fallback"
+    return 1
+  fi
+  expected_included_deltas="$(python3 scripts/bootstrap_manifest.py get \
+    --manifest "$manifest" --path includedDeltaIds | tr -d '[:space:]')"
+  actual_included_deltas="$(docker exec postgres psql -U postgres -d configserver -tAc \
+    "SELECT COALESCE(json_agg(delta_id ORDER BY imported_ts, delta_id)::text, '[]')
+       FROM portal_event_delta_t;" | tr -d '[:space:]')"
+  if [[ "$actual_included_deltas" != "$expected_included_deltas" ]]; then
+    reset_configserver_database
+    log "archive delta ledger mismatch; reset completed for event-import fallback"
+    return 1
+  fi
+
+  restored_checksums="$(mktemp "${TMPDIR:-/tmp}/portal-bootstrap-checksums.XXXXXX")"
+  if ! python3 scripts/bootstrap_checksums.py \
+      --profile bootstrap/portal-bootstrap-v1.json --docker-container postgres \
+      > "$restored_checksums" ||
+     ! python3 scripts/bootstrap_manifest.py verify-checksums \
+      --manifest "$manifest" --checksums "$restored_checksums"; then
+    rm -f "$restored_checksums"
+    reset_configserver_database
+    log "restored canonical checksums failed; reset completed for event-import fallback"
+    return 1
+  fi
+  rm -f "$restored_checksums"
+
+  psql_exec -c "GRANT CONNECT ON DATABASE configserver TO $restore_role;"
+  psql_exec -c "GRANT USAGE ON SCHEMA public TO $restore_role;"
+  psql_exec -c "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO $restore_role;"
+  psql_exec -c "GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO $restore_role;"
+  grants_verified="$(docker exec postgres psql -U postgres -d configserver -tAc \
+    "SELECT has_database_privilege('$restore_role', 'configserver', 'CONNECT')
+         AND has_schema_privilege('$restore_role', 'public', 'USAGE')
+         AND has_table_privilege('$restore_role', 'public.event_store_t', 'SELECT');" |
+    tr -d '[:space:]')"
+  [[ "$grants_verified" == "t" ]] || {
+    reset_configserver_database
+    log "restore grant verification failed; reset completed for event-import fallback"
+    return 1
+  }
+  if ! "$rotation_hook" "$manifest"; then
+    reset_configserver_database
+    log "credential rotation failed; reset completed for event-import fallback"
+    return 1
+  fi
+  psql_exec -c "ANALYZE;"
+  analyze_verified="$(docker exec postgres psql -U postgres -d configserver -tAc \
+    "SELECT last_analyze IS NOT NULL FROM pg_stat_all_tables
+      WHERE schemaname = 'public' AND relname = 'event_store_t';" |
+    tr -d '[:space:]')"
+  [[ "$analyze_verified" == "t" ]] || {
+    reset_configserver_database
+    log "planner statistics verification failed; reset completed for event-import fallback"
+    return 1
+  }
+  if ! verify_bootstrap_postconditions; then
+    reset_configserver_database
+    log "post-restore verification failed; reset completed for event-import fallback"
+    return 1
+  fi
+  log "verified PostgreSQL bootstrap archive is database-ready"
+  return 0
 }
 
 default_event_import_network() {
@@ -639,7 +886,6 @@ import_events() {
   local event_count=""
   local importer_image
   local import_network
-  local bootstrap_operator_id="${EVENT_IMPORT_BOOTSTRAP_OPERATOR_ID:-01964b05-5532-7c79-8cde-191dcbd421b8}"
   local extra_args=()
 
   case "$import_mode_lower" in
@@ -673,10 +919,17 @@ import_events() {
   if [[ "$event_count" -eq 0 ]]; then
     extra_args+=(
       --bootstrap-import
-      --legacy-write-fenced
-      --bootstrap-operator-id "$bootstrap_operator_id"
+      --physical-chunk-events "${EVENT_IMPORT_PHYSICAL_CHUNK_EVENTS:-500}"
+      --physical-chunk-bytes "${EVENT_IMPORT_PHYSICAL_CHUNK_BYTES:-16777216}"
+      --max-event-bytes "${EVENT_IMPORT_MAX_EVENT_BYTES:-67108864}"
     )
-    log "empty destination detected; enabling guarded baseline bootstrap import"
+    [[ "${EVENT_IMPORT_SYNCHRONOUS_COMMIT_OFF:-false}" =~ ^(1|true|TRUE|yes|YES)$ ]] &&
+      extra_args+=(--bootstrap-synchronous-commit-off)
+    [[ "${EVENT_IMPORT_DIAGNOSE_FAILED_CHUNK:-false}" =~ ^(1|true|TRUE|yes|YES)$ ]] &&
+      extra_args+=(--diagnose-failed-chunk)
+    [[ "${EVENT_IMPORT_PHYSICAL_CHUNKING_DISABLED:-false}" =~ ^(1|true|TRUE|yes|YES)$ ]] &&
+      extra_args+=(--physical-chunking-disabled)
+    log "empty destination detected; enabling direct event-table bootstrap import"
   fi
 
   if docker_runtime_is_podman; then
@@ -812,9 +1065,21 @@ CREATE TABLE IF NOT EXISTS portal_event_delta_t (
 );
 SQL
 
-  shopt -s nullglob
-  deltas=("$delta_dir"/*.json)
-  shopt -u nullglob
+  if [[ -f data/manifest.json ]]; then
+    local verified_delta_list
+    verified_delta_list="$(mktemp "${TMPDIR:-/tmp}/portal-deltas.XXXXXX")"
+    if ! python3 scripts/bootstrap_manifest.py verify-deltas \
+        --manifest data/manifest.json --delta-dir "$delta_dir" > "$verified_delta_list"; then
+      rm -f "$verified_delta_list"
+      die "event delta release manifest verification failed"
+    fi
+    mapfile -t deltas < <(cut -f2 "$verified_delta_list")
+    rm -f "$verified_delta_list"
+  else
+    shopt -s nullglob
+    deltas=("$delta_dir"/*.json)
+    shopt -u nullglob
+  fi
 
   if ((${#deltas[@]} == 0)); then
     log "no event deltas found in $delta_dir"
@@ -886,14 +1151,24 @@ bootstrap_events() {
   require_command docker
   [[ -f .env ]] || cp .env.example .env
   validate_compose_config
-  start_event_processors
-  import_events
+  compose up -d postgres
+  wait_for_postgres || die "postgres did not become ready for TCP connections"
+  if try_restore_bootstrap_archive; then
+    start_event_processors
+    apply_release_deltas
+  else
+    start_event_processors
+    import_events
+  fi
+  log "waiting for asynchronous baseline projection cursor before OAuth startup"
+  wait_for_baseline_projection_cursor
   start_light_oauth
 }
 
 case "$command_name" in
   install)
     download_assets
+    download_release_artifacts
     clean_volumes_if_requested
     bootstrap_events
     start_stack
@@ -918,6 +1193,7 @@ case "$command_name" in
     ;;
   assets)
     download_assets
+    download_release_artifacts
     ;;
   start)
     clean_volumes_if_requested

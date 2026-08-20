@@ -213,8 +213,33 @@ CLEAN_VOLUMES=true ./install.sh start
 
 Use the same flag with `install` or `update` when you also want to refresh the
 downloaded assets first. No event-importer command-line switch is required.
-Set `EVENT_IMPORT_BOOTSTRAP_OPERATOR_ID` only when the identity-materialization
-audit record should use a different operator UUID.
+The fallback event import reports success when the event, outbox, and
+notification rows are durable; projection and DLQ handling continue
+asynchronously. The installer then waits for the `user-query-group` consumer
+cursor before starting OAuth because OAuth reads projected key data. This is a
+deployment readiness check, not part of event import, and it does not inspect
+the DLQ.
+
+Fresh installs prefer a release-matched `portal-bootstrap.dump` when the signed
+release manifest publishes one. Archive restore is fail-closed: the installer
+verifies the detached manifest signature, archive and `events.json` digests,
+PostgreSQL major version, schema digest, canonical table checksums, singleton
+UUIDv7 transactions, offsets, graph convergence, grants, and planner statistics.
+It restores with ownership and ACL data disabled and starts no OAuth listener
+until the bundled rotation hook has replaced every disabled credential
+placeholder. Set `LIGHT_PORTAL_BOOTSTRAP_PUBLIC_KEY` to the pinned PEM release
+key. The hook writes installation-unique, mode-0600 one-time delivery files to
+`bootstrap/secrets/`; deployments may override it with
+`LIGHT_PORTAL_BOOTSTRAP_CREDENTIAL_ROTATION_HOOK`. If any archive gate fails,
+the script recreates the empty
+`configserver` database and falls back to direct event-table import from
+`events.json`.
+
+Physical chunking is independently reversible. It defaults to one physical
+commit per 500 events (`EVENT_IMPORT_PHYSICAL_CHUNK_EVENTS=500`, also the hard
+maximum); every event still receives its own UUIDv7 transaction ID with ordinal
+0 and count 1. Set `EVENT_IMPORT_PHYSICAL_CHUNKING_DISABLED=true` only when
+diagnosing or comparing the legacy one-commit-per-event path.
 
 By default the script expects public R2 assets under:
 

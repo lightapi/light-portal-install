@@ -21,3 +21,7 @@ CLAUDE.md
 
 light-knowledge/secrets/*
 !light-knowledge/secrets/README.md
+
+bootstrap/secrets/*
+__pycache__/
+*.pyc
