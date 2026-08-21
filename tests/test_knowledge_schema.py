@@ -58,6 +58,31 @@ class KnowledgeSchemaTest(unittest.TestCase):
                 (KNOWLEDGE_DIR / name).read_bytes(),
                 f"packaged Knowledge boundary file drifted: {name}",
             )
+        operation = "phase7_drop_configserver_rollback_evidence.sql"
+        self.assertEqual(
+            (portal_db / "operations" / operation).read_bytes(),
+            (KNOWLEDGE_DIR / "operations" / operation).read_bytes(),
+            f"packaged Knowledge operation drifted: {operation}",
+        )
+
+    def test_phase7_removes_disabled_client_compatibility_switches(self):
+        runtime = "\n".join(
+            (ROOT / relative).read_text(encoding="utf-8")
+            for relative in (
+                "hybrid-query/node1/values.yml",
+                "hybrid-query/node1/knowledge-admin-client.yml",
+                "docker-compose.yml",
+            )
+        )
+        for marker in (
+            "knowledge-admin-client.enabled",
+            "knowledge-admin-client.shadow",
+            "knowledge-admin-client.cutover",
+            "legacyAuthoritative",
+            "shadowEnvironments",
+            "KNOWLEDGE_ADMIN_CLIENT_ENABLED",
+        ):
+            self.assertNotIn(marker, runtime)
 
     def test_phase3_admin_api_upgrade_is_installed(self):
         init = (ROOT / "postgres-db" / "init-knowledge.sh").read_text(

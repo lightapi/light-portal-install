@@ -1,8 +1,3 @@
-enabled: ${knowledge-admin-client.enabled:false}
-shadow: ${knowledge-admin-client.shadow:false}
-cutover: ${knowledge-admin-client.cutover:false}
-legacyAuthoritative: ${knowledge-admin-client.legacyAuthoritative:false}
-shadowEnvironments: ${knowledge-admin-client.shadowEnvironments:[]}
 discoveryEnabled: ${knowledge-admin-client.discoveryEnabled:false}
 serviceUrl: ${knowledge-admin-client.serviceUrl:http://light-knowledge-admin:8093}
 serviceId: ${knowledge-admin-client.serviceId:com.networknt.light-knowledge-admin-1.0.0}

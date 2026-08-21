@@ -36,14 +36,8 @@ db-provider.password: secret
 db-provider.maximumPoolSize: 3
 
 # knowledge-admin-client.yml
-# Keep disabled until the private administration service and its JWT verifier
-# are installed. The authenticated UI bearer token is forwarded unchanged.
-# Shadow and cutover are selected independently by deployment configuration.
-knowledge-admin-client.enabled: ${KNOWLEDGE_ADMIN_CLIENT_ENABLED:false}
-knowledge-admin-client.shadow: ${KNOWLEDGE_ADMIN_CLIENT_SHADOW:false}
-knowledge-admin-client.cutover: ${KNOWLEDGE_ADMIN_CLIENT_CUTOVER:false}
-knowledge-admin-client.legacyAuthoritative: ${KNOWLEDGE_ADMIN_LEGACY_AUTHORITATIVE:false}
-knowledge-admin-client.shadowEnvironments: ${KNOWLEDGE_ADMIN_SHADOW_ENVIRONMENTS:[]}
+# The administration API is authoritative. The authenticated UI bearer token
+# is forwarded unchanged; only endpoint and resilience settings remain.
 knowledge-admin-client.discoveryEnabled: ${KNOWLEDGE_ADMIN_DISCOVERY_ENABLED:false}
 knowledge-admin-client.serviceUrl: ${KNOWLEDGE_ADMIN_SERVICE_URL:http://light-knowledge-admin:8093}
 knowledge-admin-client.serviceId: ${KNOWLEDGE_ADMIN_SERVICE_ID:com.networknt.light-knowledge-admin-1.0.0}
