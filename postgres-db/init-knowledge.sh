@@ -4,6 +4,8 @@ set -eu
 knowledge_database_exists="$(psql -U "$POSTGRES_USER" -d postgres -tAc \
     "SELECT 1 FROM pg_database WHERE datname='knowledge'")"
 if [ "$knowledge_database_exists" = "1" ]; then
+    psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d postgres \
+        -c "REVOKE CONNECT ON DATABASE knowledge FROM PUBLIC"
     knowledge_database_ready="$(psql -U "$POSTGRES_USER" -d knowledge -tAc \
         "SELECT to_regclass('knowledge_job_t') IS NOT NULL
              AND (to_regclass('knowledge_control_snapshot_t') IS NOT NULL
@@ -37,28 +39,56 @@ fi
 
 psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d postgres \
     -c "CREATE DATABASE knowledge"
+psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d postgres \
+    -c "REVOKE CONNECT ON DATABASE knowledge FROM PUBLIC"
 psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d knowledge \
     -f /docker-entrypoint-initdb.d/knowledge/roles.sql
 psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d knowledge \
     -f /docker-entrypoint-initdb.d/knowledge/ddl.sql
 
-# Preserve Knowledge state when upgrading a single-database installation. The
-# schema always comes from the canonical Knowledge DDL; this is an explicit
-# one-time data migration for owned and transitional relations only.
-pg_dump -U "$POSTGRES_USER" -d configserver --data-only --no-owner \
-  --disable-triggers --table='public.knowledge_*' \
-  --table='public.agent_knowledge_base_t' \
-  --exclude-table='public.knowledge_base_import_identity_map_t' \
-  --exclude-table='public.knowledge_base_import_t' \
-  --exclude-table='public.knowledge_base_manifest_export_t' \
-  --exclude-table='public.knowledge_qualified_embedding_alias_v' \
-  --exclude-table='public.knowledge_projection_ack_t' \
-  --exclude-table='public.knowledge_projection_heartbeat_t' \
-  --exclude-table='public.knowledge_projection_inbox_t' \
-  --exclude-table='public.knowledge_projection_source_cursor_t' \
-  --exclude-table='public.knowledge_promotion_ack_t' \
-  --exclude-table='public.knowledge_promotion_outbox_t' \
-  | psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d knowledge >/dev/null
+# Preserve Knowledge state when upgrading a co-located installation. Selection
+# is closed over the versioned allowlist; relation-name discovery and wildcard
+# export are forbidden because new Config Server control tables must never
+# become operational state by accident.
+set --
+while IFS= read -r relation_name; do
+    case "$relation_name" in
+        ''|'#'*) continue ;;
+        *[!a-z0-9_]*)
+            echo "invalid Knowledge migration relation: $relation_name" >&2
+            exit 1
+            ;;
+    esac
+    relation_exists="$(psql -U "$POSTGRES_USER" -d configserver -tAc \
+        "SELECT to_regclass('public.$relation_name') IS NOT NULL")"
+    if [ "$relation_exists" = "t" ]; then
+        set -- "$@" "--table=public.$relation_name"
+    fi
+done < /docker-entrypoint-initdb.d/knowledge/data-migration-relations-v1.txt
+
+if [ "$#" -gt 0 ]; then
+    pg_dump -U "$POSTGRES_USER" -d configserver --data-only --no-owner \
+        --disable-triggers "$@" \
+        | psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d knowledge >/dev/null
+fi
+
+# Prove exact row-count parity before the Config Server runtime tables are
+# removed. Legacy projection and promotion rows are intentionally retained only
+# by the rollback-evidence capture in the cleanup patch.
+while IFS= read -r relation_name; do
+    case "$relation_name" in ''|'#'*) continue ;; esac
+    source_exists="$(psql -U "$POSTGRES_USER" -d configserver -tAc \
+        "SELECT to_regclass('public.$relation_name') IS NOT NULL")"
+    [ "$source_exists" = "t" ] || continue
+    source_count="$(psql -U "$POSTGRES_USER" -d configserver -tAc \
+        "SELECT count(*) FROM public.$relation_name")"
+    target_count="$(psql -U "$POSTGRES_USER" -d knowledge -tAc \
+        "SELECT count(*) FROM public.$relation_name")"
+    [ "$source_count" = "$target_count" ] || {
+        echo "Knowledge migration count mismatch for $relation_name: $source_count != $target_count" >&2
+        exit 1
+    }
+done < /docker-entrypoint-initdb.d/knowledge/data-migration-relations-v1.txt
 
 psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d configserver   -c "COPY cascade_relationship_policy_t TO STDOUT"   | psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d knowledge       -c "COPY cascade_relationship_policy_t FROM STDIN"
 

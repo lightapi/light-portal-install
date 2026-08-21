@@ -20,6 +20,13 @@ class KnowledgeSchemaTest(unittest.TestCase):
         self.assertIn("knowledge/ddl.sql", script)
         self.assertNotIn("--schema-only --no-owner", script)
         self.assertNotIn("DROP %s IF EXISTS", script)
+        self.assertNotIn("public.knowledge_*", script)
+        self.assertIn("data-migration-relations-v1.txt", script)
+        self.assertIn("Knowledge migration count mismatch", script)
+
+        install = (ROOT / "install.sh").read_text(encoding="utf-8")
+        self.assertNotIn("public.knowledge_*", install)
+        self.assertIn("zz-init-knowledge.sh", install)
 
     def test_phase2_snapshot_bootstrap_has_a_recurring_lease_refresh(self):
         compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
@@ -44,6 +51,7 @@ class KnowledgeSchemaTest(unittest.TestCase):
             "patch_20260821_03_snapshot_command_boundary.sql",
             "patch_20260821_04_configserver_knowledge_control_only.sql",
             "patch_20260821_05_admin_api.sql",
+            "data-migration-relations-v1.txt",
         ):
             self.assertEqual(
                 (portal_db / name).read_bytes(),
@@ -56,12 +64,27 @@ class KnowledgeSchemaTest(unittest.TestCase):
             encoding="utf-8"
         )
         install = (ROOT / "install.sh").read_text(encoding="utf-8")
-        for script in (init, install):
-            self.assertIn("knowledge_admin_audit_t", script)
-            self.assertIn("patch_20260821_05_admin_api.sql", script)
+        self.assertIn("knowledge_admin_audit_t", init)
+        self.assertIn("patch_20260821_05_admin_api.sql", init)
+        self.assertIn("zz-init-knowledge.sh", install)
         ddl = (KNOWLEDGE_DIR / "ddl.sql").read_text(encoding="utf-8")
         self.assertIn("CREATE TABLE public.knowledge_admin_audit_t", ddl)
         self.assertIn("knowledge_admin_sync_runs_page_idx", ddl)
+
+    def test_config_server_bootstrap_retains_canonical_seed_data(self):
+        ddl = (ROOT / "postgres-db" / "init.sql").read_text(encoding="utf-8")
+        for relation in (
+            "scheduler_lock_t",
+            "log_counter",
+            "pii_token_scheme_t",
+            "cascade_relationship_policy_seed_t",
+            "cascade_relationship_policy_t",
+        ):
+            self.assertTrue(
+                f"INSERT INTO public.{relation}" in ddl
+                or f"INSERT INTO {relation}" in ddl,
+                f"Config Server seed missing: {relation}",
+            )
 
 
 if __name__ == "__main__":

@@ -363,59 +363,9 @@ write_secret() {
 }
 
 ensure_knowledge_database() {
-  local exists ready
-  exists="$(docker exec postgres psql -U postgres -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='knowledge'" | tr -d '[:space:]')"
-  if [[ "$exists" == "1" ]]; then
-    ready="$(docker exec postgres psql -U postgres -d knowledge -tAc \
-      "SELECT to_regclass('knowledge_job_t') IS NOT NULL
-           AND (to_regclass('knowledge_control_snapshot_t') IS NOT NULL
-                OR to_regclass('knowledge_projection_source_cursor_t') IS NOT NULL)
-           AND to_regclass('knowledge_embedding_profile_runtime_v') IS NOT NULL
-           AND to_regclass('event_store_t') IS NULL" | tr -d '[:space:]')"
-    [[ "$ready" == "t" ]] || fail "existing knowledge database failed the boundary contract"
-    docker exec postgres psql -U postgres -d knowledge -v ON_ERROR_STOP=1 \
-      -f /docker-entrypoint-initdb.d/knowledge/roles.sql >/dev/null
-    if [[ "$(docker exec postgres psql -U postgres -d knowledge -tAc "SELECT to_regclass('knowledge_control_snapshot_t') IS NULL" | tr -d '[:space:]')" == "t" ]]; then
-      docker exec postgres psql -U postgres -d knowledge -v ON_ERROR_STOP=1 \
-        -f /docker-entrypoint-initdb.d/knowledge/patch_20260821_02_canonical_knowledge_boundary.sql >/dev/null
-      docker exec postgres psql -U postgres -d knowledge -v ON_ERROR_STOP=1 \
-        -f /docker-entrypoint-initdb.d/knowledge/patch_20260821_03_snapshot_command_boundary.sql >/dev/null
-    fi
-    if [[ "$(docker exec postgres psql -U postgres -d knowledge -tAc "SELECT to_regclass('knowledge_admin_audit_t') IS NULL" | tr -d '[:space:]')" == "t" ]]; then
-      docker exec postgres psql -U postgres -d knowledge -v ON_ERROR_STOP=1 \
-        -f /docker-entrypoint-initdb.d/knowledge/patch_20260821_05_admin_api.sql >/dev/null
-    fi
-    docker exec postgres psql -U postgres -d configserver -v ON_ERROR_STOP=1 \
-      -f /docker-entrypoint-initdb.d/knowledge/patch_20260821_04_configserver_knowledge_control_only.sql >/dev/null
-    return 0
-  fi
-
-  log "creating isolated Knowledge database from canonical Phase 2 DDL"
-  docker exec postgres psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
-    -c "CREATE DATABASE knowledge"
-  docker exec postgres psql -U postgres -d knowledge -v ON_ERROR_STOP=1 \
-    -f /docker-entrypoint-initdb.d/knowledge/roles.sql >/dev/null
-  docker exec postgres psql -U postgres -d knowledge -v ON_ERROR_STOP=1 \
-    -f /docker-entrypoint-initdb.d/knowledge/ddl.sql >/dev/null
-  docker exec postgres pg_dump -U postgres -d configserver --data-only --no-owner \
-    --disable-triggers --table='public.knowledge_*' \
-    --table='public.agent_knowledge_base_t' \
-    --exclude-table='public.knowledge_base_import_identity_map_t' \
-    --exclude-table='public.knowledge_base_import_t' \
-    --exclude-table='public.knowledge_base_manifest_export_t' \
-    --exclude-table='public.knowledge_projection_ack_t' \
-    --exclude-table='public.knowledge_projection_heartbeat_t' \
-    --exclude-table='public.knowledge_projection_inbox_t' \
-    --exclude-table='public.knowledge_projection_source_cursor_t' \
-    --exclude-table='public.knowledge_promotion_ack_t' \
-    --exclude-table='public.knowledge_promotion_outbox_t' \
-    | docker exec -i postgres psql -U postgres -d knowledge -v ON_ERROR_STOP=1 >/dev/null
-  docker exec postgres psql -U postgres -d configserver -v ON_ERROR_STOP=1 \
-    -c "COPY cascade_relationship_policy_t TO STDOUT" \
-    | docker exec -i postgres psql -U postgres -d knowledge -v ON_ERROR_STOP=1 \
-        -c "COPY cascade_relationship_policy_t FROM STDIN"
-  docker exec postgres psql -U postgres -d configserver -v ON_ERROR_STOP=1 \
-    -f /docker-entrypoint-initdb.d/knowledge/patch_20260821_04_configserver_knowledge_control_only.sql >/dev/null
+  log "ensuring the isolated Knowledge database from its canonical DDL"
+  docker exec -e POSTGRES_USER=postgres postgres \
+    /docker-entrypoint-initdb.d/zz-init-knowledge.sh
 }
 ensure_knowledge_runtime() {
   knowledge_profile_enabled || return 0
@@ -425,6 +375,12 @@ ensure_knowledge_runtime() {
   local portal_token query_embedding_token index_embedding_token
   mkdir -p "$secret_dir"
   ensure_knowledge_database
+
+  # Upgrade existing installations to the same credential boundary as a fresh
+  # install. Portal runtimes retain full Config Server access but cannot
+  # authenticate to the Knowledge database.
+  docker exec postgres psql -U postgres -d configserver -v ON_ERROR_STOP=1 \
+    -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='portal_runtime') THEN CREATE ROLE portal_runtime LOGIN PASSWORD 'secret'; END IF; END \$\$; REVOKE CONNECT ON DATABASE configserver FROM PUBLIC; GRANT CONNECT ON DATABASE configserver TO portal_runtime; GRANT USAGE ON SCHEMA public TO portal_runtime; GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA public TO portal_runtime; GRANT USAGE,SELECT,UPDATE ON ALL SEQUENCES IN SCHEMA public TO portal_runtime; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO portal_runtime;" >/dev/null
 
   api_password="$(openssl rand -hex 32)"
   worker_password="$(openssl rand -hex 32)"
@@ -437,7 +393,7 @@ ensure_knowledge_runtime() {
   write_secret_once "$secret_dir/.admin-db-password" "$admin_password"
 
   docker exec postgres psql -U postgres -d configserver -v ON_ERROR_STOP=1 \
-    -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='light_knowledge_api') THEN CREATE ROLE light_knowledge_api LOGIN; END IF; IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='light_knowledge_worker') THEN CREATE ROLE light_knowledge_worker LOGIN; END IF; IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='light_knowledge_admin_api') THEN CREATE ROLE light_knowledge_admin_api LOGIN; END IF; END \$\$; ALTER ROLE light_knowledge_api PASSWORD '$api_password'; ALTER ROLE light_knowledge_worker PASSWORD '$worker_password'; ALTER ROLE light_knowledge_admin_api PASSWORD '$admin_password'; GRANT light_knowledge_api_role TO light_knowledge_api; GRANT light_knowledge_worker_role TO light_knowledge_worker; GRANT light_knowledge_admin_api_role,light_knowledge_snapshot_loader_role TO light_knowledge_admin_api;" >/dev/null
+    -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='light_knowledge_api') THEN CREATE ROLE light_knowledge_api LOGIN; END IF; IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='light_knowledge_worker') THEN CREATE ROLE light_knowledge_worker LOGIN; END IF; IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='light_knowledge_admin_api') THEN CREATE ROLE light_knowledge_admin_api LOGIN; END IF; END \$\$; ALTER ROLE light_knowledge_api PASSWORD '$api_password'; ALTER ROLE light_knowledge_worker PASSWORD '$worker_password'; ALTER ROLE light_knowledge_admin_api PASSWORD '$admin_password'; GRANT light_knowledge_api_role TO light_knowledge_api; GRANT light_knowledge_worker_role TO light_knowledge_worker; GRANT light_knowledge_admin_api_role,light_knowledge_snapshot_loader_role TO light_knowledge_admin_api; REVOKE CONNECT ON DATABASE configserver FROM PUBLIC; GRANT CONNECT ON DATABASE knowledge TO light_knowledge_api,light_knowledge_worker,light_knowledge_admin_api;" >/dev/null
 
   write_secret_once "$secret_dir/knowledge-database-url" "postgres://light_knowledge_api:$api_password@postgres:5432/knowledge"
   write_secret_once "$secret_dir/knowledge-worker-database-url" "postgres://light_knowledge_worker:$worker_password@postgres:5432/knowledge"
