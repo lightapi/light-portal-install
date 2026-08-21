@@ -41,7 +41,20 @@ db-provider.maximumPoolSize: 3
 # Shadow and cutover are selected independently by deployment configuration.
 knowledge-admin-client.enabled: ${KNOWLEDGE_ADMIN_CLIENT_ENABLED:false}
 knowledge-admin-client.shadow: ${KNOWLEDGE_ADMIN_CLIENT_SHADOW:false}
+knowledge-admin-client.cutover: ${KNOWLEDGE_ADMIN_CLIENT_CUTOVER:false}
+knowledge-admin-client.legacyAuthoritative: ${KNOWLEDGE_ADMIN_LEGACY_AUTHORITATIVE:false}
+knowledge-admin-client.shadowEnvironments: ${KNOWLEDGE_ADMIN_SHADOW_ENVIRONMENTS:[]}
+knowledge-admin-client.discoveryEnabled: ${KNOWLEDGE_ADMIN_DISCOVERY_ENABLED:false}
 knowledge-admin-client.serviceUrl: ${KNOWLEDGE_ADMIN_SERVICE_URL:http://light-knowledge-admin:8093}
+knowledge-admin-client.serviceId: ${KNOWLEDGE_ADMIN_SERVICE_ID:com.networknt.light-knowledge-admin-1.0.0}
+knowledge-admin-client.protocol: ${KNOWLEDGE_ADMIN_PROTOCOL:http}
+knowledge-admin-client.environmentTag: ${KNOWLEDGE_ADMIN_ENVIRONMENT_TAG:}
+knowledge-admin-client.timeoutMillis: ${KNOWLEDGE_ADMIN_TIMEOUT_MILLIS:2000}
+knowledge-admin-client.safeReadRetries: ${KNOWLEDGE_ADMIN_SAFE_READ_RETRIES:1}
+knowledge-admin-client.retryBackoffMillis: ${KNOWLEDGE_ADMIN_RETRY_BACKOFF_MILLIS:10}
+knowledge-admin-client.circuitFailureThreshold: ${KNOWLEDGE_ADMIN_CIRCUIT_FAILURE_THRESHOLD:5}
+knowledge-admin-client.circuitOpenMillis: ${KNOWLEDGE_ADMIN_CIRCUIT_OPEN_MILLIS:5000}
+knowledge-admin-client.maximumResponseBytes: ${KNOWLEDGE_ADMIN_MAXIMUM_RESPONSE_BYTES:1048576}
 
 # operational-cleanup.yml
 operational-cleanup.enabled: true

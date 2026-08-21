@@ -73,7 +73,10 @@ services:
       - "8440:8440"
     environment:
       KNOWLEDGE_ADMIN_CLIENT_ENABLED: "true"
-      KNOWLEDGE_ADMIN_CLIENT_SHADOW: "false"
+      KNOWLEDGE_ADMIN_CLIENT_SHADOW: "true"
+      KNOWLEDGE_ADMIN_CLIENT_CUTOVER: "false"
+      KNOWLEDGE_ADMIN_LEGACY_AUTHORITATIVE: "true"
+      KNOWLEDGE_ADMIN_SHADOW_ENVIRONMENTS: "[dev]"
       INSTANCE_CLONE_PLAN_HMAC_KEY: ${INSTANCE_CLONE_PLAN_HMAC_KEY:-light-portal-development-only-instance-clone-hmac-key-v1}
       INSTANCE_CLONE_PLAN_HMAC_KEY_ID: ${INSTANCE_CLONE_PLAN_HMAC_KEY_ID:-v1}
       embedding-task.enabled: ${EMBEDDING_TASK_ENABLED:-false}
