@@ -6,6 +6,7 @@ services:
       - postgres-data:/var/lib/postgresql/data
       - ./postgres-db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro,Z
       - ./postgres-db/init-knowledge.sh:/docker-entrypoint-initdb.d/zz-init-knowledge.sh:ro,Z
+      - ./postgres-db/knowledge:/docker-entrypoint-initdb.d/knowledge:ro,Z
     environment:
       POSTGRES_PASSWORD: secret
     command: postgres -c wal_level=logical -c max_replication_slots=10 -c max_wal_senders=10
@@ -26,6 +27,7 @@ services:
     entrypoint: ["/docker-entrypoint-initdb.d/zz-init-knowledge.sh"]
     volumes:
       - ./postgres-db/init-knowledge.sh:/docker-entrypoint-initdb.d/zz-init-knowledge.sh:ro,Z
+      - ./postgres-db/knowledge:/docker-entrypoint-initdb.d/knowledge:ro,Z
     environment:
       PGHOST: postgres
       POSTGRES_USER: postgres
@@ -43,7 +45,7 @@ services:
       WORKFLOW_TOOL_ACCESS_APPROVAL_WF_DEF_ID: 01a012f0-3ccb-792c-9aba-752269ec0b29
       WORKFLOW_TOOL_ACCESS_APPROVAL_VERSION: 1.0.0
       WORKFLOW_TOOL_ACCESS_APPROVAL_DIGEST: sha256:29167fa1e53a00187685c8d459016fefbf69567dd974fc3a90d0d619ca3a887a
-      KNOWLEDGE_WORKLOAD_PRINCIPALS: ${KNOWLEDGE_WORKLOAD_PRINCIPALS:-light-knowledge-worker,light-knowledge}
+      LIGHT_KNOWLEDGE_ADMIN_COMMAND_URL: http://light-knowledge-admin:8093/v1/knowledge/admin/commands
     volumes:
       - ./hybrid-command/config:/config:Z
       - ./hybrid-command/service:/service:Z
@@ -66,9 +68,12 @@ services:
       - ./hybrid-query/node1:/config:Z
       - ./hybrid-query/service:/service:Z
       - ${PORTAL_DATA_DIR:-./data}:/data:z
+      - ./light-knowledge/secrets/control-snapshot-signing-key:/run/secrets/light-knowledge/control-snapshot-signing-key:ro,Z
     ports:
       - "8440:8440"
     environment:
+      KNOWLEDGE_ADMIN_CLIENT_ENABLED: "true"
+      KNOWLEDGE_ADMIN_CLIENT_SHADOW: "false"
       INSTANCE_CLONE_PLAN_HMAC_KEY: ${INSTANCE_CLONE_PLAN_HMAC_KEY:-light-portal-development-only-instance-clone-hmac-key-v1}
       INSTANCE_CLONE_PLAN_HMAC_KEY_ID: ${INSTANCE_CLONE_PLAN_HMAC_KEY_ID:-v1}
       embedding-task.enabled: ${EMBEDDING_TASK_ENABLED:-false}
@@ -443,6 +448,10 @@ services:
         condition: service_healthy
       knowledge-schema-migration:
         condition: service_completed_successfully
+      knowledge-control-snapshot-sync:
+        condition: service_completed_successfully
+      knowledge-control-snapshot-refresh:
+        condition: service_started
       config-server:
         condition: service_healthy
       controller:
@@ -457,12 +466,14 @@ services:
       - ./light-controller-rust/ca.pem:/keystore/ca.pem:ro,Z
       - ./light-knowledge/secrets/knowledge-admin-database-url:/run/secrets/light-knowledge/knowledge-database-url:ro,Z
       - ./light-knowledge/secrets/knowledge-admin-opaque-actor-key:/run/secrets/light-knowledge-admin/opaque-actor-key:ro,Z
+      - ./light-knowledge/secrets/control-snapshot-signing-key:/run/secrets/light-knowledge-admin/control-snapshot-signing-key:ro,Z
     environment:
       CLIENT_TLS_VERIFYHOSTNAME: "false"
       CLIENT_TLS_TRUSTEDCERTIFICATES: "[/keystore/ca.pem]"
       CLIENT_KEYSERVICE_SERVERURL: ${KNOWLEDGE_ADMIN_JWKS_SERVER_URL:-https://light-oauth:6881}
       SECURITY_AUDIENCE: "[urn:com.networknt]"
       SECURITY_ISSUER: ${OAUTH_ISSUER:-urn:com:networknt:oauth2:v1}
+      knowledgeAdmin.ignoreJwtExpiry: ${KNOWLEDGE_ADMIN_IGNORE_JWT_EXPIRY:-true}
     depends_on:
       postgres:
         condition: service_healthy
@@ -476,6 +487,42 @@ services:
       timeout: 5s
       retries: 10
       start_period: 10s
+
+  knowledge-control-snapshot-sync:
+    profiles: ["knowledge"]
+    image: curlimages/curl:8.12.1
+    entrypoint: ["/opt/light-knowledge/sync-control-snapshot.sh", "once"]
+    volumes:
+      - ./light-knowledge/sync-control-snapshot.sh:/opt/light-knowledge/sync-control-snapshot.sh:ro,Z
+    environment:
+      # Local deployments may reuse the interactive Portal token. Production
+      # should provide a dedicated portal.r/portal.w service token here.
+      SNAPSHOT_AUTHORIZATION: ${KNOWLEDGE_SNAPSHOT_AUTHORIZATION:-${KNOWLEDGE_PORTAL_AUTHORIZATION:-}}
+      SNAPSHOT_ENVIRONMENT: ${KNOWLEDGE_SNAPSHOT_ENVIRONMENT:-dev}
+      SNAPSHOT_QUERY_URL: https://hybrid-query:8440/portal/query
+      SNAPSHOT_APPLY_URL: http://light-knowledge-admin:8093/v1/knowledge/admin/control-snapshots:apply
+    depends_on:
+      hybrid-query:
+        condition: service_started
+      light-knowledge-admin:
+        condition: service_healthy
+
+  knowledge-control-snapshot-refresh:
+    profiles: ["knowledge"]
+    image: curlimages/curl:8.12.1
+    entrypoint: ["/opt/light-knowledge/sync-control-snapshot.sh", "loop"]
+    restart: unless-stopped
+    volumes:
+      - ./light-knowledge/sync-control-snapshot.sh:/opt/light-knowledge/sync-control-snapshot.sh:ro,Z
+    environment:
+      SNAPSHOT_AUTHORIZATION: ${KNOWLEDGE_SNAPSHOT_AUTHORIZATION:-${KNOWLEDGE_PORTAL_AUTHORIZATION:-}}
+      SNAPSHOT_ENVIRONMENT: ${KNOWLEDGE_SNAPSHOT_ENVIRONMENT:-dev}
+      SNAPSHOT_REFRESH_SECONDS: ${KNOWLEDGE_SNAPSHOT_REFRESH_SECONDS:-60}
+      SNAPSHOT_QUERY_URL: https://hybrid-query:8440/portal/query
+      SNAPSHOT_APPLY_URL: http://light-knowledge-admin:8093/v1/knowledge/admin/control-snapshots:apply
+    depends_on:
+      knowledge-control-snapshot-sync:
+        condition: service_completed_successfully
 
 
 volumes:

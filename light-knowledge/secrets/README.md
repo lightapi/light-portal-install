@@ -1,19 +1,18 @@
 When the `knowledge` Compose profile is enabled, `install.sh` creates separate
-local PostgreSQL login identities for the API, projector, and embedded job
-engine and
-materializes their URL files. It also generates the cache and heartbeat keys.
+local PostgreSQL login identities for the API, administration service, and
+embedded job engine and materializes their URL files. It also generates the
+query-cache, opaque-actor, and control-snapshot signing keys.
 Provide the externally issued delegation and workload tokens through `.env`;
 the installer copies them into mode-0600 runtime-only files. The complete file
 set is:
 
 - `knowledge-database-url`
 - `knowledge-worker-database-url`
-- `knowledge-projector-database-url`
 - `knowledge-admin-database-url`
-- `configserver-event-read-url`
 - `agent-delegation-secret`
 - `knowledge-query-cache-key`
-- `knowledge-heartbeat-secret`
+- `control-snapshot-signing-key`
+- `knowledge-admin-opaque-actor-key`
 - `knowledge-portal-authorization`
 - `knowledge-query-embedding-authorization`
 - `knowledge-index-embedding-authorization`
@@ -30,9 +29,9 @@ The `kb_index` lane must enforce `x-light-maximum-billed-cost-micros` and return
 `x-light-billed-cost-micros`; a response without bounded cost evidence is
 rejected after the worker has reserved the approved budget.
 
-Do not commit their values. The three Knowledge database URLs target the
-isolated `knowledge` database; `configserver-event-read-url` targets
-`configserver` through the read-only projector role.
+Do not commit their values. Every Knowledge database URL targets the isolated
+`knowledge` database. No Light Knowledge process receives a Config Server
+database credential.
 
 `knowledge-query-cache-key` must contain at least 32 random bytes and must be
 independent of `agent-delegation-secret`. Rotating it invalidates cache keys
@@ -44,14 +43,10 @@ restricted to the approved site and spaces. Never reuse Portal, delegation,
 embedding, or connector credentials across purposes.
 
 The `agent-delegation-secret` value must match
-`LIGHT_AGENT_DELEGATION_SECRET`. The bearer token stored in
-`knowledge-portal-authorization` must have a `sub` included in
-`KNOWLEDGE_WORKLOAD_PRINCIPALS`; the local default principal is
-both `light-knowledge-worker` and `light-knowledge` during the rollback
-window. Promotion acknowledgements do not require an
-end-user tenant or platform-admin role: the allowlisted workload identity and
-the exact pending-outbox generation, pointer, and evidence digest authorize the
-operation.
+`LIGHT_AGENT_DELEGATION_SECRET`. A delegated UI bearer is forwarded only for
+the duration of an operational command and is never persisted. Promotion
+receipts commit in the Knowledge database with the generation pointer; the
+worker never calls Hybrid Command.
 
 The checked-in `portal-config-dev` and `portal-config-loc` fixtures remain
 explicit deterministic pilots. Do not copy their fake 32-dimensional space
