@@ -5,7 +5,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 KNOWLEDGE_DIR = ROOT / "postgres-db" / "knowledge"
-EXPECTED_DDL_SHA256 = "fe7eec66e59e71eb81ffa4232b02957d7bceda6408ca0c0e7030bdf96b61f314"
+EXPECTED_DDL_SHA256 = "7ee640f7aa3204692ee3018149ad043a3e9d4524ba614bbaff924ffffaf9a6fd"
 
 
 class KnowledgeSchemaTest(unittest.TestCase):
@@ -43,12 +43,25 @@ class KnowledgeSchemaTest(unittest.TestCase):
             "patch_20260821_02_canonical_knowledge_boundary.sql",
             "patch_20260821_03_snapshot_command_boundary.sql",
             "patch_20260821_04_configserver_knowledge_control_only.sql",
+            "patch_20260821_05_admin_api.sql",
         ):
             self.assertEqual(
                 (portal_db / name).read_bytes(),
                 (KNOWLEDGE_DIR / name).read_bytes(),
                 f"packaged Knowledge boundary file drifted: {name}",
             )
+
+    def test_phase3_admin_api_upgrade_is_installed(self):
+        init = (ROOT / "postgres-db" / "init-knowledge.sh").read_text(
+            encoding="utf-8"
+        )
+        install = (ROOT / "install.sh").read_text(encoding="utf-8")
+        for script in (init, install):
+            self.assertIn("knowledge_admin_audit_t", script)
+            self.assertIn("patch_20260821_05_admin_api.sql", script)
+        ddl = (KNOWLEDGE_DIR / "ddl.sql").read_text(encoding="utf-8")
+        self.assertIn("CREATE TABLE public.knowledge_admin_audit_t", ddl)
+        self.assertIn("knowledge_admin_sync_runs_page_idx", ddl)
 
 
 if __name__ == "__main__":

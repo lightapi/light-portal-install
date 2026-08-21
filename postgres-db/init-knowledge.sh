@@ -20,12 +20,18 @@ if [ "$knowledge_database_exists" = "1" ]; then
         "SELECT to_regclass('knowledge_control_snapshot_t') IS NOT NULL")"
     if [ "$phase2_ready" != "t" ]; then
         psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d knowledge \
-            -f /docker-entrypoint/initdb.d/knowledge/patch_20260821_02_canonical_knowledge_boundary.sql
+            -f /docker-entrypoint-initdb.d/knowledge/patch_20260821_02_canonical_knowledge_boundary.sql
         psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d knowledge \
-            -f /docker-entrypoint/initdb.d/knowledge/patch_20260821_03_snapshot_command_boundary.sql
+            -f /docker-entrypoint-initdb.d/knowledge/patch_20260821_03_snapshot_command_boundary.sql
+    fi
+    phase3_ready="$(psql -U "$POSTGRES_USER" -d knowledge -tAc \
+        "SELECT to_regclass('knowledge_admin_audit_t') IS NOT NULL")"
+    if [ "$phase3_ready" != "t" ]; then
+        psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d knowledge \
+            -f /docker-entrypoint-initdb.d/knowledge/patch_20260821_05_admin_api.sql
     fi
     psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d configserver \
-        -f /docker-entrypoint/initdb.d/knowledge/patch_20260821_04_configserver_knowledge_control_only.sql
+        -f /docker-entrypoint-initdb.d/knowledge/patch_20260821_04_configserver_knowledge_control_only.sql
     exit 0
 fi
 

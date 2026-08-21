@@ -381,6 +381,10 @@ ensure_knowledge_database() {
       docker exec postgres psql -U postgres -d knowledge -v ON_ERROR_STOP=1 \
         -f /docker-entrypoint-initdb.d/knowledge/patch_20260821_03_snapshot_command_boundary.sql >/dev/null
     fi
+    if [[ "$(docker exec postgres psql -U postgres -d knowledge -tAc "SELECT to_regclass('knowledge_admin_audit_t') IS NULL" | tr -d '[:space:]')" == "t" ]]; then
+      docker exec postgres psql -U postgres -d knowledge -v ON_ERROR_STOP=1 \
+        -f /docker-entrypoint-initdb.d/knowledge/patch_20260821_05_admin_api.sql >/dev/null
+    fi
     docker exec postgres psql -U postgres -d configserver -v ON_ERROR_STOP=1 \
       -f /docker-entrypoint-initdb.d/knowledge/patch_20260821_04_configserver_knowledge_control_only.sql >/dev/null
     return 0
