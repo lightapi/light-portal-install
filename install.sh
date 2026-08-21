@@ -485,7 +485,7 @@ ensure_knowledge_runtime() {
   knowledge_profile_enabled || return 0
   require_command openssl
   local secret_dir="light-knowledge/secrets"
-  local api_password worker_password projector_password delegation_secret
+  local api_password worker_password projector_password admin_password delegation_secret
   local portal_token query_embedding_token index_embedding_token
   mkdir -p "$secret_dir"
   ensure_knowledge_database
@@ -493,27 +493,32 @@ ensure_knowledge_runtime() {
   api_password="$(openssl rand -hex 32)"
   worker_password="$(openssl rand -hex 32)"
   projector_password="$(openssl rand -hex 32)"
+  admin_password="$(openssl rand -hex 32)"
   [[ -s "$secret_dir/.api-db-password" ]] && api_password="$(<"$secret_dir/.api-db-password")"
   [[ -s "$secret_dir/.worker-db-password" ]] && worker_password="$(<"$secret_dir/.worker-db-password")"
   [[ -s "$secret_dir/.projector-db-password" ]] && projector_password="$(<"$secret_dir/.projector-db-password")"
+  [[ -s "$secret_dir/.admin-db-password" ]] && admin_password="$(<"$secret_dir/.admin-db-password")"
   write_secret_once "$secret_dir/.api-db-password" "$api_password"
   write_secret_once "$secret_dir/.worker-db-password" "$worker_password"
   write_secret_once "$secret_dir/.projector-db-password" "$projector_password"
+  write_secret_once "$secret_dir/.admin-db-password" "$admin_password"
 
   docker exec postgres psql -U postgres -d configserver -v ON_ERROR_STOP=1 \
-    -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='light_knowledge_api') THEN CREATE ROLE light_knowledge_api LOGIN; END IF; IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='light_knowledge_worker') THEN CREATE ROLE light_knowledge_worker LOGIN; END IF; IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='light_knowledge_projector') THEN CREATE ROLE light_knowledge_projector LOGIN; END IF; END \$\$; ALTER ROLE light_knowledge_api PASSWORD '$api_password'; ALTER ROLE light_knowledge_worker PASSWORD '$worker_password'; ALTER ROLE light_knowledge_projector PASSWORD '$projector_password'; GRANT light_knowledge_api_role TO light_knowledge_api; GRANT light_knowledge_worker_role TO light_knowledge_worker; GRANT light_knowledge_portal_projector_role TO light_knowledge_projector;" >/dev/null
+    -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='light_knowledge_api') THEN CREATE ROLE light_knowledge_api LOGIN; END IF; IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='light_knowledge_worker') THEN CREATE ROLE light_knowledge_worker LOGIN; END IF; IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='light_knowledge_projector') THEN CREATE ROLE light_knowledge_projector LOGIN; END IF; IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='light_knowledge_admin_api') THEN CREATE ROLE light_knowledge_admin_api LOGIN; END IF; END \$\$; ALTER ROLE light_knowledge_api PASSWORD '$api_password'; ALTER ROLE light_knowledge_worker PASSWORD '$worker_password'; ALTER ROLE light_knowledge_projector PASSWORD '$projector_password'; ALTER ROLE light_knowledge_admin_api PASSWORD '$admin_password'; GRANT light_knowledge_api_role TO light_knowledge_api; GRANT light_knowledge_worker_role TO light_knowledge_worker; GRANT light_knowledge_portal_projector_role TO light_knowledge_projector; GRANT light_knowledge_admin_api_role TO light_knowledge_admin_api;" >/dev/null
 
   write_secret_once "$secret_dir/knowledge-database-url" "postgres://light_knowledge_api:$api_password@postgres:5432/knowledge"
   write_secret_once "$secret_dir/knowledge-worker-database-url" "postgres://light_knowledge_worker:$worker_password@postgres:5432/knowledge"
   write_secret_once "$secret_dir/knowledge-projector-database-url" "postgres://light_knowledge_projector:$projector_password@postgres:5432/knowledge"
+  write_secret_once "$secret_dir/knowledge-admin-database-url" "postgres://light_knowledge_admin_api:$admin_password@postgres:5432/knowledge"
   write_secret_once "$secret_dir/configserver-event-read-url" "postgres://light_knowledge_projector:$projector_password@postgres:5432/configserver"
-  for database_secret in knowledge-database-url knowledge-worker-database-url knowledge-projector-database-url; do
+  for database_secret in knowledge-database-url knowledge-worker-database-url knowledge-projector-database-url knowledge-admin-database-url; do
     if [[ -s "$secret_dir/$database_secret" ]] && grep -q '/configserver$' "$secret_dir/$database_secret"; then
       sed -i 's#/configserver$#/knowledge#' "$secret_dir/$database_secret"
     fi
   done
   write_secret_once "$secret_dir/knowledge-query-cache-key" "$(openssl rand -hex 48)"
   write_secret_once "$secret_dir/knowledge-heartbeat-secret" "$(openssl rand -hex 48)"
+  write_secret_once "$secret_dir/knowledge-admin-opaque-actor-key" "$(openssl rand -hex 48)"
 
   delegation_secret="$(env_value LIGHT_AGENT_DELEGATION_SECRET)"
   [[ -n "$delegation_secret" ]] || die "COMPOSE_PROFILES=knowledge requires LIGHT_AGENT_DELEGATION_SECRET in .env"

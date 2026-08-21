@@ -1,0 +1,4 @@
+enabled: ${knowledge-admin-client.enabled:false}
+shadow: ${knowledge-admin-client.shadow:false}
+serviceUrl: ${knowledge-admin-client.serviceUrl:http://light-knowledge-admin:8093}
+timeoutMillis: 2000

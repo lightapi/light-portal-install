@@ -16,6 +16,8 @@ if [ "$knowledge_database_exists" = "1" ]; then
         echo "existing knowledge database failed the boundary contract" >&2
         exit 1
     }
+    psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d knowledge \
+        -f /docker-entrypoint-initdb.d/knowledge/patch_20260821_01_knowledge_admin_boundary.sql
     exit 0
 fi
 
@@ -104,3 +106,6 @@ BEGIN
 END
 $$;
 SQL
+
+psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d knowledge \
+    -f /docker-entrypoint-initdb.d/knowledge/patch_20260821_01_knowledge_admin_boundary.sql

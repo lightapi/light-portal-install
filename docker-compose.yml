@@ -448,6 +448,35 @@ services:
       controller:
         condition: service_healthy
 
+  light-knowledge-admin:
+    profiles: ["knowledge"]
+    image: ${LIGHT_KNOWLEDGE_ADMIN_IMAGE:-networknt/light-knowledge-admin:latest}
+    expose:
+      - "8093"
+    volumes:
+      - ./light-controller-rust/ca.pem:/keystore/ca.pem:ro,Z
+      - ./light-knowledge/secrets/knowledge-admin-database-url:/run/secrets/light-knowledge/knowledge-database-url:ro,Z
+      - ./light-knowledge/secrets/knowledge-admin-opaque-actor-key:/run/secrets/light-knowledge-admin/opaque-actor-key:ro,Z
+    environment:
+      CLIENT_TLS_VERIFYHOSTNAME: "false"
+      CLIENT_TLS_TRUSTEDCERTIFICATES: "[/keystore/ca.pem]"
+      CLIENT_KEYSERVICE_SERVERURL: ${KNOWLEDGE_ADMIN_JWKS_SERVER_URL:-https://light-oauth:6881}
+      SECURITY_AUDIENCE: "[urn:com.networknt]"
+      SECURITY_ISSUER: ${OAUTH_ISSUER:-urn:com:networknt:oauth2:v1}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      knowledge-schema-migration:
+        condition: service_completed_successfully
+      light-oauth:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8093/ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
 
 volumes:
   postgres-data:

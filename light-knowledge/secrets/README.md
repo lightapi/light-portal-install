@@ -9,6 +9,7 @@ set is:
 - `knowledge-database-url`
 - `knowledge-worker-database-url`
 - `knowledge-projector-database-url`
+- `knowledge-admin-database-url`
 - `configserver-event-read-url`
 - `agent-delegation-secret`
 - `knowledge-query-cache-key`
