@@ -23,7 +23,7 @@ services:
 
   knowledge-schema-migration:
     image: timescale/timescaledb:latest-pg17
-    entrypoint: ["/docker-entrypoint-initdb.d/zz-init-knowledge.sh"]
+    entrypoint: ["/bin/sh", "/docker-entrypoint-initdb.d/zz-init-knowledge.sh"]
     volumes:
       - ./postgres-db/init-knowledge.sh:/docker-entrypoint-initdb.d/zz-init-knowledge.sh:ro,Z
       - ./postgres-db/knowledge:/docker-entrypoint-initdb.d/knowledge:ro,Z

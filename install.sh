@@ -323,7 +323,7 @@ write_secret() {
 ensure_knowledge_database() {
   log "ensuring the isolated Knowledge database from its canonical DDL"
   docker exec -e POSTGRES_USER=postgres postgres \
-    /docker-entrypoint-initdb.d/zz-init-knowledge.sh
+    /bin/sh /docker-entrypoint-initdb.d/zz-init-knowledge.sh
 }
 ensure_knowledge_runtime() {
   require_command openssl
