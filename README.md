@@ -36,17 +36,17 @@ The installer downloads refreshed service assets from compressed Cloudflare R2
 archives in the `lightapi` bucket and starts the Rust `all-in-lt` stack with
 `light-agent`, the local demo REST APIs, and the insurance claim MCP server.
 
-## Light Knowledge profile
+## Light Knowledge services
 
-The installer includes the Phase 3 `light-knowledge` API, projector, and
-BASE/DELTA builder as an optional Compose profile, including bounded uploads,
+The installer always starts the `light-knowledge` API, the private
+`light-knowledge-admin` service, and `light-knowledge-worker`, including bounded uploads,
 multi-KB retrieval, and the MCP adapter. Fresh PostgreSQL volumes apply the
 bundled embedding-space/profile prerequisites and the Phase 0 through Phase 3
 schema scripts after the main Portal schema. Production promotion still
 requires the environment-dependent Phase 2 and Phase 3 qualification evidence;
 these local/development feature flags do not waive that gate.
 
-Before enabling the profile, populate the runtime-only files listed in
+Before starting the stack, populate the runtime-only values listed in
 `light-knowledge/secrets/README.md`. Set `LIGHT_AGENT_DELEGATION_SECRET` to the
 same value stored in `light-knowledge/secrets/agent-delegation-secret`. The
 three database URLs must use login identities that inherit the API, worker,
@@ -63,23 +63,25 @@ checkpoint requests, restore-verification metadata, and purge evidence. Its
 feature switches remain disabled until live migration, backup/restore,
 large-corpus, and horizontal-worker qualification passes.
 
-Start the profile with the rest of the installer stack:
+Start the Knowledge services with the rest of the installer stack:
 
 ```bash
-COMPOSE_PROFILES=knowledge ./install.sh start
+./install.sh start
 ```
 
 The deterministic pilot configuration is enabled by default. Production
-qualification must replace it with separate protected `kb_index` and
-`kb_query` credentials and the qualified embedding-space contract. Existing
+qualification must replace the shared development credential with separate
+protected `kb_index` and `kb_query` credentials and the qualified
+embedding-space contract. Existing
 volumes must receive the same schema through the normal versioned release-patch
 process; the `postgres-db/zy-*.sql` and `postgres-db/zz-*.sql` files run only
 during PostgreSQL initialization of a fresh volume.
 
 ## Dedicated LLM Gateway
 
-When both provider keys below are configured, the installation runs a
-dedicated `llm-gateway` from the `networknt/light-gateway` image. It uses
+The installation always runs a dedicated `llm-gateway` from the
+`networknt/light-gateway` image because the Knowledge worker depends on it.
+Provider routes become usable when their corresponding credentials are configured. It uses
 `serviceId=com.networknt.llm.gateway-1.0.0` with `envTag=dev`, sharing the
 same development instance configuration as `portal-config-loc` and
 `portal-config-dev`. The deployment remains identifiable as the demo install;

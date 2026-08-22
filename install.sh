@@ -120,36 +120,6 @@ release_base_url="${LIGHT_PORTAL_RELEASE_BASE_URL:-$asset_base_url/light-portal/
 release_base_url="${release_base_url%/}"
 light_portal_env_file="${LIGHT_PORTAL_ENV_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/lightapi/light-portal.env}"
 
-env_file_var_is_set() {
-  local file="$1"
-  local name="$2"
-
-  [[ -f "$file" ]] || return 1
-  awk -F= -v key="$name" '
-    $1 == key {
-      sub(/^[^=]*=/, "")
-      gsub(/^[[:space:]]+|[[:space:]]+$/, "")
-      if ($0 != "" && $0 != "\"\"" && $0 != "\047\047") {
-        found = 1
-      }
-    }
-    END { exit(found ? 0 : 1) }
-  ' "$file"
-}
-
-llm_gateway_var_is_set() {
-  local name="$1"
-
-  [[ -n "${!name:-}" ]] ||
-    env_file_var_is_set "$light_portal_env_file" "$name" ||
-    env_file_var_is_set .env "$name"
-}
-
-llm_gateway_enabled() {
-  llm_gateway_var_is_set GROQ_API_KEY &&
-    llm_gateway_var_is_set GEMINI_API_KEY
-}
-
 compose() {
   local env_args=(--env-file .env)
 
@@ -159,10 +129,6 @@ compose() {
 
   if [[ -f "$light_portal_env_file" ]]; then
     env_args+=(--env-file "$light_portal_env_file")
-  fi
-
-  if llm_gateway_enabled; then
-    env_args+=(--profile llm-gateway)
   fi
 
   docker compose "${env_args[@]}" "$@"
@@ -329,14 +295,6 @@ start_stack() {
   compose up -d
 }
 
-knowledge_profile_enabled() {
-  local profiles="${COMPOSE_PROFILES:-}"
-  if [[ -z "$profiles" && -f .env ]]; then
-    profiles="$(awk -F= '$1 == "COMPOSE_PROFILES" { sub(/^[^=]*=/, ""); print; exit }' .env)"
-  fi
-  [[ ",$profiles," == *,knowledge,* ]]
-}
-
 env_value() {
   local name="$1"
   local value="${!name:-}"
@@ -368,7 +326,6 @@ ensure_knowledge_database() {
     /docker-entrypoint-initdb.d/zz-init-knowledge.sh
 }
 ensure_knowledge_runtime() {
-  knowledge_profile_enabled || return 0
   require_command openssl
   local secret_dir="light-knowledge/secrets"
   local api_password worker_password admin_password delegation_secret
@@ -408,14 +365,14 @@ ensure_knowledge_runtime() {
   write_secret_once "$secret_dir/control-snapshot-signing-key" "$(openssl rand -hex 48)"
 
   delegation_secret="$(env_value LIGHT_AGENT_DELEGATION_SECRET)"
-  [[ -n "$delegation_secret" ]] || die "COMPOSE_PROFILES=knowledge requires LIGHT_AGENT_DELEGATION_SECRET in .env"
+  [[ -n "$delegation_secret" ]] || die "Knowledge services require LIGHT_AGENT_DELEGATION_SECRET in .env"
   write_secret "$secret_dir/agent-delegation-secret" "$delegation_secret"
   portal_token="$(env_value KNOWLEDGE_PORTAL_AUTHORIZATION)"
   query_embedding_token="$(env_value KNOWLEDGE_QUERY_EMBEDDING_AUTHORIZATION)"
   index_embedding_token="$(env_value KNOWLEDGE_INDEX_EMBEDDING_AUTHORIZATION)"
-  [[ -n "$portal_token" ]] || die "knowledge profile requires KNOWLEDGE_PORTAL_AUTHORIZATION"
-  [[ -n "$query_embedding_token" ]] || die "knowledge profile requires KNOWLEDGE_QUERY_EMBEDDING_AUTHORIZATION"
-  [[ -n "$index_embedding_token" ]] || die "knowledge profile requires KNOWLEDGE_INDEX_EMBEDDING_AUTHORIZATION"
+  [[ -n "$portal_token" ]] || die "Knowledge services require KNOWLEDGE_PORTAL_AUTHORIZATION"
+  [[ -n "$query_embedding_token" ]] || die "Knowledge services require KNOWLEDGE_QUERY_EMBEDDING_AUTHORIZATION"
+  [[ -n "$index_embedding_token" ]] || die "Knowledge services require KNOWLEDGE_INDEX_EMBEDDING_AUTHORIZATION"
   write_secret "$secret_dir/knowledge-portal-authorization" "$portal_token"
   write_secret "$secret_dir/knowledge-query-embedding-authorization" "$query_embedding_token"
   write_secret "$secret_dir/knowledge-index-embedding-authorization" "$index_embedding_token"
@@ -425,16 +382,14 @@ ensure_knowledge_runtime() {
 validate_compose_config() {
   local required_file
 
-  if llm_gateway_enabled; then
-    for required_file in \
-      llm-gateway-rust/config/startup.yml \
-      llm-gateway-rust/config/ca.pem \
-      llm-gateway-rust/config/cert.pem \
-      llm-gateway-rust/config/key.pem; do
-      [[ -f "$required_file" ]] ||
-        die "required llm-gateway config file is missing: $required_file"
-    done
-  fi
+  for required_file in \
+    llm-gateway-rust/config/startup.yml \
+    llm-gateway-rust/config/ca.pem \
+    llm-gateway-rust/config/cert.pem \
+    llm-gateway-rust/config/key.pem; do
+    [[ -f "$required_file" ]] ||
+      die "required llm-gateway config file is missing: $required_file"
+  done
 
   log "validating Docker Compose configuration"
   compose config --quiet || die "Docker Compose configuration validation failed"
@@ -1069,11 +1024,7 @@ case "$command_name" in
     else
       log "portal should be available at https://local.localhost:${LIGHT_GATEWAY_HOST_PORT}"
     fi
-    if llm_gateway_enabled; then
-      log "LLM gateway should be available at https://localhost:${LLM_GATEWAY_HOST_PORT:-8444}"
-    else
-      log "LLM provider keys are not configured; dedicated LLM gateway is disabled"
-    fi
+    log "LLM gateway should be available at https://localhost:${LLM_GATEWAY_HOST_PORT:-8444}"
     ;;
   update)
     download_assets

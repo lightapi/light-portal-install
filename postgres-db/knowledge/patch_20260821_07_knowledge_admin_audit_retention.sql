@@ -15,4 +15,3 @@ COMMENT ON TABLE public.knowledge_admin_audit_t IS
     'Content-safe audit evidence for Light Knowledge administration reads, commands, and control snapshots.';
 
 GRANT DELETE ON TABLE public.knowledge_control_snapshot_t TO light_knowledge_admin_api_role;
-

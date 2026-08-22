@@ -1,4 +1,4 @@
-When the `knowledge` Compose profile is enabled, `install.sh` creates separate
+On every install or start, `install.sh` creates separate
 local PostgreSQL login identities for the API, administration service, and
 embedded job engine and materializes their URL files. It also generates the
 query-cache, opaque-actor, and control-snapshot signing keys.
@@ -18,7 +18,10 @@ set is:
 - `knowledge-index-embedding-authorization`
 - `knowledge-connector-authorization` (only for a Phase 2 enterprise source)
 
-The installer defaults to protected embeddings and separate `kb_index` and
+The three development deployments use the same checked-in Knowledge service
+credential for API, `kb_index`, and `kb_query` calls, plus the same distinct
+administration credential for snapshot reads. Production must override the
+development service credential with separate protected `kb_index` and
 `kb_query` workload credentials. Repository, immutable commit, ingestion
 policy, Knowledge Base, and embedding-space values are resolved from the
 projected Portal control plane for each claimed job; they are not worker
@@ -56,8 +59,8 @@ concurrency ceiling, and rebuilds one complete BASE across every active Git
 source in the Knowledge Base. Job leases are renewed while work is running and
 expired claims are safely requeued.
 
-Start the protected installer with both `knowledge` and `llm-gateway` Compose
-profiles. The image supplies the canonical Knowledge templates, while the
+Start the protected installer normally; the Knowledge services and dedicated
+LLM gateway are part of the default Compose application. The image supplies the canonical Knowledge templates, while the
 Config Server snapshot supplies deployment-specific overrides. A deliberately
 deterministic exercise must use instance-scoped Config Server overrides and
 must keep production operations and migrations disabled; it is not release

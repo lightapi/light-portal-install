@@ -22,7 +22,6 @@ services:
       start_period: 5s
 
   knowledge-schema-migration:
-    profiles: ["knowledge"]
     image: timescale/timescaledb:latest-pg17
     entrypoint: ["/docker-entrypoint-initdb.d/zz-init-knowledge.sh"]
     volumes:
@@ -354,8 +353,6 @@ services:
         condition: service_healthy
 
   llm-gateway:
-    profiles:
-      - llm-gateway
     image: ${LLM_GATEWAY_IMAGE:-${LIGHT_GATEWAY_IMAGE:-networknt/light-gateway:latest}}
     ports:
       - "${LLM_GATEWAY_HOST_PORT:-8444}:8443"
@@ -428,7 +425,6 @@ services:
       start_period: 10s
 
   light-knowledge:
-    profiles: ["knowledge"]
     image: ${LIGHT_KNOWLEDGE_IMAGE:-networknt/light-knowledge:latest}
     ports:
       - "${LIGHT_KNOWLEDGE_PORT:-8092}:8092"
@@ -441,7 +437,7 @@ services:
       CLIENT_VERIFYHOSTNAME: "false"
       CLIENT_CACERTPATH: /keystore/ca.pem
       knowledgeWorker.jobExecutionMode: "external"
-      LIGHT_PORTAL_AUTHORIZATION: ${KNOWLEDGE_PORTAL_AUTHORIZATION:-}
+      LIGHT_PORTAL_AUTHORIZATION: ${KNOWLEDGE_PORTAL_AUTHORIZATION:-eyJhbGciOiJSUzI1NiIsImtpZCI6IkFacDAyTUN1Y3J1WmZGSmJ5eUZ3dWcifQ.eyJpc3MiOiJ1cm46Y29tOm5ldHdvcmtudDpvYXV0aDI6djEiLCJhdWQiOiJ1cm46Y29tLm5ldHdvcmtudCIsInN1YiI6IjAxOWZmMmY3LWU1NmUtNzU4YS1hMTdiLTQ1YjA1NzU1NjMyNiIsImV4cCI6MjEwMTkyNDg3MCwianRpIjoicGVIWjljTFdRZksxcW9qc3VNS3ZJdyIsImlhdCI6MTc4NjU2NDg3MCwibmJmIjoxNzg2NTY0NzUwLCJ2ZXIiOiIxLjAiLCJjaWQiOiIwMTlmZjJmNy1lNTZlLTc1OGEtYTE3Yi00NWIwNTc1NTYzMjYiLCJzY3AiOlsicG9ydGFsLnIiLCJwb3J0YWwudyJdLCJjbGllbnRfaWQiOiIwMTlmZjJmNy1lNTZlLTc1OGEtYTE3Yi00NWIwNTc1NTYzMjYiLCJzY29wZSI6InBvcnRhbC5yIHBvcnRhbC53IiwiZW52IjoiZGV2IiwiaG9zdCI6IjAxOTY0YjA1LTU1MmEtN2M0Yi05MTg0LTY4NTdlN2YzZGM1ZiIsInNpZCI6ImNvbS5uZXR3b3JrbnQubGlnaHQta25vd2xlZGdlLTEuMC4wIiwidWlkIjoiMDE5NjRiMDUtNTUzMi03Yzc5LThjZGUtMTkxZGNiZDQyMWI4IiwidXR5IjoiRiJ9.d1OdH6yJXSeuVyZJ-TLMzAL3BoTzl7OsugtLU6v_LoMRuMrzT-pG5u7x5Zd_iHyhmFThJM7MuL9sDNYCOj-bqpyxhtq1R9nAKjVOilwRO32hrO5V1HFLvXjSqBPWyeXuHvlFgENxCy1QfdAZXw4g5rXjMGiBwyEYIA-yXrY3up1tkY3HtkfuAYaIWuPSJ8JagiJzaWE-dkpNoz7ofxIyQW3GDjPP1qkREo5lT80cabWOnxwO-8HDWK1rWORP0NoKx9blEomGPMUET0OT5iCxAabJmQC0Vt7Oks83pfml8jTRRJqQMiZMpp8OIv5Jwmt2CUhp3j5T6CzQpVugMgfT9A}
     depends_on:
       postgres:
         condition: service_healthy
@@ -455,7 +451,6 @@ services:
         condition: service_healthy
 
   light-knowledge-worker:
-    profiles: ["knowledge"]
     image: ${LIGHT_KNOWLEDGE_WORKER_IMAGE:-networknt/light-knowledge-worker:latest}
     volumes:
       - ./light-controller-rust/ca.pem:/keystore/ca.pem:ro,Z
@@ -476,7 +471,6 @@ services:
         condition: service_started
 
   light-knowledge-admin:
-    profiles: ["knowledge"]
     image: ${LIGHT_KNOWLEDGE_ADMIN_IMAGE:-networknt/light-knowledge-admin:latest}
     expose:
       - "8093"
@@ -499,7 +493,7 @@ services:
       KNOWLEDGE_ADMIN_SNAPSHOT_REFRESH_SECONDS: ${KNOWLEDGE_SNAPSHOT_REFRESH_SECONDS:-60}
       KNOWLEDGE_ADMIN_SNAPSHOT_VERIFY_HOSTNAME: "false"
       KNOWLEDGE_ADMIN_SNAPSHOT_CA_CERT_FILE: /keystore/ca.pem
-      LIGHT_KNOWLEDGE_SNAPSHOT_AUTHORIZATION: ${KNOWLEDGE_SNAPSHOT_AUTHORIZATION:-${KNOWLEDGE_PORTAL_AUTHORIZATION:-}}
+      LIGHT_KNOWLEDGE_SNAPSHOT_AUTHORIZATION: ${KNOWLEDGE_SNAPSHOT_AUTHORIZATION:-eyJhbGciOiJSUzI1NiIsImtpZCI6IkFacDAyTUN1Y3J1WmZGSmJ5eUZ3dWcifQ.eyJpc3MiOiJ1cm46Y29tOm5ldHdvcmtudDpvYXV0aDI6djEiLCJhdWQiOiJ1cm46Y29tLm5ldHdvcmtudCIsInN1YiI6IjAxYTAyNzg3LWM1YTQtNzJiMC04ZGNjLTdkYmU2NTAyZDc0MyIsImV4cCI6MjEwMjcyOTY2NSwianRpIjoiaWVrck4tNVNUTnV2Z0I5NE1VQ1pYdyIsImlhdCI6MTc4NzM2OTY2NSwibmJmIjoxNzg3MzY5NTQ1LCJ2ZXIiOiIxLjAiLCJjaWQiOiIwMWEwMjc4Ny1jNWE0LTcyYjAtOGRjYy03ZGJlNjUwMmQ3NDMiLCJzY3AiOlsicG9ydGFsLnIiLCJwb3J0YWwudyJdLCJjbGllbnRfaWQiOiIwMWEwMjc4Ny1jNWE0LTcyYjAtOGRjYy03ZGJlNjUwMmQ3NDMiLCJzY29wZSI6InBvcnRhbC5yIHBvcnRhbC53IiwiZW52IjoiZGV2IiwiaG9zdCI6IjAxOTY0YjA1LTU1MmEtN2M0Yi05MTg0LTY4NTdlN2YzZGM1ZiIsInJvbGUiOiJhZG1pbiBob3N0LWFkbWluIiwic2lkIjoiY29tLm5ldHdvcmtudC5saWdodC1rbm93bGVkZ2UtYWRtaW4tMS4wLjAiLCJ1aWQiOiIwMTk2NGIwNS01NTMyLTdjNzktOGNkZS0xOTFkY2JkNDIxYjgiLCJ1dHkiOiJGIn0.z_dqOtZZd0ntH20m3n8NwHU5G8UNRUYsbWhEA3_jcYR89AVPTBoHAEtXrRTWqru99gfAjbEQRUHUuCfObKtjeVTljMJYMvQkHiTfdKmk32K7zupJqFe_Wbn7UG_c9DoNZuJYdDlcISlnGLo-hcgXMxaRRuIHTx2SkZU2MH_CqzCxBtVGTDaTYSy99qf5jjh32Uu3TtT27wJIMBUssBCMMnDSgCTe2km3I3YFTBBSaJBJaNPc_p0YJfwFIFd4aLnFhRno67SQ2hY2Aqrd_h-DMIYxM03lDes1SfDFSAv17HRhZL_E1MWB17Mwiz09qT8mbzGPxtPH8lrtIgAcznXh6A}
     depends_on:
       postgres:
         condition: service_healthy
