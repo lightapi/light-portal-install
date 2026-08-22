@@ -32,6 +32,10 @@ if [ "$knowledge_database_exists" = "1" ]; then
         psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d knowledge \
             -f /docker-entrypoint-initdb.d/knowledge/patch_20260821_05_admin_api.sql
     fi
+    psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d knowledge \
+        -f /docker-entrypoint-initdb.d/knowledge/patch_20260821_06_knowledge_admin_pgcrypto.sql
+    psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d knowledge \
+        -f /docker-entrypoint-initdb.d/knowledge/patch_20260821_07_knowledge_admin_audit_retention.sql
     psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d configserver \
         -f /docker-entrypoint-initdb.d/knowledge/patch_20260821_04_configserver_knowledge_control_only.sql
     exit 0

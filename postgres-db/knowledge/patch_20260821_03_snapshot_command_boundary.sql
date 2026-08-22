@@ -137,6 +137,7 @@ REVOKE USAGE ON SCHEMA public FROM light_knowledge_portal_projector_role;
 GRANT SELECT,INSERT,UPDATE ON knowledge_control_snapshot_t TO light_knowledge_admin_api_role;
 GRANT SELECT,INSERT,UPDATE ON knowledge_job_t TO light_knowledge_admin_api_role;
 GRANT SELECT ON knowledge_promotion_receipt_t TO light_knowledge_admin_api_role,light_knowledge_ops_read_role;
+GRANT SELECT,INSERT ON knowledge_promotion_receipt_t TO light_knowledge_worker_role;
 GRANT SELECT ON knowledge_control_snapshot_t TO light_knowledge_api_role,light_knowledge_worker_role;
 GRANT SELECT,INSERT,UPDATE ON knowledge_control_snapshot_t TO light_knowledge_snapshot_loader_role;
 GRANT SELECT,INSERT,UPDATE ON knowledge_runtime_authorization_t TO light_knowledge_snapshot_loader_role;

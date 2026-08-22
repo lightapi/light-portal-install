@@ -440,20 +440,40 @@ services:
     environment:
       CLIENT_VERIFYHOSTNAME: "false"
       CLIENT_CACERTPATH: /keystore/ca.pem
+      knowledgeWorker.jobExecutionMode: "external"
       LIGHT_PORTAL_AUTHORIZATION: ${KNOWLEDGE_PORTAL_AUTHORIZATION:-}
     depends_on:
       postgres:
         condition: service_healthy
       knowledge-schema-migration:
         condition: service_completed_successfully
-      knowledge-control-snapshot-sync:
-        condition: service_completed_successfully
-      knowledge-control-snapshot-refresh:
-        condition: service_started
+      light-knowledge-admin:
+        condition: service_healthy
       config-server:
         condition: service_healthy
       controller:
         condition: service_healthy
+
+  light-knowledge-worker:
+    profiles: ["knowledge"]
+    image: ${LIGHT_KNOWLEDGE_WORKER_IMAGE:-networknt/light-knowledge-worker:latest}
+    volumes:
+      - ./light-controller-rust/ca.pem:/keystore/ca.pem:ro,Z
+      - ./light-knowledge/secrets/knowledge-worker-database-url:/run/secrets/knowledge-worker-database-url:ro,Z
+      - ./light-knowledge/secrets/knowledge-index-embedding-authorization:/run/secrets/knowledge-index-embedding-authorization:ro,Z
+      - ./light-knowledge/objects:/var/lib/light-knowledge/objects:Z
+      - ./light-knowledge/checkouts:/var/lib/light-knowledge/checkouts:Z
+    environment:
+      LIGHT_KNOWLEDGE_EXPECTED_DATABASE: knowledge
+    depends_on:
+      postgres:
+        condition: service_healthy
+      knowledge-schema-migration:
+        condition: service_completed_successfully
+      light-knowledge-admin:
+        condition: service_healthy
+      llm-gateway:
+        condition: service_started
 
   light-knowledge-admin:
     profiles: ["knowledge"]
@@ -466,12 +486,20 @@ services:
       - ./light-knowledge/secrets/knowledge-admin-opaque-actor-key:/run/secrets/light-knowledge-admin/opaque-actor-key:ro,Z
       - ./light-knowledge/secrets/control-snapshot-signing-key:/run/secrets/light-knowledge-admin/control-snapshot-signing-key:ro,Z
     environment:
-      CLIENT_TLS_VERIFYHOSTNAME: "false"
-      CLIENT_TLS_TRUSTEDCERTIFICATES: "[/keystore/ca.pem]"
-      CLIENT_KEYSERVICE_SERVERURL: ${KNOWLEDGE_ADMIN_JWKS_SERVER_URL:-https://light-oauth:6881}
+      CLIENT_VERIFYHOSTNAME: "false"
+      CLIENT_CACERTPATH: /keystore/ca.pem
+      CLIENT_TOKENKEYSERVERURL: ${KNOWLEDGE_ADMIN_JWKS_SERVER_URL:-https://light-oauth:6881}
+      CLIENT_TOKENKEYURI: /oauth2/AZZRJE52eXu3t1hseacnGQ/keys
       SECURITY_AUDIENCE: "[urn:com.networknt]"
       SECURITY_ISSUER: ${OAUTH_ISSUER:-urn:com:networknt:oauth2:v1}
       knowledgeAdmin.ignoreJwtExpiry: ${KNOWLEDGE_ADMIN_IGNORE_JWT_EXPIRY:-true}
+      KNOWLEDGE_ADMIN_SNAPSHOT_SOURCE_ENABLED: "true"
+      KNOWLEDGE_ADMIN_SNAPSHOT_QUERY_URL: https://hybrid-query:8440/portal/query
+      KNOWLEDGE_ADMIN_SNAPSHOT_ENVIRONMENT: ${KNOWLEDGE_SNAPSHOT_ENVIRONMENT:-dev}
+      KNOWLEDGE_ADMIN_SNAPSHOT_REFRESH_SECONDS: ${KNOWLEDGE_SNAPSHOT_REFRESH_SECONDS:-60}
+      KNOWLEDGE_ADMIN_SNAPSHOT_VERIFY_HOSTNAME: "false"
+      KNOWLEDGE_ADMIN_SNAPSHOT_CA_CERT_FILE: /keystore/ca.pem
+      LIGHT_KNOWLEDGE_SNAPSHOT_AUTHORIZATION: ${KNOWLEDGE_SNAPSHOT_AUTHORIZATION:-${KNOWLEDGE_PORTAL_AUTHORIZATION:-}}
     depends_on:
       postgres:
         condition: service_healthy
@@ -479,49 +507,14 @@ services:
         condition: service_completed_successfully
       light-oauth:
         condition: service_healthy
+      hybrid-query:
+        condition: service_started
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8093/ready || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 10
       start_period: 10s
-
-  knowledge-control-snapshot-sync:
-    profiles: ["knowledge"]
-    image: curlimages/curl:8.12.1
-    entrypoint: ["/opt/light-knowledge/sync-control-snapshot.sh", "once"]
-    volumes:
-      - ./light-knowledge/sync-control-snapshot.sh:/opt/light-knowledge/sync-control-snapshot.sh:ro,Z
-    environment:
-      # Local deployments may reuse the interactive Portal token. Production
-      # should provide a dedicated portal.r/portal.w service token here.
-      SNAPSHOT_AUTHORIZATION: ${KNOWLEDGE_SNAPSHOT_AUTHORIZATION:-${KNOWLEDGE_PORTAL_AUTHORIZATION:-}}
-      SNAPSHOT_ENVIRONMENT: ${KNOWLEDGE_SNAPSHOT_ENVIRONMENT:-dev}
-      SNAPSHOT_QUERY_URL: https://hybrid-query:8440/portal/query
-      SNAPSHOT_APPLY_URL: http://light-knowledge-admin:8093/v1/knowledge/admin/control-snapshots:apply
-    depends_on:
-      hybrid-query:
-        condition: service_started
-      light-knowledge-admin:
-        condition: service_healthy
-
-  knowledge-control-snapshot-refresh:
-    profiles: ["knowledge"]
-    image: curlimages/curl:8.12.1
-    entrypoint: ["/opt/light-knowledge/sync-control-snapshot.sh", "loop"]
-    restart: unless-stopped
-    volumes:
-      - ./light-knowledge/sync-control-snapshot.sh:/opt/light-knowledge/sync-control-snapshot.sh:ro,Z
-    environment:
-      SNAPSHOT_AUTHORIZATION: ${KNOWLEDGE_SNAPSHOT_AUTHORIZATION:-${KNOWLEDGE_PORTAL_AUTHORIZATION:-}}
-      SNAPSHOT_ENVIRONMENT: ${KNOWLEDGE_SNAPSHOT_ENVIRONMENT:-dev}
-      SNAPSHOT_REFRESH_SECONDS: ${KNOWLEDGE_SNAPSHOT_REFRESH_SECONDS:-60}
-      SNAPSHOT_QUERY_URL: https://hybrid-query:8440/portal/query
-      SNAPSHOT_APPLY_URL: http://light-knowledge-admin:8093/v1/knowledge/admin/control-snapshots:apply
-    depends_on:
-      knowledge-control-snapshot-sync:
-        condition: service_completed_successfully
-
 
 volumes:
   postgres-data:

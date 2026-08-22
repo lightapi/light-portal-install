@@ -5,7 +5,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 KNOWLEDGE_DIR = ROOT / "postgres-db" / "knowledge"
-EXPECTED_DDL_SHA256 = "7ee640f7aa3204692ee3018149ad043a3e9d4524ba614bbaff924ffffaf9a6fd"
+EXPECTED_DDL_SHA256 = "c949e1c4b5b9e7cffd9745b538fc78e26e6824dc164c579bc6f651599fc305c0"
 
 
 class KnowledgeSchemaTest(unittest.TestCase):
@@ -28,16 +28,13 @@ class KnowledgeSchemaTest(unittest.TestCase):
         self.assertNotIn("public.knowledge_*", install)
         self.assertIn("zz-init-knowledge.sh", install)
 
-    def test_phase2_snapshot_bootstrap_has_a_recurring_lease_refresh(self):
+    def test_phase2_snapshot_refresh_runs_inside_knowledge_admin(self):
         compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
-        sync = (ROOT / "light-knowledge" / "sync-control-snapshot.sh").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("knowledge-control-snapshot-sync:", compose)
-        self.assertIn("knowledge-control-snapshot-refresh:", compose)
-        self.assertIn("SNAPSHOT_REFRESH_SECONDS", compose)
-        self.assertIn("control-snapshots:apply", compose)
-        self.assertIn("while true", sync)
+        self.assertNotIn("knowledge-control-snapshot-sync:", compose)
+        self.assertNotIn("knowledge-control-snapshot-refresh:", compose)
+        self.assertIn('KNOWLEDGE_ADMIN_SNAPSHOT_SOURCE_ENABLED: "true"', compose)
+        self.assertIn("KNOWLEDGE_ADMIN_SNAPSHOT_REFRESH_SECONDS", compose)
+        self.assertIn("LIGHT_KNOWLEDGE_SNAPSHOT_AUTHORIZATION", compose)
         self.assertNotIn("LIGHT_KNOWLEDGE_CONTROL_EVENT_DATABASE_URL", compose)
 
     def test_packaged_boundary_files_match_portal_db_when_both_repos_exist(self):
@@ -51,6 +48,8 @@ class KnowledgeSchemaTest(unittest.TestCase):
             "patch_20260821_03_snapshot_command_boundary.sql",
             "patch_20260821_04_configserver_knowledge_control_only.sql",
             "patch_20260821_05_admin_api.sql",
+            "patch_20260821_06_knowledge_admin_pgcrypto.sql",
+            "patch_20260821_07_knowledge_admin_audit_retention.sql",
             "data-migration-relations-v1.txt",
         ):
             self.assertEqual(
@@ -91,10 +90,15 @@ class KnowledgeSchemaTest(unittest.TestCase):
         install = (ROOT / "install.sh").read_text(encoding="utf-8")
         self.assertIn("knowledge_admin_audit_t", init)
         self.assertIn("patch_20260821_05_admin_api.sql", init)
+        self.assertIn("patch_20260821_06_knowledge_admin_pgcrypto.sql", init)
+        self.assertIn("patch_20260821_07_knowledge_admin_audit_retention.sql", init)
         self.assertIn("zz-init-knowledge.sh", install)
         ddl = (KNOWLEDGE_DIR / "ddl.sql").read_text(encoding="utf-8")
         self.assertIn("CREATE TABLE public.knowledge_admin_audit_t", ddl)
         self.assertIn("knowledge_admin_sync_runs_page_idx", ddl)
+        self.assertIn("CREATE EXTENSION IF NOT EXISTS pgcrypto", ddl)
+        self.assertIn("'CONTROL_SNAPSHOT_APPLY'::text", ddl)
+        self.assertIn("SELECT,INSERT,UPDATE,DELETE", ddl)
 
     def test_config_server_bootstrap_retains_canonical_seed_data(self):
         ddl = (ROOT / "postgres-db" / "init.sql").read_text(encoding="utf-8")

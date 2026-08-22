@@ -34,6 +34,20 @@ COMMENT ON EXTENSION pg_trgm IS 'text similarity measurement and index searching
 
 
 --
+-- Name: pgcrypto; Type: EXTENSION; Schema: -; Owner: -
+--
+
+CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;
+
+
+--
+-- Name: EXTENSION pgcrypto; Type: COMMENT; Schema: -; Owner: -
+--
+
+COMMENT ON EXTENSION pgcrypto IS 'cryptographic functions';
+
+
+--
 -- Name: vector; Type: EXTENSION; Schema: -; Owner: -
 --
 
@@ -9754,7 +9768,7 @@ GRANT SELECT ON TABLE public.knowledge_consumer_quota_t TO light_knowledge_ops_r
 -- Name: TABLE knowledge_control_snapshot_t; Type: ACL; Schema: public; Owner: -
 --
 
-GRANT SELECT,INSERT,UPDATE ON TABLE public.knowledge_control_snapshot_t TO light_knowledge_admin_api_role;
+GRANT SELECT,INSERT,UPDATE,DELETE ON TABLE public.knowledge_control_snapshot_t TO light_knowledge_admin_api_role;
 GRANT SELECT ON TABLE public.knowledge_control_snapshot_t TO light_knowledge_api_role;
 GRANT SELECT ON TABLE public.knowledge_control_snapshot_t TO light_knowledge_worker_role;
 GRANT SELECT,INSERT,UPDATE ON TABLE public.knowledge_control_snapshot_t TO light_knowledge_snapshot_loader_role;
@@ -10021,6 +10035,7 @@ GRANT SELECT ON TABLE public.knowledge_passage_anchor_t TO light_knowledge_admin
 
 GRANT SELECT ON TABLE public.knowledge_promotion_receipt_t TO light_knowledge_admin_api_role;
 GRANT SELECT ON TABLE public.knowledge_promotion_receipt_t TO light_knowledge_ops_read_role;
+GRANT SELECT,INSERT ON TABLE public.knowledge_promotion_receipt_t TO light_knowledge_worker_role;
 
 
 --
@@ -10213,7 +10228,7 @@ GRANT UPDATE(verified_ts) ON TABLE public.knowledge_upload_t TO light_knowledge_
 CREATE TABLE public.knowledge_admin_audit_t (
     admin_audit_id uuid NOT NULL,
     request_id character varying(128) NOT NULL,
-    knowledge_base_id uuid NOT NULL REFERENCES public.knowledge_base_t(knowledge_base_id) ON DELETE CASCADE,
+    knowledge_base_id uuid REFERENCES public.knowledge_base_t(knowledge_base_id) ON DELETE CASCADE,
     consumer_host_id uuid NOT NULL,
     environment character varying(16) NOT NULL,
     operation character varying(64) NOT NULL,
@@ -10224,14 +10239,15 @@ CREATE TABLE public.knowledge_admin_audit_t (
     created_ts timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     CONSTRAINT knowledge_admin_audit_t_pkey PRIMARY KEY (admin_audit_id),
     CONSTRAINT knowledge_admin_audit_operation_check CHECK ((operation)::text = ANY (ARRAY[
-        'EMBEDDING_MIGRATION_ESTIMATE'::text, 'AUTHORIZATION_SIMULATION'::text])),
+        'EMBEDDING_MIGRATION_ESTIMATE'::text, 'AUTHORIZATION_SIMULATION'::text,
+        'CONTROL_SNAPSHOT_APPLY'::text, 'OPERATIONAL_COMMAND_SUBMIT'::text])),
     CONSTRAINT knowledge_admin_audit_input_digest_check CHECK (input_digest ~ '^[a-f0-9]{64}$'::text),
     CONSTRAINT knowledge_admin_audit_result_count_check CHECK (result_count >= 0),
-    CONSTRAINT knowledge_admin_audit_latency_check CHECK (latency_ms >= 0 AND latency_ms <= 2000)
+    CONSTRAINT knowledge_admin_audit_latency_check CHECK (latency_ms >= 0 AND latency_ms <= 120000)
 );
 
 COMMENT ON TABLE public.knowledge_admin_audit_t IS
-    'Content-safe audit evidence for read-only Light Knowledge administration computations.';
+    'Content-safe audit evidence for Light Knowledge administration reads, commands, and control snapshots.';
 
 CREATE INDEX knowledge_admin_audit_page_idx ON public.knowledge_admin_audit_t
     (knowledge_base_id, created_ts DESC, admin_audit_id DESC);
