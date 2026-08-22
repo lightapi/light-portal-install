@@ -1,5 +1,5 @@
 CREATE DATABASE configserver;
-\connect configserver
+\c configserver;
 
 --
 -- PostgreSQL database dump
@@ -44306,24 +44306,6 @@ ALTER TABLE ONLY public.worklist_column_t
 -- PostgreSQL database dump complete
 --
 
--- The Portal query and command runtimes use a Config-Server-only credential.
--- The Knowledge database bootstrap revokes PUBLIC database access, so this
--- identity cannot reconnect to the operational database in a co-located
--- development installation.
-DO $portal_runtime$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'portal_runtime') THEN
-        CREATE ROLE portal_runtime LOGIN PASSWORD 'secret';
-    END IF;
-END
-$portal_runtime$;
-REVOKE CONNECT ON DATABASE configserver FROM PUBLIC;
-GRANT CONNECT ON DATABASE configserver TO portal_runtime;
-GRANT USAGE ON SCHEMA public TO portal_runtime;
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO portal_runtime;
-GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO portal_runtime;
-GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO portal_runtime;
-
 INSERT INTO public.scheduler_lock_t (lock_id, instance_id, last_heartbeat)
 VALUES (1, 'none', CURRENT_TIMESTAMP)
 ON CONFLICT (lock_id) DO NOTHING;
@@ -44587,3 +44569,15 @@ SET delete_action = EXCLUDED.delete_action,
 COMMIT;
 
 \unrestrict hH5RPVy0DmoyafcyXfCcG4i9sdKgsYSKTzXXVVYP7XpvO7UaT9TIlRIkHZQaYB0
+
+
+INSERT INTO user_t (user_id, language, first_name, last_name, email, user_type, verified, password)
+VALUES ('01964b05-5532-7c79-8cde-191dcbd421b8', 'en', 'Steve', 'Hu', 'steve.hu@lightapi.net', 'E', true, '1000:5b39342c202d37372c203132302c202d3132302c2034372c2032332c2034352c202d34342c202d31362c2034372c202d35392c202d35362c2039302c202d352c202d38322c202d32385d:949e6fcf9c4bb8a3d6a8c141a3a9182a572fb95fe8ccdc93b54ba53df8ef2e930f7b0348590df0d53f242ccceeae03aef6d273a34638b49c559ada110ec06992');
+
+INSERT INTO org_t (domain, org_name, org_desc, org_owner) VALUES ('lightapi.net', 'Light Api Portal', 'Light Api Portal', '01964b05-5532-7c79-8cde-191dcbd421b8');
+
+INSERT INTO host_t (host_id, domain, sub_domain, host_owner) VALUES ('01964b05-552a-7c4b-9184-6857e7f3dc5f', 'lightapi.net', 'dev', '01964b05-5532-7c79-8cde-191dcbd421b8');
+
+INSERT INTO user_host_t (host_id, user_id, current)  values ('01964b05-552a-7c4b-9184-6857e7f3dc5f', '01964b05-5532-7c79-8cde-191dcbd421b8', true);
+
+INSERT INTO employee_t (host_id, employee_id, user_id, title, manager_id, hire_date) VALUES ('01964b05-552a-7c4b-9184-6857e7f3dc5f', 'sh35', '01964b05-5532-7c79-8cde-191dcbd421b8', 'Consulant API Platform', null, '2023-06-18');

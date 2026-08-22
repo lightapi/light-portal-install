@@ -1,4 +1,3 @@
--- Mirror of portal-db/postgres/knowledge/patch_20260821_01_knowledge_admin_boundary.sql.
 -- Apply only to the Knowledge database.
 BEGIN;
 
