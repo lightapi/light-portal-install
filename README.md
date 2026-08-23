@@ -46,11 +46,19 @@ schema scripts after the main Portal schema. Production promotion still
 requires the environment-dependent Phase 2 and Phase 3 qualification evidence;
 these local/development feature flags do not waive that gate.
 
-Before starting the stack, populate the runtime-only values listed in
-`light-knowledge/secrets/README.md`. Set `LIGHT_AGENT_DELEGATION_SECRET` to the
-same value stored in `light-knowledge/secrets/agent-delegation-secret`. The
-three database URLs must use login identities that inherit the API, worker,
-and Portal-projector roles extended by the Phase 2 schema. SharePoint and
+Before starting the stack, populate any environment-specific runtime values
+listed in `light-knowledge/secrets/README.md`. On first start, the installer
+generates the shared Light Agent delegation secret, stores it with mode `0600`
+in `.env`, stores the mounted copy with group-read-only mode `0640` in
+`light-knowledge/secrets/agent-delegation-secret`, and reuses it on later
+starts. Set `LIGHT_AGENT_DELEGATION_SECRET` before starting only to provide an
+explicit secret-manager value; the installer persists that override to keep
+both consumers synchronized. The installer also records its primary group as
+`LIGHT_PORTAL_SECRET_GID`, allowing the non-root Knowledge containers to read
+only their bind-mounted secrets without making those files world-readable. The
+three database URLs must use login
+identities that inherit the API, worker, and Portal-projector roles extended by
+the Phase 2 schema. SharePoint and
 Confluence workers use a source-scoped `enterpriseConnectorPageUrl`, an
 external bearer secret, and the provider `enterpriseConnectorApprovedOrigin`.
 Notifications enqueue independent priority ACL and bulk content reconciliation;

@@ -115,6 +115,139 @@ class KnowledgeSchemaTest(unittest.TestCase):
                 f"Config Server seed missing: {relation}",
             )
 
+    def test_portal_runtime_identity_precedes_event_processors(self):
+        install = (ROOT / "install.sh").read_text(encoding="utf-8")
+        helper = install[
+            install.index("ensure_portal_runtime_database_access() {") :
+            install.index("ensure_knowledge_runtime() {")
+        ]
+        self.assertIn("CREATE ROLE portal_runtime LOGIN", helper)
+        self.assertIn("ALTER ROLE portal_runtime LOGIN PASSWORD 'secret'", helper)
+
+        bootstrap = install[
+            install.index("bootstrap_events() {") :
+            install.index('case "$command_name" in')
+        ]
+        identity = bootstrap.index("ensure_portal_runtime_database_access")
+        processors = bootstrap.index("start_event_processors")
+        self.assertLess(identity, processors)
+
+        knowledge_runtime = install[
+            install.index("ensure_knowledge_runtime() {") :
+            install.index("validate_compose_config() {")
+        ]
+        self.assertIn("ensure_portal_runtime_database_access", knowledge_runtime)
+
+    def test_snapshot_signing_key_exists_before_bootstrap_containers(self):
+        install = (ROOT / "install.sh").read_text(encoding="utf-8")
+        helper = install[
+            install.index("ensure_control_snapshot_signing_key() {") :
+            install.index("ensure_knowledge_database() {")
+        ]
+        self.assertIn("rmdir", helper)
+        self.assertIn("write_secret_once", helper)
+
+        bootstrap = install[
+            install.index("bootstrap_events() {") :
+            install.index('case "$command_name" in')
+        ]
+        signing_key = bootstrap.index("ensure_control_snapshot_signing_key")
+        postgres = bootstrap.index("compose up -d postgres")
+        processors = bootstrap.index("start_event_processors")
+        self.assertLess(signing_key, postgres)
+        self.assertLess(signing_key, processors)
+
+        start_processors = install[
+            install.index("start_event_processors() {") :
+            install.index("event_store_count() {")
+        ]
+        self.assertIn(
+            "compose up -d --no-deps --force-recreate hybrid-command hybrid-query",
+            start_processors,
+        )
+
+    def test_agent_delegation_secret_is_generated_persisted_and_reused(self):
+        install = (ROOT / "install.sh").read_text(encoding="utf-8")
+        helper = install[
+            install.index("ensure_agent_delegation_secret() {") :
+            install.index("ensure_control_snapshot_signing_key() {")
+        ]
+        self.assertIn("env_value LIGHT_AGENT_DELEGATION_SECRET", helper)
+        self.assertIn('-s "$secret_file"', helper)
+        self.assertIn("openssl rand -hex 48", helper)
+        self.assertIn(
+            "persist_env_value LIGHT_AGENT_DELEGATION_SECRET", helper
+        )
+        self.assertIn(
+            'export LIGHT_AGENT_DELEGATION_SECRET="$delegation_secret"', helper
+        )
+
+        knowledge_runtime = install[
+            install.index("ensure_knowledge_runtime() {") :
+            install.index("validate_compose_config() {")
+        ]
+        self.assertIn("ensure_agent_delegation_secret", knowledge_runtime)
+        self.assertNotIn(
+            "Knowledge services require LIGHT_AGENT_DELEGATION_SECRET",
+            knowledge_runtime,
+        )
+
+    def test_non_root_knowledge_services_receive_secret_reader_group(self):
+        install = (ROOT / "install.sh").read_text(encoding="utf-8")
+        helper = install[
+            install.index("prepare_knowledge_secret_access() {") :
+            install.index("ensure_control_snapshot_signing_key() {")
+        ]
+        self.assertIn('secret_gid="$(id -g)"', helper)
+        self.assertIn('chmod 640 "$secret_dir/$secret_file"', helper)
+        self.assertIn("light-knowledge/objects light-knowledge/checkouts", helper)
+        self.assertIn('chmod 2770 "$runtime_dir"', helper)
+        self.assertIn("persist_env_value LIGHT_PORTAL_SECRET_GID", helper)
+
+        compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        self.assertEqual(
+            3, compose.count('- "${LIGHT_PORTAL_SECRET_GID:-1000}"')
+        )
+
+    def test_shared_bind_mounts_use_shared_selinux_labels(self):
+        compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        for source in (
+            "./postgres-db/init-knowledge.sh",
+            "./postgres-db/knowledge",
+            "./light-controller-rust/ca.pem",
+            "./light-knowledge/secrets",
+            "./light-knowledge/objects",
+            "./light-knowledge/checkouts",
+            "./light-gateway-rust/config",
+            "./light-gateway-rust/config/ca.pem",
+        ):
+            for line in compose.splitlines():
+                if line.strip().startswith(f"- {source}:"):
+                    self.assertTrue(
+                        line.endswith(":z") or line.endswith(",z"),
+                        f"shared bind mount must use an SELinux shared label: {line}",
+                    )
+
+        signing_mounts = [
+            line
+            for line in compose.splitlines()
+            if line.strip().startswith(
+                "- ./light-knowledge/secrets/control-snapshot-signing-key:"
+            )
+        ]
+        self.assertEqual(2, len(signing_mounts))
+        self.assertTrue(
+            all(line.endswith(":z") or line.endswith(",z") for line in signing_mounts)
+        )
+
+    def test_light_knowledge_uses_a_non_root_writable_working_directory(self):
+        compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        light_knowledge = compose[
+            compose.index("  light-knowledge:\n") :
+            compose.index("  light-knowledge-worker:\n")
+        ]
+        self.assertIn("working_dir: /var/lib/light-knowledge", light_knowledge)
+
 
 if __name__ == "__main__":
     unittest.main()

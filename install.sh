@@ -320,15 +320,141 @@ write_secret() {
   chmod 600 "$path"
 }
 
+persist_env_value() {
+  local name="$1"
+  local value="$2"
+  local env_file="${3:-.env}"
+  local tmp
+  local line
+  local found=false
+
+  [[ "$name" =~ ^[A-Z][A-Z0-9_]*$ ]] || die "invalid environment variable name: $name"
+  [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] ||
+    die "$name must not contain a newline"
+
+  [[ -f "$env_file" ]] || touch "$env_file"
+  tmp="$(mktemp "${TMPDIR:-/tmp}/light-portal-env.XXXXXX")"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" == "$name="* ]]; then
+      if [[ "$found" == false ]]; then
+        printf '%s=%s\n' "$name" "$value" >> "$tmp"
+        found=true
+      fi
+    else
+      printf '%s\n' "$line" >> "$tmp"
+    fi
+  done < "$env_file"
+  if [[ "$found" == false ]]; then
+    printf '%s=%s\n' "$name" "$value" >> "$tmp"
+  fi
+  chmod 600 "$tmp"
+  mv "$tmp" "$env_file"
+}
+
+ensure_agent_delegation_secret() {
+  local secret_dir="light-knowledge/secrets"
+  local secret_file="$secret_dir/agent-delegation-secret"
+  local delegation_secret
+
+  require_command openssl
+  mkdir -p "$secret_dir"
+  if [[ -d "$secret_file" ]]; then
+    rmdir "$secret_file" 2>/dev/null ||
+      die "agent delegation secret path is a non-empty directory: $secret_file"
+  fi
+
+  delegation_secret="$(env_value LIGHT_AGENT_DELEGATION_SECRET)"
+  if [[ -z "$delegation_secret" && -s "$secret_file" ]]; then
+    delegation_secret="$(<"$secret_file")"
+  fi
+  if [[ -z "$delegation_secret" ]]; then
+    delegation_secret="$(openssl rand -hex 48)"
+    log "generated the Light Agent delegation secret for this installation"
+  fi
+
+  write_secret "$secret_file" "$delegation_secret"
+  persist_env_value LIGHT_AGENT_DELEGATION_SECRET "$delegation_secret"
+  export LIGHT_AGENT_DELEGATION_SECRET="$delegation_secret"
+}
+
+prepare_knowledge_secret_access() {
+  local secret_dir="light-knowledge/secrets"
+  local runtime_dir
+  local secret_gid
+  local secret_file
+  local secret_files=(
+    agent-delegation-secret
+    control-snapshot-signing-key
+    knowledge-admin-database-url
+    knowledge-admin-opaque-actor-key
+    knowledge-database-url
+    knowledge-index-embedding-authorization
+    knowledge-portal-authorization
+    knowledge-query-cache-key
+    knowledge-query-embedding-authorization
+    knowledge-worker-database-url
+  )
+
+  secret_gid="$(id -g)"
+  [[ "$secret_gid" =~ ^[0-9]+$ ]] || die "cannot determine the installer group ID"
+  for secret_file in "${secret_files[@]}"; do
+    [[ -f "$secret_dir/$secret_file" ]] ||
+      die "Knowledge runtime secret is missing: $secret_dir/$secret_file"
+    chgrp "$secret_gid" "$secret_dir/$secret_file"
+    chmod 640 "$secret_dir/$secret_file"
+  done
+  for runtime_dir in light-knowledge/objects light-knowledge/checkouts; do
+    mkdir -p "$runtime_dir"
+    chgrp "$secret_gid" "$runtime_dir"
+    chmod 2770 "$runtime_dir"
+  done
+  persist_env_value LIGHT_PORTAL_SECRET_GID "$secret_gid"
+  export LIGHT_PORTAL_SECRET_GID="$secret_gid"
+}
+
+ensure_control_snapshot_signing_key() {
+  local secret_dir="light-knowledge/secrets"
+  local secret_file="$secret_dir/control-snapshot-signing-key"
+
+  require_command openssl
+  mkdir -p "$secret_dir"
+  if [[ -d "$secret_file" ]]; then
+    rmdir "$secret_file" 2>/dev/null ||
+      die "control snapshot signing key path is a non-empty directory: $secret_file"
+  fi
+  write_secret_once "$secret_file" "$(openssl rand -hex 48)"
+}
+
 ensure_knowledge_database() {
   log "ensuring the isolated Knowledge database from its canonical DDL"
   docker exec -e POSTGRES_USER=postgres postgres \
     /bin/sh /docker-entrypoint-initdb.d/zz-init-knowledge.sh
 }
+
+ensure_portal_runtime_database_access() {
+  log "ensuring the Portal runtime database identity"
+  psql_exec <<'SQL'
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'portal_runtime') THEN
+    CREATE ROLE portal_runtime LOGIN;
+  END IF;
+END
+$$;
+ALTER ROLE portal_runtime LOGIN PASSWORD 'secret';
+REVOKE CONNECT ON DATABASE configserver FROM PUBLIC;
+GRANT CONNECT ON DATABASE configserver TO portal_runtime;
+GRANT USAGE ON SCHEMA public TO portal_runtime;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO portal_runtime;
+GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO portal_runtime;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO portal_runtime;
+SQL
+}
+
 ensure_knowledge_runtime() {
   require_command openssl
   local secret_dir="light-knowledge/secrets"
-  local api_password worker_password admin_password delegation_secret
+  local api_password worker_password admin_password
   local portal_token query_embedding_token index_embedding_token
   mkdir -p "$secret_dir"
   ensure_knowledge_database
@@ -336,8 +462,7 @@ ensure_knowledge_runtime() {
   # Upgrade existing installations to the same credential boundary as a fresh
   # install. Portal runtimes retain full Config Server access but cannot
   # authenticate to the Knowledge database.
-  docker exec postgres psql -U postgres -d configserver -v ON_ERROR_STOP=1 \
-    -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='portal_runtime') THEN CREATE ROLE portal_runtime LOGIN PASSWORD 'secret'; END IF; END \$\$; REVOKE CONNECT ON DATABASE configserver FROM PUBLIC; GRANT CONNECT ON DATABASE configserver TO portal_runtime; GRANT USAGE ON SCHEMA public TO portal_runtime; GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA public TO portal_runtime; GRANT USAGE,SELECT,UPDATE ON ALL SEQUENCES IN SCHEMA public TO portal_runtime; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO portal_runtime;" >/dev/null
+  ensure_portal_runtime_database_access
 
   api_password="$(openssl rand -hex 32)"
   worker_password="$(openssl rand -hex 32)"
@@ -362,11 +487,9 @@ ensure_knowledge_runtime() {
   done
   write_secret_once "$secret_dir/knowledge-query-cache-key" "$(openssl rand -hex 48)"
   write_secret_once "$secret_dir/knowledge-admin-opaque-actor-key" "$(openssl rand -hex 48)"
-  write_secret_once "$secret_dir/control-snapshot-signing-key" "$(openssl rand -hex 48)"
+  ensure_control_snapshot_signing_key
 
-  delegation_secret="$(env_value LIGHT_AGENT_DELEGATION_SECRET)"
-  [[ -n "$delegation_secret" ]] || die "Knowledge services require LIGHT_AGENT_DELEGATION_SECRET in .env"
-  write_secret "$secret_dir/agent-delegation-secret" "$delegation_secret"
+  ensure_agent_delegation_secret
   portal_token="$(env_value KNOWLEDGE_PORTAL_AUTHORIZATION)"
   query_embedding_token="$(env_value KNOWLEDGE_QUERY_EMBEDDING_AUTHORIZATION)"
   index_embedding_token="$(env_value KNOWLEDGE_INDEX_EMBEDDING_AUTHORIZATION)"
@@ -376,6 +499,7 @@ ensure_knowledge_runtime() {
   write_secret "$secret_dir/knowledge-portal-authorization" "$portal_token"
   write_secret "$secret_dir/knowledge-query-embedding-authorization" "$query_embedding_token"
   write_secret "$secret_dir/knowledge-index-embedding-authorization" "$index_embedding_token"
+  prepare_knowledge_secret_access
   log "Knowledge API, administration, and worker identities and runtime secret files are ready"
 }
 
@@ -478,7 +602,9 @@ start_event_processors() {
   compose up -d postgres
   wait_for_postgres || die "postgres did not become ready for TCP connections"
 
-  compose up -d --no-deps hybrid-command hybrid-query
+  # Recreate the processors so refreshed JAR/config directories and a repaired
+  # snapshot-signing file cannot remain attached through stale bind mounts.
+  compose up -d --no-deps --force-recreate hybrid-command hybrid-query
   wait_for_running_container hybrid-command || die "hybrid-command did not start"
   wait_for_running_container hybrid-query || die "hybrid-query did not start"
   wait_for_postgres || die "postgres stopped accepting TCP connections"
@@ -997,9 +1123,11 @@ apply_release_deltas() {
 bootstrap_events() {
   require_command docker
   [[ -f .env ]] || cp .env.example .env
+  ensure_control_snapshot_signing_key
   validate_compose_config
   compose up -d postgres
   wait_for_postgres || die "postgres did not become ready for TCP connections"
+  ensure_portal_runtime_database_access
   if try_restore_bootstrap_archive; then
     start_event_processors
     apply_release_deltas
