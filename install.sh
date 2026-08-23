@@ -52,6 +52,10 @@ Environment:
                              Executable pre-listener credential rotation hook.
   LIGHT_PORTAL_CLIENT_REDIRECT_URI
                              Default: https://local.localhost/authorization
+  LIGHT_PORTAL_ASSET_CACHE_BUST
+                             Optional cache-busting token for events.zip. A UTC
+                             timestamp is generated for each asset refresh by
+                             default.
   CLEAN_VOLUMES=true         Stop the stack and delete Docker volumes before
                              install, update, or start.
   APPLY_RELEASE_DELTAS       Default: true for update, false for install/start.
@@ -160,6 +164,15 @@ download_file() {
   mv "$tmp" "$dest"
 }
 
+cache_busted_url() {
+  local url="$1"
+  local token="${LIGHT_PORTAL_ASSET_CACHE_BUST:-$(date -u +%Y%m%d%H%M%S)}"
+  local separator="?"
+
+  [[ "$url" == *\?* ]] && separator="&"
+  printf '%s%scachebust=%s\n' "$url" "$separator" "$token"
+}
+
 download_archive() {
   local archive_name="$1"
   local target_dir="$2"
@@ -177,8 +190,12 @@ download_archive_file() {
   local member_name="$2"
   local dest="$3"
   local archive_file="data/$archive_name"
+  local archive_url="$asset_base_url/$archive_name"
 
-  download_file "$asset_base_url/$archive_name" "$archive_file"
+  if [[ "$archive_name" == "events.zip" ]]; then
+    archive_url="$(cache_busted_url "$archive_url")"
+  fi
+  download_file "$archive_url" "$archive_file"
   log "extracting $member_name from $archive_file to $dest"
   unzip -p "$archive_file" "$member_name" > "$dest.tmp"
   mv "$dest.tmp" "$dest"

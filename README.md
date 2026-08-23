@@ -186,19 +186,45 @@ LIGHT_PORTAL_ASSET_BASE_URL=https://example.com ./install.sh assets
 
 ## Reinstall from scratch
 
-The following procedure permanently deletes the existing PostgreSQL data,
-imported events, downloaded assets, and local installation files. For an
-installation created with `curl | bash`, first stop the stack and remove its
-Docker Compose volumes:
+Deleting `$HOME/.light-portal` does **not** delete the database. PostgreSQL data
+is stored in the Docker Compose `postgres-data` named volume, which exists
+outside the installation directory.
+
+To recreate the database while keeping the installed directory, use the
+following recommended command:
+
+```bash
+cd "$HOME/.light-portal"
+CLEAN_VOLUMES=true ./install.sh install
+```
+
+This permanently deletes the PostgreSQL volume, downloads fresh release
+assets, recreates the Config Server and Knowledge databases, and imports the
+baseline `events.json` again. Use the same command from the repository root for
+a checked-out installation that you want to keep. The installer adds a fresh
+cache-busting query to the `events.zip` request so a newly recreated database
+cannot receive an older cached baseline after a release.
+
+If the downloaded assets are already current and only the database needs to be
+recreated, use:
+
+```bash
+cd "$HOME/.light-portal"
+CLEAN_VOLUMES=true ./install.sh start
+```
+
+For a complete reinstall that also removes downloaded assets and local
+installation files, first stop the stack and delete its Docker Compose volumes:
 
 ```bash
 cd "$HOME/.light-portal"
 ./install.sh uninstall
 ```
 
-When prompted to delete the Docker volumes, enter `y`. After the uninstall
-finishes, leave the installation directory, delete it, and run the installer
-again:
+When prompted to delete the Docker volumes, enter `y`. If you answer `n` or
+skip this step, the next installation will reuse the existing database even if
+`$HOME/.light-portal` is deleted. After the uninstall finishes, leave the
+installation directory, delete it, and run the installer again:
 
 ```bash
 cd "$HOME"
@@ -206,23 +232,10 @@ rm -rf "$HOME/.light-portal"
 curl -fsSL https://raw.githubusercontent.com/lightapi/light-portal-install/master/install.sh | bash
 ```
 
-For a checked-out repository that you want to keep, do not delete the
-repository. Use `CLEAN_VOLUMES=true ./install.sh install` from the repository
-instead; it removes the Compose volumes, downloads fresh assets, recreates the
-database, and imports the baseline `events.json` again.
-
-To force a fresh database and re-import `events.json`, run with
-`CLEAN_VOLUMES=true`. This stops the stack, deletes the Compose volumes, starts
-Postgres and the event processors again, and imports the downloaded events into
-the recreated database after Postgres accepts TCP connections:
-
-```bash
-cd "$HOME/.light-portal"
-CLEAN_VOLUMES=true ./install.sh start
-```
-
-Use the same flag with `install` or `update` when you also want to refresh the
-downloaded assets first. No event-importer command-line switch is required.
+`CLEAN_VOLUMES=true` stops the stack with `docker compose down -v`, starts
+Postgres and the event processors again, and imports the downloaded events
+after Postgres accepts TCP connections. The flag can also be used with
+`update`. No event-importer command-line switch is required.
 The fallback event import reports success when the event, outbox, and
 notification rows are durable; projection and DLQ handling continue
 asynchronously. The installer then waits for the `user-query-group` consumer
