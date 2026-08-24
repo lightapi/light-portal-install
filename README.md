@@ -41,8 +41,17 @@ archives in the `lightapi` bucket and starts the Rust `all-in-lt` stack with
 The installer always starts the `light-knowledge` API, the private
 `light-knowledge-admin` service, and `light-knowledge-worker`, including bounded uploads,
 multi-KB retrieval, and the MCP adapter. Fresh PostgreSQL volumes apply the
-bundled embedding-space/profile prerequisites and the Phase 0 through Phase 3
-schema scripts after the main Portal schema. Production promotion still
+Portal catalog to the `configserver` schema in the `configserver` database and
+the Knowledge model to the `knowledge` schema in the `knowledge` database. The
+`public` schema in each database contains only extension objects and does not
+accept application object creation. Runtime roles own the search paths, so
+service URLs do not carry schema query parameters. The bundled
+embedding-space/profile prerequisites and the Phase 0 through Phase 3 schema
+are rendered into `knowledge`.
+Installations created before this topology was introduced must use the
+`CLEAN_VOLUMES=true` reinstall procedure below; the installer does not move
+existing application tables out of `public` in place.
+Production promotion still
 requires the environment-dependent Phase 2 and Phase 3 qualification evidence;
 these local/development feature flags do not waive that gate.
 
@@ -199,7 +208,7 @@ CLEAN_VOLUMES=true ./install.sh install
 ```
 
 This permanently deletes the PostgreSQL volume, downloads fresh release
-assets, recreates the Config Server and Knowledge databases, and imports the
+assets, recreates the dedicated Config Server and Knowledge databases, and imports the
 baseline `events.json` again. Use the same command from the repository root for
 a checked-out installation that you want to keep. The installer adds a fresh
 cache-busting query to the `events.zip` request so a newly recreated database

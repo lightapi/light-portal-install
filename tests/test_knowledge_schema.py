@@ -13,20 +13,31 @@ class KnowledgeSchemaTest(unittest.TestCase):
         actual = hashlib.sha256((KNOWLEDGE_DIR / "ddl.sql").read_bytes()).hexdigest()
         self.assertEqual(EXPECTED_DDL_SHA256, actual)
 
-    def test_bootstrap_does_not_clone_or_filter_the_config_server_schema(self):
-        script = (ROOT / "postgres-db" / "init-knowledge.sh").read_text(
+    def test_bootstrap_installs_an_isolated_schema_pair(self):
+        validator = (ROOT / "postgres-db" / "validate-environment.sh").read_text(
             encoding="utf-8"
         )
-        self.assertIn("knowledge/ddl.sql", script)
-        self.assertNotIn("--schema-only --no-owner", script)
-        self.assertNotIn("DROP %s IF EXISTS", script)
-        self.assertNotIn("public.knowledge_*", script)
-        self.assertIn("data-migration-relations-v1.txt", script)
-        self.assertIn("Knowledge migration count mismatch", script)
+        initializer = (ROOT / "postgres-db" / "init-environment.sh").read_text(
+            encoding="utf-8"
+        )
+        renderer = (ROOT / "postgres-db" / "lib" / "render-schema.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('topology="${PORTAL_DB_TOPOLOGY:-separate}"', initializer)
+        self.assertIn('configserver_schema="configserver"', initializer)
+        self.assertIn('knowledge_schema="knowledge"', initializer)
+        self.assertIn('configserver_schema="configserver_${environment_name}"', initializer)
+        self.assertIn('knowledge_schema="knowledge_${environment_name}"', initializer)
+        self.assertIn("REVOKE CREATE ON SCHEMA public FROM PUBLIC", initializer)
+        self.assertIn("knowledge_control_snapshot_t", validator)
+        self.assertIn("__PORTAL_DB_EXTENSION_SCHEMA__.vector", renderer)
+        self.assertNotIn("DROP DATABASE", initializer)
 
         install = (ROOT / "install.sh").read_text(encoding="utf-8")
-        self.assertNotIn("public.knowledge_*", install)
-        self.assertIn("zz-init-knowledge.sh", install)
+        self.assertIn("DROP DATABASE IF EXISTS knowledge WITH (FORCE)", install)
+        self.assertIn("DROP DATABASE IF EXISTS configserver WITH (FORCE)", install)
+        self.assertNotIn("DROP SCHEMA IF EXISTS knowledge_local CASCADE", install)
+        self.assertIn("validate-environment.sh", install)
 
     def test_phase2_snapshot_refresh_runs_inside_knowledge_admin(self):
         compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
@@ -84,15 +95,8 @@ class KnowledgeSchemaTest(unittest.TestCase):
             self.assertNotIn(marker, runtime)
 
     def test_phase3_admin_api_upgrade_is_installed(self):
-        init = (ROOT / "postgres-db" / "init-knowledge.sh").read_text(
-            encoding="utf-8"
-        )
         install = (ROOT / "install.sh").read_text(encoding="utf-8")
-        self.assertIn("knowledge_admin_audit_t", init)
-        self.assertIn("patch_20260821_05_admin_api.sql", init)
-        self.assertIn("patch_20260821_06_knowledge_admin_pgcrypto.sql", init)
-        self.assertIn("patch_20260821_07_knowledge_admin_audit_retention.sql", init)
-        self.assertIn("zz-init-knowledge.sh", install)
+        self.assertIn("validate-environment.sh", install)
         ddl = (KNOWLEDGE_DIR / "ddl.sql").read_text(encoding="utf-8")
         self.assertIn("CREATE TABLE public.knowledge_admin_audit_t", ddl)
         self.assertIn("knowledge_admin_sync_runs_page_idx", ddl)
@@ -121,8 +125,11 @@ class KnowledgeSchemaTest(unittest.TestCase):
             install.index("ensure_portal_runtime_database_access() {") :
             install.index("ensure_knowledge_runtime() {")
         ]
-        self.assertIn("CREATE ROLE portal_runtime LOGIN", helper)
-        self.assertIn("ALTER ROLE portal_runtime LOGIN PASSWORD 'secret'", helper)
+        self.assertIn("CREATE ROLE portal_local_runtime LOGIN", helper)
+        self.assertIn("ALTER ROLE portal_local_runtime LOGIN PASSWORD 'secret'", helper)
+        self.assertIn("IN SCHEMA configserver", helper)
+        self.assertIn("SET search_path = configserver, public", helper)
+        self.assertIn("ALTER DEFAULT PRIVILEGES FOR ROLE postgres", helper)
 
         bootstrap = install[
             install.index("bootstrap_events() {") :
@@ -137,6 +144,18 @@ class KnowledgeSchemaTest(unittest.TestCase):
             install.index("validate_compose_config() {")
         ]
         self.assertIn("ensure_portal_runtime_database_access", knowledge_runtime)
+
+    def test_release_database_patches_are_rendered_into_local_schema(self):
+        install = (ROOT / "install.sh").read_text(encoding="utf-8")
+        helper = install[
+            install.index("apply_db_patches() {") :
+            install.index("verify_event_delta_applied() {")
+        ]
+        self.assertIn("PORTAL_DB_CONFIGSERVER_SOURCE", helper)
+        self.assertIn(
+            "render-schema.sh configserver configserver", helper
+        )
+        self.assertNotIn('psql_exec < "$source_sql"', helper)
 
     def test_snapshot_signing_key_exists_before_bootstrap_containers(self):
         install = (ROOT / "install.sh").read_text(encoding="utf-8")
@@ -212,7 +231,9 @@ class KnowledgeSchemaTest(unittest.TestCase):
     def test_shared_bind_mounts_use_shared_selinux_labels(self):
         compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
         for source in (
-            "./postgres-db/init-knowledge.sh",
+            "./postgres-db/init-environment.sh",
+            "./postgres-db/lib",
+            "./postgres-db/validate-environment.sh",
             "./postgres-db/knowledge",
             "./light-controller-rust/ca.pem",
             "./light-knowledge/secrets",

@@ -31,7 +31,7 @@ portal.topic: portal-event
 # For postgres database running in a docker container, you have to use the driverClassName.
 db-provider.driverClassName: org.postgresql.Driver
 db-provider.jdbcUrl: jdbc:postgresql://postgres:5432/configserver
-db-provider.username: portal_runtime
+db-provider.username: portal_local_runtime
 db-provider.password: secret
 db-provider.maximumPoolSize: 3
 

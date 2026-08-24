@@ -443,9 +443,13 @@ ensure_control_snapshot_signing_key() {
 }
 
 ensure_knowledge_database() {
-  log "ensuring the isolated Knowledge database from its canonical DDL"
-  docker exec -e POSTGRES_USER=postgres postgres \
-    /bin/sh /docker-entrypoint-initdb.d/zz-init-knowledge.sh
+  log "validating the local Config Server and Knowledge schema pair"
+  docker exec \
+    -e POSTGRES_USER=postgres \
+    -e PORTAL_DB_TOPOLOGY=separate \
+    -e PORTAL_DB_NAME=configserver \
+    -e PORTAL_DB_KNOWLEDGE_NAME=knowledge \
+    postgres /bin/bash /docker-entrypoint-initdb.d/validate-environment.sh
 }
 
 ensure_portal_runtime_database_access() {
@@ -453,18 +457,26 @@ ensure_portal_runtime_database_access() {
   psql_exec <<'SQL'
 DO $$
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'portal_runtime') THEN
-    CREATE ROLE portal_runtime LOGIN;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'portal_local_runtime') THEN
+    CREATE ROLE portal_local_runtime LOGIN;
   END IF;
 END
 $$;
-ALTER ROLE portal_runtime LOGIN PASSWORD 'secret';
+ALTER ROLE portal_local_runtime LOGIN PASSWORD 'secret';
 REVOKE CONNECT ON DATABASE configserver FROM PUBLIC;
-GRANT CONNECT ON DATABASE configserver TO portal_runtime;
-GRANT USAGE ON SCHEMA public TO portal_runtime;
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO portal_runtime;
-GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO portal_runtime;
-GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO portal_runtime;
+GRANT CONNECT ON DATABASE configserver TO portal_local_runtime;
+GRANT USAGE ON SCHEMA configserver, public TO portal_local_runtime;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA configserver TO portal_local_runtime;
+GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA configserver TO portal_local_runtime;
+GRANT EXECUTE ON ALL ROUTINES IN SCHEMA configserver TO portal_local_runtime;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA configserver
+  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO portal_local_runtime;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA configserver
+  GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO portal_local_runtime;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA configserver
+  GRANT EXECUTE ON ROUTINES TO portal_local_runtime;
+ALTER ROLE portal_local_runtime IN DATABASE configserver
+  SET search_path = configserver, public;
 SQL
 }
 
@@ -491,17 +503,12 @@ ensure_knowledge_runtime() {
   write_secret_once "$secret_dir/.worker-db-password" "$worker_password"
   write_secret_once "$secret_dir/.admin-db-password" "$admin_password"
 
-  docker exec postgres psql -U postgres -d configserver -v ON_ERROR_STOP=1 \
-    -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='light_knowledge_api') THEN CREATE ROLE light_knowledge_api LOGIN; END IF; IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='light_knowledge_worker') THEN CREATE ROLE light_knowledge_worker LOGIN; END IF; IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='light_knowledge_admin_api') THEN CREATE ROLE light_knowledge_admin_api LOGIN; END IF; END \$\$; ALTER ROLE light_knowledge_api PASSWORD '$api_password'; ALTER ROLE light_knowledge_worker PASSWORD '$worker_password'; ALTER ROLE light_knowledge_admin_api PASSWORD '$admin_password'; GRANT light_knowledge_api_role TO light_knowledge_api; GRANT light_knowledge_worker_role TO light_knowledge_worker; GRANT light_knowledge_admin_api_role,light_knowledge_snapshot_loader_role TO light_knowledge_admin_api; REVOKE CONNECT ON DATABASE configserver FROM PUBLIC; GRANT CONNECT ON DATABASE knowledge TO light_knowledge_api,light_knowledge_worker,light_knowledge_admin_api;" >/dev/null
+  docker exec postgres psql -U postgres -d knowledge -v ON_ERROR_STOP=1 \
+    -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='light_knowledge_local_api') THEN CREATE ROLE light_knowledge_local_api LOGIN; END IF; IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='light_knowledge_local_worker') THEN CREATE ROLE light_knowledge_local_worker LOGIN; END IF; IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='light_knowledge_local_admin_api') THEN CREATE ROLE light_knowledge_local_admin_api LOGIN; END IF; END \$\$; ALTER ROLE light_knowledge_local_api PASSWORD '$api_password'; ALTER ROLE light_knowledge_local_worker PASSWORD '$worker_password'; ALTER ROLE light_knowledge_local_admin_api PASSWORD '$admin_password'; GRANT light_knowledge_api_role TO light_knowledge_local_api; GRANT light_knowledge_worker_role TO light_knowledge_local_worker; GRANT light_knowledge_admin_api_role,light_knowledge_snapshot_loader_role TO light_knowledge_local_admin_api; REVOKE CONNECT ON DATABASE knowledge FROM PUBLIC; GRANT CONNECT ON DATABASE knowledge TO light_knowledge_local_api,light_knowledge_local_worker,light_knowledge_local_admin_api; ALTER ROLE light_knowledge_local_api IN DATABASE knowledge SET search_path=knowledge,public; ALTER ROLE light_knowledge_local_worker IN DATABASE knowledge SET search_path=knowledge,public; ALTER ROLE light_knowledge_local_admin_api IN DATABASE knowledge SET search_path=knowledge,public;" >/dev/null
 
-  write_secret_once "$secret_dir/knowledge-database-url" "postgres://light_knowledge_api:$api_password@postgres:5432/knowledge"
-  write_secret_once "$secret_dir/knowledge-worker-database-url" "postgres://light_knowledge_worker:$worker_password@postgres:5432/knowledge"
-  write_secret_once "$secret_dir/knowledge-admin-database-url" "postgres://light_knowledge_admin_api:$admin_password@postgres:5432/knowledge"
-  for database_secret in knowledge-database-url knowledge-worker-database-url knowledge-admin-database-url; do
-    if [[ -s "$secret_dir/$database_secret" ]] && grep -q '/configserver$' "$secret_dir/$database_secret"; then
-      sed -i 's#/configserver$#/knowledge#' "$secret_dir/$database_secret"
-    fi
-  done
+  write_secret "$secret_dir/knowledge-database-url" "postgres://light_knowledge_local_api:$api_password@postgres:5432/knowledge"
+  write_secret "$secret_dir/knowledge-worker-database-url" "postgres://light_knowledge_local_worker:$worker_password@postgres:5432/knowledge"
+  write_secret "$secret_dir/knowledge-admin-database-url" "postgres://light_knowledge_local_admin_api:$admin_password@postgres:5432/knowledge"
   write_secret_once "$secret_dir/knowledge-query-cache-key" "$(openssl rand -hex 48)"
   write_secret_once "$secret_dir/knowledge-admin-opaque-actor-key" "$(openssl rand -hex 48)"
   ensure_control_snapshot_signing_key
@@ -662,12 +669,17 @@ psql_exec() {
 }
 
 reset_configserver_database() {
-  log "resetting configserver after an incomplete bootstrap archive restore"
+  log "recreating the dedicated Config Server and Knowledge databases"
+  docker exec postgres psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
+    -c "DROP DATABASE IF EXISTS knowledge WITH (FORCE);"
   docker exec postgres psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
     -c "DROP DATABASE IF EXISTS configserver WITH (FORCE);"
-  docker exec postgres createdb -U postgres configserver
-  docker exec -i postgres psql -U postgres -d configserver -v ON_ERROR_STOP=1 \
-    < postgres-db/init.sql
+  docker exec \
+    -e POSTGRES_USER=postgres \
+    -e PORTAL_DB_TOPOLOGY=separate \
+    -e PORTAL_DB_NAME=configserver \
+    -e PORTAL_DB_KNOWLEDGE_NAME=knowledge \
+    postgres /bin/bash /docker-entrypoint-initdb.d/00-init-environment.sh
 }
 
 verify_bootstrap_postconditions() {
@@ -787,6 +799,14 @@ try_restore_bootstrap_archive() {
   fi
   docker exec postgres rm -f "$container_archive"
 
+  restored_schema_ready="$(docker exec postgres psql -U postgres -d configserver -tAc \
+    "SELECT to_regclass('configserver.event_store_t') IS NOT NULL;" | tr -d '[:space:]')"
+  if [[ "$restored_schema_ready" != "t" ]]; then
+    reset_configserver_database
+    log "bootstrap archive uses the legacy public schema; reset completed for event-import fallback"
+    return 1
+  fi
+
   expected_schema_digest="$(python3 scripts/bootstrap_manifest.py get \
     --manifest "$manifest" --path schemaSha256)"
   actual_schema_digest="$(docker exec postgres pg_dump -U postgres -d configserver \
@@ -822,13 +842,14 @@ try_restore_bootstrap_archive() {
   rm -f "$restored_checksums"
 
   psql_exec -c "GRANT CONNECT ON DATABASE configserver TO $restore_role;"
-  psql_exec -c "GRANT USAGE ON SCHEMA public TO $restore_role;"
-  psql_exec -c "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO $restore_role;"
-  psql_exec -c "GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO $restore_role;"
+  psql_exec -c "GRANT USAGE ON SCHEMA configserver, public TO $restore_role;"
+  psql_exec -c "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA configserver TO $restore_role;"
+  psql_exec -c "GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA configserver TO $restore_role;"
+  psql_exec -c "ALTER ROLE $restore_role IN DATABASE configserver SET search_path = configserver, public;"
   grants_verified="$(docker exec postgres psql -U postgres -d configserver -tAc \
     "SELECT has_database_privilege('$restore_role', 'configserver', 'CONNECT')
-         AND has_schema_privilege('$restore_role', 'public', 'USAGE')
-         AND has_table_privilege('$restore_role', 'public.event_store_t', 'SELECT');" |
+         AND has_schema_privilege('$restore_role', 'configserver', 'USAGE')
+         AND has_table_privilege('$restore_role', 'configserver.event_store_t', 'SELECT');" |
     tr -d '[:space:]')"
   [[ "$grants_verified" == "t" ]] || {
     reset_configserver_database
@@ -843,7 +864,7 @@ try_restore_bootstrap_archive() {
   psql_exec -c "ANALYZE;"
   analyze_verified="$(docker exec postgres psql -U postgres -d configserver -tAc \
     "SELECT last_analyze IS NOT NULL FROM pg_stat_all_tables
-      WHERE schemaname = 'public' AND relname = 'event_store_t';" |
+      WHERE schemaname = 'configserver' AND relname = 'event_store_t';" |
     tr -d '[:space:]')"
   [[ "$analyze_verified" == "t" ]] || {
     reset_configserver_database
@@ -955,7 +976,8 @@ apply_db_patches() {
   local patch_id
   local checksum
   local existing_checksum
-  local tmp_sql
+  local source_sql
+  local rendered_sql
 
   wait_for_postgres || die "postgres did not become ready before database patches"
 
@@ -992,20 +1014,24 @@ SQL
     fi
 
     log "applying database patch $patch_id"
-    tmp_sql="$(mktemp "${TMPDIR:-/tmp}/light-portal-db-patch.XXXXXX.sql")"
+    source_sql="$(mktemp "${TMPDIR:-/tmp}/light-portal-db-patch-source.XXXXXX.sql")"
+    rendered_sql="$(mktemp "${TMPDIR:-/tmp}/light-portal-db-patch-rendered.XXXXXX.sql")"
     {
       printf 'BEGIN;\n'
       cat "$patch"
       printf '\n'
       printf "INSERT INTO portal_schema_patch_t (patch_id, checksum) VALUES ('%s', '%s');\n" "$patch_id" "$checksum"
       printf 'COMMIT;\n'
-    } > "$tmp_sql"
+    } > "$source_sql"
 
-    if ! psql_exec < "$tmp_sql"; then
-      rm -f "$tmp_sql"
+    PORTAL_DB_CONFIGSERVER_SOURCE="$source_sql" \
+      postgres-db/lib/render-schema.sh configserver configserver "$rendered_sql"
+
+    if ! psql_exec < "$rendered_sql"; then
+      rm -f "$source_sql" "$rendered_sql"
       die "failed to apply database patch $patch_id"
     fi
-    rm -f "$tmp_sql"
+    rm -f "$source_sql" "$rendered_sql"
   done
 }
 

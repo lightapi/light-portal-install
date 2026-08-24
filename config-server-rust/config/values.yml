@@ -1,5 +1,5 @@
 # Default configuration values for config-server
-db_url: "postgres://postgres:secret@postgres:5432/configserver"
+db_url: "postgres://portal_local_runtime:secret@postgres:5432/configserver"
 server_ip: "0.0.0.0"
 server_port: 8435
 server_http_port: 8080

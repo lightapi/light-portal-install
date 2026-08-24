@@ -1,5 +1,5 @@
 # Default configuration values for light-oauth
-db_url: "postgres://postgres:secret@postgres:5432/configserver"
+db_url: "postgres://portal_local_runtime:secret@postgres:5432/configserver"
 server_port: 6881
 host_id: "01964b05-552a-7c4b-9184-6857e7f3dc5f"
 tls_cert_path: "cert.pem"

@@ -4,11 +4,15 @@ services:
     image: timescale/timescaledb:latest-pg17
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      - ./postgres-db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro,Z
-      - ./postgres-db/init-knowledge.sh:/docker-entrypoint-initdb.d/zz-init-knowledge.sh:ro,z
-      - ./postgres-db/knowledge:/docker-entrypoint-initdb.d/knowledge:ro,z
+      - ./postgres-db/init-environment.sh:/docker-entrypoint-initdb.d/00-init-environment.sh:ro,z
+      - ./postgres-db/lib:/docker-entrypoint-initdb.d/lib:ro,z
+      - ./postgres-db/init.sql:/docker-entrypoint-initdb.d/schema-source/configserver.sql:ro,Z
+      - ./postgres-db/knowledge:/docker-entrypoint-initdb.d/schema-source/knowledge:ro,z
     environment:
       POSTGRES_PASSWORD: secret
+      PORTAL_DB_TOPOLOGY: separate
+      PORTAL_DB_NAME: configserver
+      PORTAL_DB_KNOWLEDGE_NAME: knowledge
     command: postgres -c wal_level=logical -c max_replication_slots=10 -c max_wal_senders=10
     ports:
       - "5432:5432"
@@ -23,14 +27,17 @@ services:
 
   knowledge-schema-migration:
     image: timescale/timescaledb:latest-pg17
-    entrypoint: ["/bin/sh", "/docker-entrypoint-initdb.d/zz-init-knowledge.sh"]
+    entrypoint: ["/bin/bash", "/docker-entrypoint-initdb.d/validate-environment.sh"]
     volumes:
-      - ./postgres-db/init-knowledge.sh:/docker-entrypoint-initdb.d/zz-init-knowledge.sh:ro,z
+      - ./postgres-db/validate-environment.sh:/docker-entrypoint-initdb.d/validate-environment.sh:ro,z
       - ./postgres-db/knowledge:/docker-entrypoint-initdb.d/knowledge:ro,z
     environment:
       PGHOST: postgres
       POSTGRES_USER: postgres
       PGPASSWORD: secret
+      PORTAL_DB_TOPOLOGY: separate
+      PORTAL_DB_NAME: configserver
+      PORTAL_DB_KNOWLEDGE_NAME: knowledge
     depends_on:
       postgres:
         condition: service_healthy
@@ -102,7 +109,7 @@ services:
       CONTROLLER_TLS_CERT_PATH: /keystore/server.pem
       CONTROLLER_TLS_KEY_PATH: /keystore/server.key
       CONTROLLER_TLS_TRUST_CERT_PATH: /keystore/server.pem
-      DATABASE_URL: postgres://postgres:secret@postgres:5432/configserver
+      DATABASE_URL: postgres://portal_local_runtime:secret@postgres:5432/configserver
       DATABASE_MAXIMUM_POOL_SIZE: 3
       MICROSERVICE_JWKS_URL: https://light-oauth:6881/oauth2/AZZRJE52eXu3t1hseacnGQ/keys
       MICROSERVICE_JWKS_VERIFY_HOSTNAME: "false"
@@ -391,7 +398,7 @@ services:
       - ./light-controller-rust/ca.pem:/keystore/ca.pem:ro,z
     environment:
       LIGHT_RS_CONFIG_DIR: /config
-      DATABASE_URL: postgres://postgres:secret@postgres:5432/configserver
+      DATABASE_URL: postgres://portal_local_runtime:secret@postgres:5432/configserver
       LIGHT_PORTAL_AUTHORIZATION: "${LIGHT_AGENT_LIGHT_PORTAL_AUTHORIZATION:-Bearer eyJraWQiOiJBWnAwMk1DdWNydVpmRkpieXlGd3VnIiwiYWxnIjoiUlMyNTYifQ.eyJpc3MiOiJ1cm46Y29tOm5ldHdvcmtudDpvYXV0aDI6djEiLCJhdWQiOiJ1cm46Y29tLm5ldHdvcmtudCIsImV4cCI6MjA5MTQwODU2NiwianRpIjoiaEI0bXlkUzBleEQwSjJLSVNSTU5HQSIsImlhdCI6MTc3NjA0ODU2NiwibmJmIjoxNzc2MDQ4NDQ2LCJ2ZXIiOiIxLjAiLCJjaWQiOiIwMTlkODM0OS00MWM2LTcyZWYtOTVjMi00NDI4YTQwZDBlNDkiLCJzY3AiOlsicG9ydGFsLnciLCJwb3J0YWwuciJdLCJob3N0IjoiMDE5NjRiMDUtNTUyYS03YzRiLTkxODQtNjg1N2U3ZjNkYzVmIiwic2lkIjoiY29tLm5ldHdvcmtudC5hZ2VudC5hY2NvdW50LTEuMC4wIn0.XcZEkr_fD1U3IWRYs9BS7aYVlcrj7zlayPjZ8s9_5MCTN2CYwIMuW1t_a7U_eRUTn3UtjRbV0v7tKBZ53sDIKbn3de6RJ4o_Iynf2_WX-yHEoggljkF-blIo8HarF1sn_v4Fp1eEh7V8m6D_lHC9FVkkIFDSvKl5GPAgjd9-dq8AkIkOGJ26IAOeuiKIskpUNkCmu6wahGInDYdsYk0GTydLu2jYIkhcPOoAOgFpQXBIPVXFZ8C1CRpPw39gfPyyATP_1qh2iGXlfSGTJiIp0pb9EXLIVcexPhdGh_LhSkrOMDUqxme5HC94T9do8yPQGzgfNFPcLywVeTgEco4bBQ}"
       LIGHT_AGENT_HOST_ID: ${LIGHT_AGENT_HOST_ID:-01964b05-552a-7c4b-9184-6857e7f3dc5f}
       LIGHT_AGENT_AGENT_DEF_ID: ${LIGHT_AGENT_AGENT_DEF_ID:-}
