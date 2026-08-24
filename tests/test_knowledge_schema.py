@@ -37,7 +37,16 @@ class KnowledgeSchemaTest(unittest.TestCase):
         self.assertIn("DROP DATABASE IF EXISTS knowledge WITH (FORCE)", install)
         self.assertIn("DROP DATABASE IF EXISTS configserver WITH (FORCE)", install)
         self.assertNotIn("DROP SCHEMA IF EXISTS knowledge_local CASCADE", install)
-        self.assertIn("validate-environment.sh", install)
+
+        validator_call = install[
+            install.index("ensure_knowledge_database() {") :
+            install.index("ensure_portal_runtime_database_access() {")
+        ]
+        self.assertIn(
+            "compose run --rm --no-deps knowledge-schema-migration",
+            validator_call,
+        )
+        self.assertNotIn("docker exec", validator_call)
 
     def test_phase2_snapshot_refresh_runs_inside_knowledge_admin(self):
         compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
@@ -96,7 +105,10 @@ class KnowledgeSchemaTest(unittest.TestCase):
 
     def test_phase3_admin_api_upgrade_is_installed(self):
         install = (ROOT / "install.sh").read_text(encoding="utf-8")
-        self.assertIn("validate-environment.sh", install)
+        self.assertIn(
+            "compose run --rm --no-deps knowledge-schema-migration",
+            install,
+        )
         ddl = (KNOWLEDGE_DIR / "ddl.sql").read_text(encoding="utf-8")
         self.assertIn("CREATE TABLE public.knowledge_admin_audit_t", ddl)
         self.assertIn("knowledge_admin_sync_runs_page_idx", ddl)

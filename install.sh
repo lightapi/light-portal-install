@@ -444,12 +444,7 @@ ensure_control_snapshot_signing_key() {
 
 ensure_knowledge_database() {
   log "validating the local Config Server and Knowledge schema pair"
-  docker exec \
-    -e POSTGRES_USER=postgres \
-    -e PORTAL_DB_TOPOLOGY=separate \
-    -e PORTAL_DB_NAME=configserver \
-    -e PORTAL_DB_KNOWLEDGE_NAME=knowledge \
-    postgres /bin/bash /docker-entrypoint-initdb.d/validate-environment.sh
+  compose run --rm --no-deps knowledge-schema-migration
 }
 
 ensure_portal_runtime_database_access() {
