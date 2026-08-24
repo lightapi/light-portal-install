@@ -229,6 +229,11 @@ BEGIN
             t.aggregate_version, t.update_user, t.update_ts
         FROM
             instance_app_api_property_t t
+        JOIN instance_app_api_t association
+          ON association.host_id = t.host_id
+         AND association.instance_app_id = t.instance_app_id
+         AND association.instance_api_id = t.instance_api_id
+         AND association.active = TRUE
         WHERE
             t.host_id = p_host_id
             AND t.instance_app_id = ANY(v_instance_app_id_list)
@@ -308,13 +313,21 @@ BEGIN
     -- 2. Instance Level Merge Pool
     -- Gather all potential contributors to the instance-level config
     InstancePool AS (
-        SELECT property_id, property_value, update_ts FROM snapshot_instance_property_t WHERE snapshot_id = p_snapshot_id
+        SELECT property_id, property_value, update_ts, 10 AS source_rank,
+               instance_id::text AS source_id
+          FROM snapshot_instance_property_t WHERE snapshot_id = p_snapshot_id
         UNION ALL
-        SELECT property_id, property_value, update_ts FROM snapshot_instance_api_property_t WHERE snapshot_id = p_snapshot_id
+        SELECT property_id, property_value, update_ts, 20 AS source_rank,
+               instance_api_id::text AS source_id
+          FROM snapshot_instance_api_property_t WHERE snapshot_id = p_snapshot_id
         UNION ALL
-        SELECT property_id, property_value, update_ts FROM snapshot_instance_app_property_t WHERE snapshot_id = p_snapshot_id
+        SELECT property_id, property_value, update_ts, 30 AS source_rank,
+               instance_app_id::text AS source_id
+          FROM snapshot_instance_app_property_t WHERE snapshot_id = p_snapshot_id
         UNION ALL
-        SELECT property_id, property_value, update_ts FROM snapshot_instance_app_api_property_t WHERE snapshot_id = p_snapshot_id
+        SELECT property_id, property_value, update_ts, 40 AS source_rank,
+               instance_app_id::text || ':' || instance_api_id::text AS source_id
+          FROM snapshot_instance_app_api_property_t WHERE snapshot_id = p_snapshot_id
     ),
     -- Perform the Merge for the Instance Pool
     MergedInstanceLevel AS (
@@ -324,7 +337,8 @@ BEGIN
                 WHEN 'list' THEN COALESCE((
                     -- Explode arrays from all matching rows and re-aggregate into one list
                     -- Handles non-JSON strings gracefully by treating them as single-item lists
-                    SELECT jsonb_agg(elem ORDER BY sub.update_ts ASC)
+                    SELECT jsonb_agg(elem ORDER BY sub.update_ts ASC,
+                        sub.source_rank ASC, sub.source_id ASC)
                     FROM InstancePool sub
                     CROSS JOIN LATERAL (
                         SELECT jsonb_array_elements(sub.property_value::jsonb) AS elem
@@ -345,7 +359,8 @@ BEGIN
                 WHEN 'map' THEN COALESCE((
                     -- Explode objects from all matching rows and re-aggregate into one map
                     -- Ignores non-JSON strings to avoid crashing
-                    SELECT jsonb_object_agg(kv.key, kv.value)
+                    SELECT jsonb_object_agg(kv.key, kv.value ORDER BY
+                        sub.update_ts ASC, sub.source_rank ASC, sub.source_id ASC, kv.key ASC)
                     FROM InstancePool sub
                     CROSS JOIN LATERAL (
                         SELECT key, value FROM jsonb_each(sub.property_value::jsonb)
@@ -367,7 +382,7 @@ BEGIN
                     SELECT sub.property_value
                     FROM InstancePool sub
                     WHERE sub.property_id = ip.property_id
-                    ORDER BY sub.update_ts DESC
+                    ORDER BY sub.update_ts DESC, sub.source_rank DESC, sub.source_id DESC
                     LIMIT 1
                 )
             END AS property_value,
@@ -426,8 +441,8 @@ BEGIN
         cp.value_type,
         rp.source_level
     FROM ResolvedProperties rp
-    JOIN config_property_t cp ON rp.property_id = cp.property_id
-    JOIN config_t c ON cp.config_id = c.config_id
+    JOIN config_property_t cp ON rp.property_id = cp.property_id AND cp.active = TRUE
+    JOIN config_t c ON cp.config_id = c.config_id AND c.active = TRUE
     WHERE rp.rn = 1;
 
 END;
@@ -6944,6 +6959,164 @@ COMMENT ON COLUMN public.api_endpoint_scope_t.update_ts IS 'Timestamp when this 
 
 
 --
+-- Name: access_target_t; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.access_target_t (
+    host_id uuid NOT NULL,
+    access_target_id uuid NOT NULL,
+    instance_id uuid,
+    target_type character varying(32) NOT NULL,
+    target_id uuid NOT NULL,
+    endpoint_key character varying(1024),
+    source_version bigint NOT NULL,
+    access_mode character varying(16) DEFAULT 'PROTECTED'::character varying NOT NULL,
+    response_target character varying(1024),
+    public_approval_reason character varying(1024),
+    aggregate_version bigint DEFAULT 1 NOT NULL,
+    active boolean DEFAULT true NOT NULL,
+    delete_user character varying(255),
+    delete_ts timestamp with time zone,
+    update_user character varying(255) DEFAULT SESSION_USER NOT NULL,
+    update_ts timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    PRIMARY KEY (host_id, access_target_id),
+    UNIQUE (host_id, instance_id, target_type, target_id),
+    CHECK (target_type::text = ANY (ARRAY['API_ENDPOINT'::text, 'TOOL'::text])),
+    CHECK (access_mode::text = ANY (ARRAY['PROTECTED'::text, 'PUBLIC'::text])),
+    CHECK (source_version > 0),
+    CHECK (aggregate_version > 0),
+    CHECK (response_target IS NULL OR length(response_target) <= 1024 AND (response_target = '' OR response_target LIKE '/%')),
+    CHECK (access_mode <> 'PUBLIC' OR length(trim(COALESCE(public_approval_reason, ''))) > 0)
+);
+
+CREATE UNIQUE INDEX access_target_endpoint_key_uk ON public.access_target_t
+    USING btree (host_id, instance_id, endpoint_key)
+    WHERE active AND instance_id IS NOT NULL AND endpoint_key IS NOT NULL;
+
+CREATE UNIQUE INDEX access_target_api_identity_uk ON public.access_target_t
+    USING btree (host_id, target_type, target_id)
+    WHERE target_type::text = 'API_ENDPOINT'::text AND instance_id IS NULL;
+
+CREATE TABLE public.access_target_rule_t (
+    host_id uuid NOT NULL, access_target_id uuid NOT NULL, rule_id character varying(255) NOT NULL,
+    rule_type character varying(32) NOT NULL, aggregate_version bigint NOT NULL,
+    active boolean DEFAULT true NOT NULL, update_user character varying(255) DEFAULT SESSION_USER NOT NULL,
+    update_ts timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    PRIMARY KEY (host_id, access_target_id, rule_id),
+    FOREIGN KEY (host_id, access_target_id) REFERENCES public.access_target_t(host_id, access_target_id),
+    CHECK (rule_type::text = ANY (ARRAY['req-acc'::text, 'res-fil'::text]))
+);
+
+CREATE TABLE public.access_target_permission_t (
+    host_id uuid NOT NULL, access_target_id uuid NOT NULL,
+    principal_type character varying(16) NOT NULL, principal_id character varying(255) NOT NULL,
+    principal_value character varying(1024) DEFAULT ''::character varying NOT NULL,
+    start_ts timestamp with time zone, end_ts timestamp with time zone,
+    aggregate_version bigint NOT NULL, active boolean DEFAULT true NOT NULL,
+    update_user character varying(255) DEFAULT SESSION_USER NOT NULL,
+    update_ts timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    PRIMARY KEY (host_id, access_target_id, principal_type, principal_id, principal_value),
+    FOREIGN KEY (host_id, access_target_id) REFERENCES public.access_target_t(host_id, access_target_id),
+    CHECK (principal_type::text = ANY (ARRAY['ROLE'::text, 'GROUP'::text, 'POSITION'::text, 'ATTRIBUTE'::text, 'USER'::text])),
+    CHECK (end_ts IS NULL OR start_ts IS NULL OR end_ts > start_ts)
+);
+
+CREATE TABLE public.access_target_row_filter_t (
+    host_id uuid NOT NULL, access_target_id uuid NOT NULL, filter_id uuid NOT NULL,
+    principal_type character varying(16) NOT NULL, principal_id character varying(255) NOT NULL,
+    principal_value character varying(1024) DEFAULT ''::character varying NOT NULL,
+    col_name character varying(255) NOT NULL, operator character varying(32) NOT NULL,
+    col_value character varying(1024) NOT NULL, aggregate_version bigint NOT NULL,
+    active boolean DEFAULT true NOT NULL, update_user character varying(255) DEFAULT SESSION_USER NOT NULL,
+    update_ts timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    PRIMARY KEY (host_id, access_target_id, filter_id),
+    FOREIGN KEY (host_id, access_target_id) REFERENCES public.access_target_t(host_id, access_target_id),
+    CHECK (principal_type::text = ANY (ARRAY['ROLE'::text, 'GROUP'::text, 'POSITION'::text, 'ATTRIBUTE'::text, 'USER'::text])),
+    CHECK (operator::text = ANY (ARRAY['='::text, '!='::text, '<'::text, '>'::text, '<='::text, '>='::text, 'in'::text, 'not in'::text, 'range'::text]))
+);
+
+CREATE TABLE public.access_target_col_filter_t (
+    host_id uuid NOT NULL, access_target_id uuid NOT NULL, filter_id uuid NOT NULL,
+    principal_type character varying(16) NOT NULL, principal_id character varying(255) NOT NULL,
+    principal_value character varying(1024) DEFAULT ''::character varying NOT NULL,
+    columns text NOT NULL, aggregate_version bigint NOT NULL, active boolean DEFAULT true NOT NULL,
+    update_user character varying(255) DEFAULT SESSION_USER NOT NULL,
+    update_ts timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    PRIMARY KEY (host_id, access_target_id, filter_id),
+    FOREIGN KEY (host_id, access_target_id) REFERENCES public.access_target_t(host_id, access_target_id),
+    CHECK (principal_type::text = ANY (ARRAY['ROLE'::text, 'GROUP'::text, 'POSITION'::text, 'ATTRIBUTE'::text, 'USER'::text])),
+    CHECK (length(trim(columns)) > 0)
+);
+
+COMMENT ON TABLE public.access_target_t IS 'Generic Portal-managed authorization target for an API endpoint or instance-scoped MCP Tool.';
+COMMENT ON COLUMN public.access_target_t.host_id IS 'Tenant host identifier.';
+COMMENT ON COLUMN public.access_target_t.access_target_id IS 'Stable access target identifier.';
+COMMENT ON COLUMN public.access_target_t.instance_id IS 'Gateway instance for Tool targets; null for catalog-level API endpoint targets.';
+COMMENT ON COLUMN public.access_target_t.target_type IS 'Target kind: API_ENDPOINT or TOOL.';
+COMMENT ON COLUMN public.access_target_t.target_id IS 'Identifier of the API endpoint or Tool.';
+COMMENT ON COLUMN public.access_target_t.endpoint_key IS 'Exact compiled gateway access-control lookup key.';
+COMMENT ON COLUMN public.access_target_t.source_version IS 'Accepted source aggregate version.';
+COMMENT ON COLUMN public.access_target_t.access_mode IS 'Protected or explicitly approved public access mode.';
+COMMENT ON COLUMN public.access_target_t.response_target IS 'Optional bounded JSON Pointer selecting a nested response-filter target.';
+COMMENT ON COLUMN public.access_target_t.public_approval_reason IS 'Required operator reason for PUBLIC access.';
+COMMENT ON COLUMN public.access_target_t.aggregate_version IS 'Optimistic concurrency version.';
+COMMENT ON COLUMN public.access_target_t.active IS 'Whether this target projection is active.';
+COMMENT ON COLUMN public.access_target_t.delete_user IS 'Principal that deactivated this target.';
+COMMENT ON COLUMN public.access_target_t.delete_ts IS 'Time this target was deactivated.';
+COMMENT ON COLUMN public.access_target_t.update_user IS 'Principal that last updated this target.';
+COMMENT ON COLUMN public.access_target_t.update_ts IS 'Time this target was last updated.';
+
+COMMENT ON TABLE public.access_target_rule_t IS 'Rule assignments for a generic access target.';
+COMMENT ON COLUMN public.access_target_rule_t.host_id IS 'Tenant host identifier.';
+COMMENT ON COLUMN public.access_target_rule_t.access_target_id IS 'Related generic access target.';
+COMMENT ON COLUMN public.access_target_rule_t.rule_id IS 'Assigned rule identifier.';
+COMMENT ON COLUMN public.access_target_rule_t.rule_type IS 'Gateway rule stage such as req-acc or res-fil.';
+COMMENT ON COLUMN public.access_target_rule_t.aggregate_version IS 'Accepted publication version.';
+COMMENT ON COLUMN public.access_target_rule_t.active IS 'Whether this rule assignment is active.';
+COMMENT ON COLUMN public.access_target_rule_t.update_user IS 'Principal that last updated this assignment.';
+COMMENT ON COLUMN public.access_target_rule_t.update_ts IS 'Time this assignment was last updated.';
+
+COMMENT ON TABLE public.access_target_permission_t IS 'Principal permissions for a generic access target.';
+COMMENT ON COLUMN public.access_target_permission_t.host_id IS 'Tenant host identifier.';
+COMMENT ON COLUMN public.access_target_permission_t.access_target_id IS 'Related generic access target.';
+COMMENT ON COLUMN public.access_target_permission_t.principal_type IS 'Role, group, position, attribute, or user principal kind.';
+COMMENT ON COLUMN public.access_target_permission_t.principal_id IS 'Principal or attribute identifier.';
+COMMENT ON COLUMN public.access_target_permission_t.principal_value IS 'Attribute value or empty value for non-attribute principals.';
+COMMENT ON COLUMN public.access_target_permission_t.start_ts IS 'Optional beginning of user permission validity.';
+COMMENT ON COLUMN public.access_target_permission_t.end_ts IS 'Optional end of user permission validity.';
+COMMENT ON COLUMN public.access_target_permission_t.aggregate_version IS 'Accepted publication version.';
+COMMENT ON COLUMN public.access_target_permission_t.active IS 'Whether this permission is active.';
+COMMENT ON COLUMN public.access_target_permission_t.update_user IS 'Principal that last updated this permission.';
+COMMENT ON COLUMN public.access_target_permission_t.update_ts IS 'Time this permission was last updated.';
+
+COMMENT ON TABLE public.access_target_row_filter_t IS 'Principal-specific response row filters for a generic access target.';
+COMMENT ON COLUMN public.access_target_row_filter_t.host_id IS 'Tenant host identifier.';
+COMMENT ON COLUMN public.access_target_row_filter_t.access_target_id IS 'Related generic access target.';
+COMMENT ON COLUMN public.access_target_row_filter_t.filter_id IS 'Stable row-filter identifier.';
+COMMENT ON COLUMN public.access_target_row_filter_t.principal_type IS 'Principal kind selecting this filter.';
+COMMENT ON COLUMN public.access_target_row_filter_t.principal_id IS 'Principal or attribute identifier.';
+COMMENT ON COLUMN public.access_target_row_filter_t.principal_value IS 'Attribute value or empty value for other principal kinds.';
+COMMENT ON COLUMN public.access_target_row_filter_t.col_name IS 'Response column evaluated by the filter.';
+COMMENT ON COLUMN public.access_target_row_filter_t.operator IS 'Bounded row-filter comparison operator.';
+COMMENT ON COLUMN public.access_target_row_filter_t.col_value IS 'Comparison value.';
+COMMENT ON COLUMN public.access_target_row_filter_t.aggregate_version IS 'Accepted publication version.';
+COMMENT ON COLUMN public.access_target_row_filter_t.active IS 'Whether this row filter is active.';
+COMMENT ON COLUMN public.access_target_row_filter_t.update_user IS 'Principal that last updated this filter.';
+COMMENT ON COLUMN public.access_target_row_filter_t.update_ts IS 'Time this filter was last updated.';
+
+COMMENT ON TABLE public.access_target_col_filter_t IS 'Principal-specific response column filters for a generic access target.';
+COMMENT ON COLUMN public.access_target_col_filter_t.host_id IS 'Tenant host identifier.';
+COMMENT ON COLUMN public.access_target_col_filter_t.access_target_id IS 'Related generic access target.';
+COMMENT ON COLUMN public.access_target_col_filter_t.filter_id IS 'Stable column-filter identifier.';
+COMMENT ON COLUMN public.access_target_col_filter_t.principal_type IS 'Principal kind selecting this filter.';
+COMMENT ON COLUMN public.access_target_col_filter_t.principal_id IS 'Principal or attribute identifier.';
+COMMENT ON COLUMN public.access_target_col_filter_t.principal_value IS 'Attribute value or empty value for other principal kinds.';
+COMMENT ON COLUMN public.access_target_col_filter_t.columns IS 'Space-delimited response columns retained by the filter.';
+COMMENT ON COLUMN public.access_target_col_filter_t.aggregate_version IS 'Accepted publication version.';
+COMMENT ON COLUMN public.access_target_col_filter_t.active IS 'Whether this column filter is active.';
+COMMENT ON COLUMN public.access_target_col_filter_t.update_user IS 'Principal that last updated this filter.';
+COMMENT ON COLUMN public.access_target_col_filter_t.update_ts IS 'Time this filter was last updated.';
+
 -- Name: api_endpoint_t; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -17648,6 +17821,11 @@ CREATE TABLE public.gateway_tool_publication_t (
     candidate_digest character varying(71) NOT NULL,
     compiled_tools jsonb NOT NULL,
     bindings jsonb NOT NULL,
+    endpoint_rules_property_id uuid,
+    rule_bodies_property_id uuid,
+    compiled_endpoint_rules jsonb,
+    compiled_rule_bodies jsonb,
+    access_policies jsonb,
     aggregate_version bigint DEFAULT 1 NOT NULL,
     active boolean DEFAULT true NOT NULL,
     update_user character varying(126) DEFAULT SESSION_USER NOT NULL,
@@ -17657,6 +17835,9 @@ CREATE TABLE public.gateway_tool_publication_t (
     CONSTRAINT gateway_tool_publication_t_candidate_digest_check CHECK (((candidate_digest)::text ~ '^sha256:[0-9a-f]{64}$'::text)),
     CONSTRAINT gateway_tool_publication_t_check CHECK ((((publication_mode)::text = 'REPLACE_API_SCOPE'::text) = (scope_api_version_id IS NOT NULL))),
     CONSTRAINT gateway_tool_publication_t_compiled_tools_check CHECK ((jsonb_typeof(compiled_tools) = 'array'::text)),
+    CONSTRAINT gateway_tool_publication_t_compiled_endpoint_rules_check CHECK ((compiled_endpoint_rules IS NULL OR jsonb_typeof(compiled_endpoint_rules) = 'object'::text)),
+    CONSTRAINT gateway_tool_publication_t_compiled_rule_bodies_check CHECK ((compiled_rule_bodies IS NULL OR jsonb_typeof(compiled_rule_bodies) = 'object'::text)),
+    CONSTRAINT gateway_tool_publication_t_access_policies_check CHECK ((access_policies IS NULL OR jsonb_typeof(access_policies) = 'array'::text)),
     CONSTRAINT gateway_tool_publication_t_publication_mode_check CHECK (((publication_mode)::text = ANY (ARRAY[('ADD_OR_UPDATE'::character varying)::text, ('REPLACE_API_SCOPE'::character varying)::text]))),
     CONSTRAINT gateway_tool_publication_t_publication_version_check CHECK ((publication_version > 0))
 );
@@ -17737,6 +17918,12 @@ COMMENT ON COLUMN public.gateway_tool_publication_t.compiled_tools IS 'Compiled 
 --
 
 COMMENT ON COLUMN public.gateway_tool_publication_t.bindings IS 'Bindings value for this gateway tool publication record.';
+
+COMMENT ON COLUMN public.gateway_tool_publication_t.endpoint_rules_property_id IS 'Registered rule.endpointRules carrier property.';
+COMMENT ON COLUMN public.gateway_tool_publication_t.rule_bodies_property_id IS 'Registered rule.ruleBodies carrier property.';
+COMMENT ON COLUMN public.gateway_tool_publication_t.compiled_endpoint_rules IS 'Canonical complete endpoint-rule carrier reviewed for this publication.';
+COMMENT ON COLUMN public.gateway_tool_publication_t.compiled_rule_bodies IS 'Canonical complete rule-body carrier reviewed for this publication.';
+COMMENT ON COLUMN public.gateway_tool_publication_t.access_policies IS 'Normalized Tool access policies captured by this publication.';
 
 
 --
@@ -41772,6 +41959,14 @@ ALTER TABLE ONLY public.agent_turn_t
 
 ALTER TABLE ONLY public.agent_turn_t
     ADD CONSTRAINT agent_turn_t_host_id_session_id_fkey FOREIGN KEY (host_id, session_id) REFERENCES public.agent_session_t(host_id, session_id) ON DELETE CASCADE;
+
+
+--
+-- Name: access_target_t access_target_t_host_id_instance_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.access_target_t
+    ADD CONSTRAINT access_target_t_host_id_instance_id_fkey FOREIGN KEY (host_id, instance_id) REFERENCES public.instance_t(host_id, instance_id) ON DELETE RESTRICT;
 
 
 --
