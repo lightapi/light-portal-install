@@ -345,9 +345,10 @@ When `light-gateway` invokes `light-workflow`, it sends its existing token in
 `X-Scope-Token` while preserving the original user JWT in `Authorization`.
 `light-workflow` uses its own independent token for downstream API calls.
 
-Light Workflow uses `light-workflow-rust/config/startup.yml` to select the demo
-Portal/config instance and stores only its validated, identity-bound
-last-known-good configuration in the `light-workflow-config-cache` volume.
+Light Workflow uses `light-workflow-rust/config/startup.yml` `host`, `serviceId`,
+and `envTag` to select the demo configuration and stores only its validated,
+logical-identity-bound last-known-good configuration in the
+`light-workflow-config-cache` volume.
 After the Phase 1a Portal events are imported, create and promote its first
 snapshot with `./light-workflow-rust/publish-current-snapshot.sh`.
 

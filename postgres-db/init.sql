@@ -61,6 +61,7 @@ DECLARE
     -- Variables to hold scope data derived from instance_t
     v_product_version_id UUID;
     v_service_id VARCHAR(512);
+    v_env_tag VARCHAR(16);
     v_environment VARCHAR(16);
     v_instance_app_id_list UUID[];
     v_instance_api_id_list UUID[];
@@ -72,10 +73,12 @@ BEGIN
     SELECT
         t.product_version_id,
         t.service_id,
-        COALESCE(NULLIF(t.env_tag, ''), t.environment)
+        t.env_tag,
+        t.environment
     INTO
         v_product_version_id,
         v_service_id,
+        v_env_tag,
         v_environment
     FROM
         instance_t t
@@ -120,10 +123,10 @@ BEGIN
     -- 3. Insert into config_snapshot_t (Snapshot Header)
     INSERT INTO config_snapshot_t (
         snapshot_id, snapshot_type, host_id, instance_id, description, user_id, deployment_id,
-        environment, product_id, product_version, service_id
+        env_tag, product_id, product_version, service_id
     ) VALUES (
         p_snapshot_id, p_snapshot_type, p_host_id, p_instance_id, p_description, p_user_id, p_deployment_id,
-        v_environment, v_product_id, (
+        v_env_tag, v_product_id, (
             SELECT product_version
             FROM product_version_t
             WHERE product_version_id = v_product_version_id
@@ -275,19 +278,17 @@ BEGIN
 
 
     -- I. snapshot_environment_property_t (Environment Overrides)
-    IF v_environment IS NOT NULL THEN
-        INSERT INTO snapshot_environment_property_t (
-            snapshot_id, host_id, environment, property_id, property_value,
-            aggregate_version, update_user, update_ts
-        )
-        SELECT
-            p_snapshot_id, t.host_id, t.environment, t.property_id, t.property_value,
-            t.aggregate_version, t.update_user, t.update_ts
-        FROM
-            environment_property_t t
-        WHERE
-            t.host_id = p_host_id AND t.environment = v_environment AND t.active = TRUE;
-    END IF;
+    INSERT INTO snapshot_environment_property_t (
+        snapshot_id, host_id, environment, property_id, property_value,
+        aggregate_version, update_user, update_ts
+    )
+    SELECT
+        p_snapshot_id, t.host_id, t.environment, t.property_id, t.property_value,
+        t.aggregate_version, t.update_user, t.update_ts
+    FROM
+        environment_property_t t
+    WHERE
+        t.host_id = p_host_id AND t.environment = v_environment AND t.active = TRUE;
 
 
 -- J. MERGE: Insert merged, effective properties into config_snapshot_property_t
@@ -11285,7 +11286,7 @@ CREATE TABLE public.config_snapshot_t (
     current boolean DEFAULT false NOT NULL,
     user_id uuid,
     deployment_id uuid,
-    environment character varying(16),
+    env_tag character varying(16) NOT NULL,
     product_id character varying(8),
     product_version character varying(12),
     service_id character varying(512),
@@ -11365,10 +11366,10 @@ COMMENT ON COLUMN public.config_snapshot_t.deployment_id IS 'Identifier for the 
 
 
 --
--- Name: COLUMN config_snapshot_t.environment; Type: COMMENT; Schema: public; Owner: -
+-- Name: COLUMN config_snapshot_t.env_tag; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.config_snapshot_t.environment IS 'Environment value for this config snapshot record.';
+COMMENT ON COLUMN public.config_snapshot_t.env_tag IS 'Environment tag used to select this snapshot through the Config Server API.';
 
 
 --
@@ -19790,7 +19791,7 @@ CREATE TABLE public.instance_t (
     service_id character varying(512) NOT NULL,
     current boolean DEFAULT false,
     readonly boolean DEFAULT false,
-    environment character varying(16),
+    environment character varying(16) NOT NULL,
     service_desc character varying(4096),
     instance_desc character varying(1024),
     zone character varying(16),
@@ -19798,7 +19799,7 @@ CREATE TABLE public.instance_t (
     lob character varying(16),
     resource_name character varying(126),
     business_name character varying(126),
-    env_tag character varying(16),
+    env_tag character varying(16) NOT NULL,
     topic_classification character varying(126),
     owner_user_id uuid,
     owner_position_id character varying(128),
@@ -39627,7 +39628,7 @@ CREATE INDEX idx_config_snapshot_property_snap_phase ON public.config_snapshot_p
 -- Name: idx_config_snapshot_scope; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_config_snapshot_scope ON public.config_snapshot_t USING btree (host_id, environment, product_id, product_version, service_id, api_id, api_version, snapshot_type, snapshot_ts);
+CREATE INDEX idx_config_snapshot_scope ON public.config_snapshot_t USING btree (host_id, env_tag, product_id, product_version, service_id, api_id, api_version, snapshot_type, snapshot_ts);
 
 
 --
@@ -40443,17 +40444,10 @@ CREATE INDEX instance_graph_revision_lag_idx ON public.instance_graph_revision_t
 
 
 --
--- Name: instance_uk_null_env; Type: INDEX; Schema: public; Owner: -
+-- Name: instance_uk; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE UNIQUE INDEX instance_uk_null_env ON public.instance_t USING btree (host_id, service_id, product_version_id) WHERE (env_tag IS NULL);
-
-
---
--- Name: instance_uk_with_env; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE UNIQUE INDEX instance_uk_with_env ON public.instance_t USING btree (host_id, service_id, env_tag, product_version_id) WHERE (env_tag IS NOT NULL);
+CREATE UNIQUE INDEX instance_uk ON public.instance_t USING btree (host_id, service_id, env_tag, product_version_id);
 
 
 --
@@ -40755,6 +40749,13 @@ CREATE UNIQUE INDEX tool_stable_ref_uk ON public.tool_t USING btree (host_id, st
 --
 
 CREATE UNIQUE INDEX uq_config_snapshot_current_instance ON public.config_snapshot_t USING btree (host_id, instance_id) WHERE (current IS TRUE);
+
+
+--
+-- Name: uq_config_snapshot_current_logical_identity; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_config_snapshot_current_logical_identity ON public.config_snapshot_t USING btree (host_id, service_id, env_tag) WHERE (current IS TRUE);
 
 
 --
