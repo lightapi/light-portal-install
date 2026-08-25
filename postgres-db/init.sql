@@ -28358,6 +28358,8 @@ CREATE TABLE public.runtime_instance_t (
     ip_address character varying(253) NOT NULL,
     port_number integer NOT NULL,
     instance_status character varying(16) NOT NULL,
+    service_version character varying(128) DEFAULT ''::character varying NOT NULL,
+    operational_metadata jsonb DEFAULT '{}'::jsonb NOT NULL,
     owner_user_id uuid,
     owner_position_id character varying(128),
     aggregate_version bigint DEFAULT 1 NOT NULL,
@@ -28396,6 +28398,20 @@ COMMENT ON COLUMN public.runtime_instance_t.runtime_instance_id IS 'Identifier f
 --
 
 COMMENT ON COLUMN public.runtime_instance_t.service_id IS 'Identifier for the related service.';
+
+
+--
+-- Name: COLUMN runtime_instance_t.service_version; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.runtime_instance_t.service_version IS 'Typed build version last reported by the connected runtime.';
+
+
+--
+-- Name: COLUMN runtime_instance_t.operational_metadata; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.runtime_instance_t.operational_metadata IS 'Complete controller metadata tag map last reported by the connected runtime.';
 
 
 --

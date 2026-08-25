@@ -344,3 +344,17 @@ Each service has one `LIGHT_PORTAL_AUTHORIZATION` token for its own identity.
 When `light-gateway` invokes `light-workflow`, it sends its existing token in
 `X-Scope-Token` while preserving the original user JWT in `Authorization`.
 `light-workflow` uses its own independent token for downstream API calls.
+
+Light Workflow uses `light-workflow-rust/config/startup.yml` to select the demo
+Portal/config instance and stores only its validated, identity-bound
+last-known-good configuration in the `light-workflow-config-cache` volume.
+After the Phase 1a Portal events are imported, create and promote its first
+snapshot with `./light-workflow-rust/publish-current-snapshot.sh`.
+
+The publisher prints the previous snapshot ID. Restore a previously reviewed
+snapshot with
+`./light-workflow-rust/rollback-current-snapshot.sh <previous-snapshot-id>`,
+then use Portal Control Pane **Modules** to reload only
+`light-workflow/runtime-config`. Restart the service instead when the review
+contains restart-required changes. `LIGHT_WORKFLOW_SNAPSHOT_DRY_RUN=true`
+validates either snapshot transaction without committing it.
