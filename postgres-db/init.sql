@@ -26413,6 +26413,87 @@ COMMENT ON COLUMN public.product_version_t.update_ts IS 'Timestamp when this rec
 
 
 --
+-- Name: promotion_t; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.promotion_t (
+    promotion_id uuid NOT NULL,
+    source_host_id uuid NOT NULL,
+    target_host_id uuid NOT NULL,
+    entity_type character varying(64) NOT NULL,
+    promotion_status character varying(32) NOT NULL,
+    plan_version integer DEFAULT 1 NOT NULL,
+    snapshot_digest character varying(64) NOT NULL,
+    source_snapshot jsonb NOT NULL,
+    plan_summary jsonb NOT NULL,
+    missing_dependencies jsonb DEFAULT '[]'::jsonb NOT NULL,
+    created_by uuid NOT NULL,
+    accepted_transaction_id uuid,
+    append_event_count integer DEFAULT 0 NOT NULL,
+    executed_ts timestamp with time zone,
+    active boolean DEFAULT true NOT NULL,
+    update_user character varying(255) DEFAULT SESSION_USER NOT NULL,
+    update_ts timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    CONSTRAINT promotion_t_pkey PRIMARY KEY (promotion_id),
+    CONSTRAINT promotion_t_status_check CHECK ((promotion_status)::text = ANY ((ARRAY[
+        'PLANNED'::character varying,
+        'BLOCKED'::character varying,
+        'APPEND_ACCEPTED'::character varying,
+        'FAILED'::character varying
+    ])::text[]))
+);
+
+
+--
+-- Name: promotion_item_t; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.promotion_item_t (
+    promotion_id uuid NOT NULL,
+    item_id uuid NOT NULL,
+    plan_order integer NOT NULL,
+    entity_type character varying(64) NOT NULL,
+    entity_id character varying(512) NOT NULL,
+    action character varying(16) NOT NULL,
+    aggregate_id character varying(1024),
+    target_aggregate_version bigint DEFAULT 0 NOT NULL,
+    source_snapshot jsonb,
+    target_snapshot jsonb,
+    diff_summary jsonb,
+    execution_status character varying(24) DEFAULT 'PENDING'::character varying NOT NULL,
+    event_id uuid,
+    event_type character varying(128),
+    error_message text,
+    update_user character varying(255) DEFAULT SESSION_USER NOT NULL,
+    update_ts timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    CONSTRAINT promotion_item_t_pkey PRIMARY KEY (promotion_id, item_id),
+    CONSTRAINT promotion_item_t_promotion_fk FOREIGN KEY (promotion_id)
+        REFERENCES public.promotion_t(promotion_id) ON DELETE CASCADE,
+    CONSTRAINT promotion_item_t_action_check CHECK ((action)::text = ANY ((ARRAY[
+        'CREATE'::character varying,
+        'UPDATE'::character varying,
+        'DELETE'::character varying,
+        'NOOP'::character varying
+    ])::text[])),
+    CONSTRAINT promotion_item_t_execution_status_check CHECK ((execution_status)::text = ANY ((ARRAY[
+        'PENDING'::character varying,
+        'NOOP'::character varying,
+        'SKIPPED'::character varying,
+        'APPEND_ACCEPTED'::character varying,
+        'FAILED'::character varying
+    ])::text[]))
+);
+
+
+CREATE INDEX promotion_t_source_host_idx
+    ON public.promotion_t USING btree (source_host_id, update_ts DESC);
+CREATE INDEX promotion_t_target_host_idx
+    ON public.promotion_t USING btree (target_host_id, update_ts DESC);
+CREATE UNIQUE INDEX promotion_item_t_entity_idx
+    ON public.promotion_item_t USING btree (promotion_id, entity_type, entity_id);
+
+
+--
 -- Name: ref_table_t; Type: TABLE; Schema: public; Owner: -
 --
 
