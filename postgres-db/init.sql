@@ -26431,6 +26431,13 @@ CREATE TABLE public.promotion_t (
     accepted_transaction_id uuid,
     append_event_count integer DEFAULT 0 NOT NULL,
     executed_ts timestamp with time zone,
+    projection_status character varying(24) DEFAULT 'NOT_STARTED'::character varying NOT NULL,
+    projection_deadline_ts timestamp with time zone,
+    projection_checked_ts timestamp with time zone,
+    projection_completed_ts timestamp with time zone,
+    failure_code character varying(128),
+    failure_message text,
+    supersedes_promotion_id uuid,
     active boolean DEFAULT true NOT NULL,
     update_user character varying(255) DEFAULT SESSION_USER NOT NULL,
     update_ts timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
@@ -26439,8 +26446,19 @@ CREATE TABLE public.promotion_t (
         'PLANNED'::character varying,
         'BLOCKED'::character varying,
         'APPEND_ACCEPTED'::character varying,
+        'COMPLETED'::character varying,
+        'TIMED_OUT'::character varying,
         'FAILED'::character varying
-    ])::text[]))
+    ])::text[])),
+    CONSTRAINT promotion_t_projection_status_check CHECK ((projection_status)::text = ANY ((ARRAY[
+        'NOT_STARTED'::character varying,
+        'PENDING'::character varying,
+        'COMPLETED'::character varying,
+        'FAILED'::character varying,
+        'TIMED_OUT'::character varying
+    ])::text[])),
+    CONSTRAINT promotion_t_supersedes_fk FOREIGN KEY (supersedes_promotion_id)
+        REFERENCES public.promotion_t(promotion_id)
 );
 
 
@@ -26463,6 +26481,10 @@ CREATE TABLE public.promotion_item_t (
     execution_status character varying(24) DEFAULT 'PENDING'::character varying NOT NULL,
     event_id uuid,
     event_type character varying(128),
+    expected_projection_version bigint,
+    observed_projection_version bigint,
+    projection_checked_ts timestamp with time zone,
+    failure_code character varying(128),
     error_message text,
     update_user character varying(255) DEFAULT SESSION_USER NOT NULL,
     update_ts timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
@@ -26480,7 +26502,28 @@ CREATE TABLE public.promotion_item_t (
         'NOOP'::character varying,
         'SKIPPED'::character varying,
         'APPEND_ACCEPTED'::character varying,
+        'PROJECTION_PENDING'::character varying,
+        'COMPLETED'::character varying,
+        'TIMED_OUT'::character varying,
         'FAILED'::character varying
+    ])::text[]))
+);
+
+CREATE TABLE public.promotion_recovery_t (
+    recovery_id uuid NOT NULL,
+    promotion_id uuid NOT NULL,
+    recovery_action character varying(16) NOT NULL,
+    requested_by uuid NOT NULL,
+    outcome character varying(32) NOT NULL,
+    details jsonb DEFAULT '{}'::jsonb NOT NULL,
+    created_ts timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    CONSTRAINT promotion_recovery_t_pkey PRIMARY KEY (recovery_id),
+    CONSTRAINT promotion_recovery_t_promotion_fk FOREIGN KEY (promotion_id)
+        REFERENCES public.promotion_t(promotion_id) ON DELETE CASCADE,
+    CONSTRAINT promotion_recovery_t_action_check CHECK ((recovery_action)::text = ANY ((ARRAY[
+        'RECHECK'::character varying,
+        'RECONCILE'::character varying,
+        'REPLAN'::character varying
     ])::text[]))
 );
 
@@ -26491,6 +26534,11 @@ CREATE INDEX promotion_t_target_host_idx
     ON public.promotion_t USING btree (target_host_id, update_ts DESC);
 CREATE UNIQUE INDEX promotion_item_t_entity_idx
     ON public.promotion_item_t USING btree (promotion_id, entity_type, entity_id);
+CREATE INDEX promotion_t_projection_pending_idx
+    ON public.promotion_t USING btree (projection_status, projection_deadline_ts)
+    WHERE projection_status = 'PENDING';
+CREATE INDEX promotion_recovery_t_promotion_idx
+    ON public.promotion_recovery_t USING btree (promotion_id, created_ts DESC);
 
 
 --
