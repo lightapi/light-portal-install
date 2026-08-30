@@ -5,6 +5,7 @@ topology="${PORTAL_DB_TOPOLOGY:-separate}"
 environment_name="${PORTAL_DB_ENVIRONMENT:-local}"
 configserver_database="${PORTAL_DB_NAME:-configserver}"
 knowledge_database="${PORTAL_DB_KNOWLEDGE_NAME:-knowledge}"
+operational_database="${PORTAL_DB_OPERATIONAL_NAME:-operations}"
 database_user="${POSTGRES_USER:-postgres}"
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -32,7 +33,7 @@ if [[ "$topology" == "shared" && ! "$environment_name" =~ ^[a-z][a-z0-9_]{0,24}$
   echo "init-environment: invalid PORTAL_DB_ENVIRONMENT '$environment_name'" >&2
   exit 2
 fi
-for database_name in "$configserver_database" "$knowledge_database"; do
+for database_name in "$configserver_database" "$knowledge_database" "$operational_database"; do
   if [[ ! "$database_name" =~ ^[a-z][a-z0-9_]{0,62}$ ]]; then
     echo "init-environment: invalid database name '$database_name'" >&2
     exit 2
@@ -52,6 +53,11 @@ else
   knowledge_schema="knowledge"
 fi
 
+if [[ "$operational_database" == "$configserver_database" || "$operational_database" == "$knowledge_database" ]]; then
+  echo "init-environment: the operational database must be separate from Config Server and Knowledge" >&2
+  exit 2
+fi
+
 temporary_dir="$(mktemp -d)"
 trap 'rm -rf -- "$temporary_dir"' EXIT
 
@@ -69,6 +75,7 @@ ensure_database "$configserver_database"
 if [[ "$topology" == "separate" ]]; then
   ensure_database "$knowledge_database"
 fi
+ensure_database "$operational_database"
 
 export PORTAL_DB_CONFIGSERVER_SOURCE="$source_root/configserver.sql"
 if [[ ! -f "$PORTAL_DB_CONFIGSERVER_SOURCE" && -f "$source_root/ddl.sql" ]]; then
@@ -182,7 +189,7 @@ if [[ ! -f "$runtime_grants_source" ]]; then
 fi
 
 if [[ "$topology" == "shared" ]]; then
-  echo "Initialized shared database '$configserver_database' with '$configserver_schema' and '$knowledge_schema'."
+  echo "Initialized shared database '$configserver_database' with '$configserver_schema' and '$knowledge_schema', plus operational database '$operational_database'."
 else
-  echo "Initialized '$configserver_database.$configserver_schema' and '$knowledge_database.$knowledge_schema'."
+  echo "Initialized '$configserver_database.$configserver_schema', '$knowledge_database.$knowledge_schema', and operational database '$operational_database'."
 fi

@@ -359,3 +359,49 @@ then use Portal Control Pane **Modules** to reload only
 `light-workflow/runtime-config`. Restart the service instead when the review
 contains restart-required changes. `LIGHT_WORKFLOW_SNAPSHOT_DRY_RUN=true`
 validates either snapshot transaction without committing it.
+
+## Operational Database Through Phase 6
+
+The installer now provisions an additive `operations` database alongside
+`configserver` and `knowledge`. Before Compose validation it checks every
+operational bundle digest and creates an ignored, owner-readable
+`postgres-db/secrets/operational-database-url`. The one-shot bootstrap works for
+fresh and retained PostgreSQL volumes, and the separate readiness job validates
+the exact Host/environment binding before Controller and Agent startup.
+
+`light-agent` no longer receives a Config Server `DATABASE_URL`. It validates
+the non-secret binding from its Config Server projection, reads the deployment
+credential from the mounted `0400` file, and writes Agent and embedded-memory
+state to `operations.agent_ops`. No application rows are copied. A direct
+`docker compose up` must first run:
+
+```bash
+OPERATIONAL_SECRET_DIR=postgres-db/secrets \
+  postgres-db/operations/bin/prepare-operational-secret.sh
+docker compose up -d
+```
+
+`CLEAN_VOLUMES=true ./install.sh start` explicitly removes the Compose volume
+and recreates all three databases. Before any operational application table is
+created, the narrower Phase 1 fallback removes only `operations`:
+
+```bash
+OPERATIONAL_RESET_CONFIRM=DELETE_EMPTY_OPERATIONS \
+  docker compose run --rm --no-deps \
+  --entrypoint /opt/operational-store/bin/reset-empty-operational-store.sh \
+  operational-store-bootstrap
+```
+
+The reset fails closed if service-owned operational tables exist and verifies
+that `configserver` and `knowledge` are preserved.
+The bounded Agent reset is
+`OPERATIONAL_RESET_CONFIRM=RESET_AGENT_OPS
+postgres-db/operations/bin/reset-agent-store.sh`.
+
+Workflow, A2A, Gateway evidence, tenant audit, and artifact metadata use
+separate schemas and credentials in the same Host/environment-bound database.
+Phase 6 uses `stdout://collector` only as an explicit development sink;
+production must configure an approved external collector. Artifact rows store
+object references, never bytes. Gateway, audit, and artifact development
+resets require `RESET_GATEWAY_OPS`, `RESET_AUDIT_OPS`, and
+`RESET_ARTIFACT_OPS`, and affect only their own schemas.

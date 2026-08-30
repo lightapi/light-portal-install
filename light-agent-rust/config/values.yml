@@ -26,6 +26,22 @@ mcp-client.timeoutMs: 10000
 client.verifyHostname: false
 client.caCertPath: /keystore/ca.pem
 
+operationalStore.contractVersion: 1
+operationalStore.bindingId: e741fa85-8a3d-432c-b31c-c41439d23f42
+operationalStore.bindingDigest: sha256:c29d23732e9136115f928ae52172bc73322a8f8700d789ede8c6b9e264ce48c5
+operationalStore.profileId: installer-dev-dedicated
+operationalStore.deploymentProfile: DEV_DEDICATED
+operationalStore.scopeKind: HOST_ENVIRONMENT
+operationalStore.scopeId: 01964b05-552a-7c4b-9184-6857e7f3dc5f
+operationalStore.hostId: 01964b05-552a-7c4b-9184-6857e7f3dc5f
+operationalStore.environment: dev
+operationalStore.serviceOwner: light-agent
+operationalStore.schema: agent_ops
+operationalStore.minimumSchemaVersion: 1
+operationalStore.expectedDatabase: operations
+operationalStore.databaseUrlFile: /run/secrets/operational-database-url
+operationalStore.credentialGeneration: 1
+
 model-provider.provider: codex
 model-provider.model: ${LIGHT_AGENT_MODEL:gpt-5.5}
 model-provider.temperature: ${LIGHT_AGENT_TEMPERATURE:0.7}

@@ -2078,6 +2078,7 @@ CREATE TABLE public.agent_action_attempt_t (
     state character varying(32) NOT NULL,
     approval_id uuid,
     execution_attempt_id uuid,
+    execution_reference_digest character varying(128),
     superseded_action_attempt_id uuid,
     gateway_request_id uuid,
     gateway_token_id uuid,
@@ -2305,6 +2306,7 @@ CREATE TABLE public.agent_approval_t (
     decision_reason text,
     consumed_action_attempt_id uuid,
     consumed_execution_attempt_id uuid,
+    consumed_execution_reference_digest character varying(128),
     created_ts timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     CONSTRAINT agent_approval_t_check CHECK (((((state)::text = 'REQUESTED'::text) AND (decision_ts IS NULL)) OR (((state)::text <> 'REQUESTED'::text) AND (decision_ts IS NOT NULL)))),
     CONSTRAINT agent_approval_t_state_check CHECK (((state)::text = ANY (ARRAY[('REQUESTED'::character varying)::text, ('APPROVED'::character varying)::text, ('REJECTED'::character varying)::text, ('EXPIRED'::character varying)::text, ('REVOKED'::character varying)::text])))
@@ -3889,6 +3891,9 @@ CREATE TABLE public.agent_memory_bank_t (
     bank_id uuid NOT NULL,
     agent_def_id uuid,
     user_id uuid,
+    agent_definition_version bigint,
+    agent_definition_digest character varying(128),
+    user_identity_digest character varying(128),
     bank_name character varying(126) NOT NULL,
     disposition jsonb DEFAULT '{"empathy": 3, "literalism": 3, "skepticism": 3}'::jsonb NOT NULL,
     background text,
@@ -3990,14 +3995,23 @@ COMMENT ON COLUMN public.agent_memory_bank_t.update_user IS 'User or service pri
 CREATE TABLE public.agent_memory_directive_t (
     host_id uuid NOT NULL,
     directive_id uuid NOT NULL,
-    bank_id uuid NOT NULL,
+    agent_def_id uuid NOT NULL,
+    agent_definition_version bigint NOT NULL,
+    bank_profile character varying(126) NOT NULL,
+    scope_selector jsonb NOT NULL,
+    policy_digest character varying(128) NOT NULL,
+    publication_id uuid NOT NULL,
     name character varying(256) NOT NULL,
     content text NOT NULL,
     priority integer DEFAULT 0 NOT NULL,
     aggregate_version bigint DEFAULT 1 NOT NULL,
     active boolean DEFAULT true,
     update_ts timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
-    update_user character varying(126) DEFAULT SESSION_USER
+    update_user character varying(126) DEFAULT SESSION_USER,
+    CONSTRAINT agent_memory_directive_definition_version_ck CHECK (agent_definition_version > 0),
+    CONSTRAINT agent_memory_directive_bank_profile_ck CHECK (length(btrim(bank_profile)) > 0),
+    CONSTRAINT agent_memory_directive_scope_selector_ck CHECK (jsonb_typeof(scope_selector) = 'object'),
+    CONSTRAINT agent_memory_directive_policy_digest_ck CHECK (policy_digest ~ '^sha256:[0-9a-f]{64}$')
 );
 
 
@@ -4005,7 +4019,7 @@ CREATE TABLE public.agent_memory_directive_t (
 -- Name: TABLE agent_memory_directive_t; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON TABLE public.agent_memory_directive_t IS 'Stores agent memory directive records used by the Light Workflow, Light Agent, and execution runtime services.';
+COMMENT ON TABLE public.agent_memory_directive_t IS 'Stores versioned hard directives compiled into immutable Agent publications; never operational memory rows.';
 
 
 --
@@ -4020,13 +4034,6 @@ COMMENT ON COLUMN public.agent_memory_directive_t.host_id IS 'Tenant host identi
 --
 
 COMMENT ON COLUMN public.agent_memory_directive_t.directive_id IS 'Identifier for the related directive.';
-
-
---
--- Name: COLUMN agent_memory_directive_t.bank_id; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.agent_memory_directive_t.bank_id IS 'Identifier for the related bank.';
 
 
 --
@@ -4270,6 +4277,7 @@ CREATE TABLE public.agent_memory_entity_t (
     entity_id uuid NOT NULL,
     bank_id uuid NOT NULL,
     user_id uuid,
+    user_identity_digest character varying(128),
     canonical_name text NOT NULL,
     mention_count integer DEFAULT 1,
     metadata jsonb DEFAULT '{}'::jsonb,
@@ -4876,6 +4884,9 @@ CREATE TABLE public.agent_policy_snapshot_t (
     host_id uuid NOT NULL,
     policy_snapshot_id uuid NOT NULL,
     agent_def_id uuid NOT NULL,
+    agent_definition_version bigint,
+    agent_publication_id uuid,
+    agent_content_digest character varying(128),
     definition_digest character varying(71) NOT NULL,
     product_profile_digest character varying(71) NOT NULL,
     model_digest character varying(71) NOT NULL,
@@ -5333,6 +5344,8 @@ CREATE TABLE public.agent_quota_usage_t (
     host_id uuid NOT NULL,
     quota_id uuid NOT NULL,
     window_start_ts timestamp with time zone NOT NULL,
+    quota_policy_version bigint,
+    quota_policy_digest character varying(128),
     reserved_tokens bigint DEFAULT 0 NOT NULL,
     reserved_cost_micros bigint DEFAULT 0 NOT NULL,
     consumed_tokens bigint DEFAULT 0 NOT NULL,
@@ -5769,6 +5782,14 @@ CREATE TABLE public.agent_session_t (
     workspace_effective_expires_ts timestamp with time zone,
     service_pool_id uuid,
     service_pool_compatibility_digest character varying(71),
+    service_pool_maximum_concurrency integer,
+    agent_publication_id uuid,
+    agent_content_digest character varying(128),
+    agent_definition_digest character varying(128),
+    user_identity_digest character varying(128),
+    model_provider character varying(64),
+    model_name character varying(126),
+    execution_session_reference_digest character varying(128),
     CONSTRAINT agent_session_t_check CHECK ((idle_expires_ts <= maximum_expires_ts)),
     CONSTRAINT agent_session_t_check1 CHECK ((((approval_hold_id IS NULL) AND (approval_hold_state IS NULL) AND (approval_hold_expires_ts IS NULL)) OR ((approval_hold_id IS NOT NULL) AND (approval_hold_state IS NOT NULL) AND (approval_hold_expires_ts IS NOT NULL)))),
     CONSTRAINT agent_session_t_cleanup_state_check CHECK (((cleanup_state)::text = ANY (ARRAY[('NOT_REQUIRED'::character varying)::text, ('CLEANUP_REQUESTED'::character varying)::text, ('CLEANUP_PENDING'::character varying)::text, ('CLEANED'::character varying)::text, ('CLEANUP_FAILED'::character varying)::text]))),
@@ -6508,6 +6529,8 @@ CREATE TABLE public.agent_turn_t (
     updated_ts timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     scheduling_request_id uuid,
     execution_attempt_id uuid,
+    scheduling_request_reference_digest character varying(128),
+    execution_reference_digest character varying(128),
     materialization_manifest_digest character varying(71),
     coding_base_revision character varying(64),
     coding_patch_digest character varying(71),
@@ -15985,6 +16008,7 @@ CREATE TABLE public.execution_attempt_t (
     cleanup_state character varying(32) DEFAULT 'REQUIRED'::character varying NOT NULL,
     cleanup_evidence jsonb,
     accepted_by_origin_ts timestamp with time zone,
+    workflow_reference_digest character varying(128),
     created_ts timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     updated_ts timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     CONSTRAINT execution_attempt_t_attempt_number_check CHECK ((attempt_number > 0)),
@@ -16398,6 +16422,10 @@ CREATE TABLE public.execution_fixed_action_t (
     reconciliation_attempt_count integer DEFAULT 0 NOT NULL,
     reconciliation_claim_token uuid,
     reconciliation_lease_expires_ts timestamp with time zone,
+    approval_nonce_digest character varying(128),
+    approval_expires_ts timestamp with time zone,
+    approval_policy_digest character varying(128),
+    approval_issuer character varying(255),
     CONSTRAINT execution_fixed_action_apply_patch_input_ck CHECK ((((action_kind)::text <> 'apply-patch'::text) OR ((repository_reference IS NOT NULL) AND (patch_artifact_reference IS NOT NULL) AND (jsonb_typeof(changed_paths) = 'array'::text)))),
     CONSTRAINT execution_fixed_action_base_commit_ck CHECK ((((action_kind)::text <> ALL (ARRAY[('apply-patch'::character varying)::text, ('create-branch'::character varying)::text, ('open-pr'::character varying)::text, ('push-commit'::character varying)::text])) OR ((((repository_object_format)::text = 'sha1'::text) AND ((base_commit)::text ~ '^[0-9A-Fa-f]{40}$'::text)) OR (((repository_object_format)::text = 'sha256'::text) AND ((base_commit)::text ~ '^[0-9A-Fa-f]{64}$'::text))))),
     CONSTRAINT execution_fixed_action_object_format_ck CHECK (((repository_object_format)::text = ANY (ARRAY[('sha1'::character varying)::text, ('sha256'::character varying)::text]))),
@@ -23787,6 +23815,145 @@ COMMENT ON COLUMN public.notification_t.read_ts IS 'Timestamp for the read event
 -- Name: org_t; Type: TABLE; Schema: public; Owner: -
 --
 
+COMMENT ON COLUMN public.agent_action_attempt_t.execution_reference_digest IS 'Digest of the authenticated execution reference accepted by Agent reconciliation.';
+COMMENT ON COLUMN public.agent_approval_t.consumed_execution_reference_digest IS 'Digest of signed evidence binding approval consumption to an execution.';
+COMMENT ON COLUMN public.agent_memory_bank_t.agent_definition_version IS 'Agent definition version accepted when the bank was created.';
+COMMENT ON COLUMN public.agent_memory_bank_t.agent_definition_digest IS 'Agent definition digest accepted when the bank was created.';
+COMMENT ON COLUMN public.agent_memory_bank_t.user_identity_digest IS 'Digest of the authenticated user identity accepted for the bank.';
+COMMENT ON COLUMN public.agent_memory_directive_t.agent_def_id IS 'Agent definition targeted by an immutable hard directive.';
+COMMENT ON COLUMN public.agent_memory_directive_t.agent_definition_version IS 'Agent definition version targeted by an immutable hard directive.';
+COMMENT ON COLUMN public.agent_memory_directive_t.bank_profile IS 'Published bank profile selector, independent of a concrete runtime bank.';
+COMMENT ON COLUMN public.agent_memory_directive_t.scope_selector IS 'Published Host, user, or session scope selector for the directive.';
+COMMENT ON COLUMN public.agent_memory_directive_t.policy_digest IS 'Digest binding the hard directive to the Agent policy publication.';
+COMMENT ON COLUMN public.agent_memory_directive_t.publication_id IS 'Agent publication carrying the hard directive.';
+COMMENT ON COLUMN public.agent_memory_entity_t.user_identity_digest IS 'Digest of the authenticated user identity accepted for the entity.';
+COMMENT ON COLUMN public.agent_policy_snapshot_t.agent_definition_version IS 'Pinned Agent definition version represented by this evidence snapshot.';
+COMMENT ON COLUMN public.agent_policy_snapshot_t.agent_publication_id IS 'Pinned Agent publication represented by this evidence snapshot.';
+COMMENT ON COLUMN public.agent_policy_snapshot_t.agent_content_digest IS 'Digest of the accepted complete Agent publication.';
+COMMENT ON COLUMN public.agent_quota_usage_t.quota_policy_version IS 'Pinned quota-policy version used for this accounting window.';
+COMMENT ON COLUMN public.agent_quota_usage_t.quota_policy_digest IS 'Pinned quota-policy digest used for this accounting window.';
+COMMENT ON COLUMN public.agent_session_t.agent_publication_id IS 'Pinned Agent publication accepted at session admission.';
+COMMENT ON COLUMN public.agent_session_t.agent_content_digest IS 'Digest of the complete Agent publication accepted at session admission.';
+COMMENT ON COLUMN public.agent_session_t.agent_definition_digest IS 'Pinned Agent definition digest accepted at session admission.';
+COMMENT ON COLUMN public.agent_session_t.user_identity_digest IS 'Digest of the authenticated user identity accepted at session admission.';
+COMMENT ON COLUMN public.agent_session_t.model_provider IS 'Pinned model provider accepted at session admission.';
+COMMENT ON COLUMN public.agent_session_t.model_name IS 'Pinned model alias accepted at session admission.';
+COMMENT ON COLUMN public.agent_session_t.service_pool_maximum_concurrency IS 'Pinned service-pool capacity used only with operational occupancy rows.';
+COMMENT ON COLUMN public.agent_session_t.execution_session_reference_digest IS 'Digest of the authenticated execution-session reference.';
+COMMENT ON COLUMN public.agent_turn_t.scheduling_request_reference_digest IS 'Digest of the authenticated scheduling-request reference.';
+COMMENT ON COLUMN public.agent_turn_t.execution_reference_digest IS 'Digest of the authenticated execution-attempt reference.';
+COMMENT ON COLUMN public.execution_attempt_t.workflow_reference_digest IS 'Digest binding Workflow process and task references admitted for this execution.';
+COMMENT ON COLUMN public.execution_fixed_action_t.approval_nonce_digest IS 'Pinned nonce digest from signed Workflow approval evidence.';
+COMMENT ON COLUMN public.execution_fixed_action_t.approval_expires_ts IS 'Expiry from signed Workflow approval evidence.';
+COMMENT ON COLUMN public.execution_fixed_action_t.approval_policy_digest IS 'Policy digest from signed Workflow approval evidence.';
+COMMENT ON COLUMN public.execution_fixed_action_t.approval_issuer IS 'Authenticated issuer of the Workflow approval evidence.';
+CREATE TABLE public.operational_reference_evidence_t (
+    host_id uuid NOT NULL,
+    reference_id uuid NOT NULL,
+    source_service character varying(255) NOT NULL,
+    source_table character varying(126) NOT NULL,
+    source_record_id uuid NOT NULL,
+    reference_kind character varying(64) NOT NULL,
+    target_id uuid NOT NULL,
+    target_version bigint,
+    publication_id uuid,
+    content_digest character varying(128) NOT NULL,
+    issuer character varying(255) NOT NULL,
+    audience character varying(64) NOT NULL,
+    state character varying(16) DEFAULT 'ACCEPTED'::character varying NOT NULL,
+    evidence jsonb DEFAULT '{}'::jsonb NOT NULL,
+    accepted_ts timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    reconciled_ts timestamp with time zone,
+    CONSTRAINT operational_reference_evidence_digest_ck CHECK (((content_digest)::text ~ '^(sha256:)?[0-9A-Fa-f]{64}$'::text)),
+    CONSTRAINT operational_reference_evidence_state_ck CHECK (state IN ('ACCEPTED', 'MISSING', 'STALE', 'REVOKED')),
+    CONSTRAINT operational_reference_evidence_version_ck CHECK (((target_version IS NULL) OR (target_version > 0))),
+    CONSTRAINT operational_reference_evidence_t_pkey PRIMARY KEY (host_id, reference_id),
+    CONSTRAINT operational_reference_evidence_source_uk UNIQUE (host_id, source_service, source_table, source_record_id, reference_kind)
+);
+
+COMMENT ON TABLE public.operational_reference_evidence_t IS 'Pinned application-level evidence replacing control-plane and cross-service foreign keys.';
+COMMENT ON COLUMN public.operational_reference_evidence_t.host_id IS 'Tenant Host scope accepted by the runtime projection.';
+COMMENT ON COLUMN public.operational_reference_evidence_t.reference_id IS 'Stable identifier for this accepted reference evidence.';
+COMMENT ON COLUMN public.operational_reference_evidence_t.source_service IS 'Runtime service that admitted the source record.';
+COMMENT ON COLUMN public.operational_reference_evidence_t.source_table IS 'Logical source table owning the reference.';
+COMMENT ON COLUMN public.operational_reference_evidence_t.source_record_id IS 'Stable identifier of the source operational record.';
+COMMENT ON COLUMN public.operational_reference_evidence_t.reference_kind IS 'Stable application-level reference kind.';
+COMMENT ON COLUMN public.operational_reference_evidence_t.target_id IS 'Pinned target identifier.';
+COMMENT ON COLUMN public.operational_reference_evidence_t.target_version IS 'Pinned target version when the target is versioned.';
+COMMENT ON COLUMN public.operational_reference_evidence_t.publication_id IS 'Accepted control-plane publication identifier when applicable.';
+COMMENT ON COLUMN public.operational_reference_evidence_t.content_digest IS 'Accepted target or publication content digest.';
+COMMENT ON COLUMN public.operational_reference_evidence_t.issuer IS 'Authenticated service or projection issuer.';
+COMMENT ON COLUMN public.operational_reference_evidence_t.audience IS 'Runtime audience authorized to consume the reference.';
+COMMENT ON COLUMN public.operational_reference_evidence_t.state IS 'Current reconciliation state of the accepted reference.';
+COMMENT ON COLUMN public.operational_reference_evidence_t.evidence IS 'Bounded non-secret admission evidence.';
+COMMENT ON COLUMN public.operational_reference_evidence_t.accepted_ts IS 'Timestamp when the application accepted the reference.';
+COMMENT ON COLUMN public.operational_reference_evidence_t.reconciled_ts IS 'Timestamp of the most recent reconciliation.';
+
+CREATE INDEX operational_reference_evidence_reconcile_idx ON public.operational_reference_evidence_t USING btree (host_id, state, reconciled_ts);
+
+CREATE TABLE public.operational_reference_reconciliation_t (
+    host_id uuid NOT NULL,
+    reconciliation_id uuid NOT NULL,
+    reference_id uuid NOT NULL,
+    source_service character varying(255) NOT NULL,
+    source_table character varying(126) NOT NULL,
+    source_record_id uuid NOT NULL,
+    reference_kind character varying(64) NOT NULL,
+    target_id uuid NOT NULL,
+    accepted_digest character varying(128) NOT NULL,
+    observed_digest character varying(128),
+    status character varying(16) NOT NULL,
+    diagnostic jsonb DEFAULT '{}'::jsonb NOT NULL,
+    checked_ts timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    CONSTRAINT operational_reference_reconciliation_digest_ck CHECK ((((accepted_digest)::text ~ '^(sha256:)?[0-9A-Fa-f]{64}$'::text) AND ((observed_digest IS NULL) OR ((observed_digest)::text ~ '^(sha256:)?[0-9A-Fa-f]{64}$'::text)))),
+    CONSTRAINT operational_reference_reconciliation_status_ck CHECK (status IN ('CURRENT', 'MISSING', 'STALE', 'REVOKED')),
+    CONSTRAINT operational_reference_reconciliation_t_pkey PRIMARY KEY (host_id, reconciliation_id)
+);
+
+COMMENT ON TABLE public.operational_reference_reconciliation_t IS 'Append-only reconciliation outcomes for pinned operational references.';
+COMMENT ON COLUMN public.operational_reference_reconciliation_t.host_id IS 'Tenant Host scope for the reconciliation.';
+COMMENT ON COLUMN public.operational_reference_reconciliation_t.reconciliation_id IS 'Stable identifier for this reconciliation outcome.';
+COMMENT ON COLUMN public.operational_reference_reconciliation_t.reference_id IS 'Accepted reference identifier being reconciled.';
+COMMENT ON COLUMN public.operational_reference_reconciliation_t.source_service IS 'Runtime service owning the source record.';
+COMMENT ON COLUMN public.operational_reference_reconciliation_t.source_table IS 'Logical source table owning the reference.';
+COMMENT ON COLUMN public.operational_reference_reconciliation_t.source_record_id IS 'Stable identifier of the source operational record.';
+COMMENT ON COLUMN public.operational_reference_reconciliation_t.reference_kind IS 'Stable application-level reference kind.';
+COMMENT ON COLUMN public.operational_reference_reconciliation_t.target_id IS 'Pinned target identifier.';
+COMMENT ON COLUMN public.operational_reference_reconciliation_t.accepted_digest IS 'Digest accepted at admission.';
+COMMENT ON COLUMN public.operational_reference_reconciliation_t.observed_digest IS 'Digest observed during reconciliation, when present.';
+COMMENT ON COLUMN public.operational_reference_reconciliation_t.status IS 'CURRENT, MISSING, STALE, or REVOKED reconciliation result.';
+COMMENT ON COLUMN public.operational_reference_reconciliation_t.diagnostic IS 'Bounded non-secret reconciliation diagnostics.';
+COMMENT ON COLUMN public.operational_reference_reconciliation_t.checked_ts IS 'Timestamp when reconciliation completed.';
+
+CREATE INDEX operational_reference_reconciliation_lookup_idx ON public.operational_reference_reconciliation_t USING btree (host_id, reference_id, checked_ts DESC);
+
+CREATE TABLE public.runtime_operational_scope_t (
+    host_id uuid NOT NULL,
+    environment character varying(64) NOT NULL,
+    service_id character varying(255) NOT NULL,
+    instance_id uuid NOT NULL,
+    publication_id uuid NOT NULL,
+    content_digest character varying(128) NOT NULL,
+    audience character varying(64) NOT NULL,
+    active boolean DEFAULT true NOT NULL,
+    accepted_ts timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    last_seen_ts timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    CONSTRAINT runtime_operational_scope_digest_ck CHECK (((content_digest)::text ~ '^(sha256:)?[0-9A-Fa-f]{64}$'::text)),
+    CONSTRAINT runtime_operational_scope_t_pkey PRIMARY KEY (host_id, service_id, instance_id)
+);
+
+COMMENT ON TABLE public.runtime_operational_scope_t IS 'Accepted runtime Host and environment scope used without a Config Server host foreign key.';
+COMMENT ON COLUMN public.runtime_operational_scope_t.host_id IS 'Tenant Host identifier accepted from the runtime projection.';
+COMMENT ON COLUMN public.runtime_operational_scope_t.environment IS 'Environment tag accepted from the runtime projection.';
+COMMENT ON COLUMN public.runtime_operational_scope_t.service_id IS 'Service identifier bound to this runtime scope.';
+COMMENT ON COLUMN public.runtime_operational_scope_t.instance_id IS 'Runtime instance identifier bound to this scope.';
+COMMENT ON COLUMN public.runtime_operational_scope_t.publication_id IS 'Control-plane publication identifier accepted by the runtime.';
+COMMENT ON COLUMN public.runtime_operational_scope_t.content_digest IS 'Digest of the accepted audience projection.';
+COMMENT ON COLUMN public.runtime_operational_scope_t.audience IS 'Projection audience accepted by the runtime.';
+COMMENT ON COLUMN public.runtime_operational_scope_t.active IS 'Whether the scope remains eligible for admission.';
+COMMENT ON COLUMN public.runtime_operational_scope_t.accepted_ts IS 'Timestamp when the runtime first accepted the scope.';
+COMMENT ON COLUMN public.runtime_operational_scope_t.last_seen_ts IS 'Timestamp when the runtime most recently confirmed the scope.';
+
 CREATE TABLE public.org_t (
     domain character varying(64) NOT NULL,
     org_name character varying(128) NOT NULL,
@@ -26509,6 +26676,11 @@ CREATE TABLE public.promotion_item_t (
     ])::text[]))
 );
 
+
+--
+-- Name: promotion_recovery_t; Type: TABLE; Schema: public; Owner: -
+--
+
 CREATE TABLE public.promotion_recovery_t (
     recovery_id uuid NOT NULL,
     promotion_id uuid NOT NULL,
@@ -27996,6 +28168,12 @@ CREATE TABLE public.runner_scheduling_request_t (
     pinned_runner_id character varying(126),
     pinned_backend_id character varying(126),
     edge_binding_id uuid,
+    workflow_reference_digest character varying(128),
+    approval_evidence_digest character varying(128),
+    edge_binding_compatibility_digest character varying(128),
+    edge_binding_revocation_epoch bigint,
+    resolved_policy jsonb DEFAULT '{}'::jsonb NOT NULL,
+    definition_digest character varying(128) DEFAULT ''::character varying NOT NULL,
     created_ts timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     updated_ts timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     CONSTRAINT runner_scheduling_request_t_check CHECK (((((subject_kind)::text = 'workflow-task'::text) AND (process_id IS NOT NULL) AND (task_id IS NOT NULL) AND (agent_session_id IS NULL) AND (agent_turn_id IS NULL) AND (agent_action_id IS NULL)) OR (((subject_kind)::text = 'agent-turn'::text) AND (process_id IS NULL) AND (task_id IS NULL) AND (agent_session_id IS NOT NULL) AND (agent_turn_id IS NOT NULL) AND (agent_action_id IS NULL)) OR (((subject_kind)::text = 'agent-action'::text) AND (process_id IS NULL) AND (task_id IS NULL) AND (agent_session_id IS NOT NULL) AND (agent_turn_id IS NOT NULL) AND (agent_action_id IS NOT NULL)))),
@@ -28300,11 +28478,20 @@ CREATE TABLE public.runner_session_t (
     registered_ts timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     heartbeat_ts timestamp with time zone,
     disconnected_ts timestamp with time zone,
+    environment character varying(64),
+    scope_binding_digest character varying(128),
     CONSTRAINT runner_session_t_cleanup_backlog_check CHECK ((cleanup_backlog >= 0)),
     CONSTRAINT runner_session_t_connection_generation_check CHECK ((connection_generation > 0)),
     CONSTRAINT runner_session_t_maximum_concurrency_check CHECK ((maximum_concurrency > 0)),
     CONSTRAINT runner_session_t_reported_available_capacity_check CHECK ((reported_available_capacity >= 0))
 );
+
+COMMENT ON COLUMN public.runner_scheduling_request_t.workflow_reference_digest IS 'Digest binding admitted Workflow process and task references.';
+COMMENT ON COLUMN public.runner_scheduling_request_t.approval_evidence_digest IS 'Digest of signed Workflow approval evidence accepted before reservation.';
+COMMENT ON COLUMN public.runner_scheduling_request_t.edge_binding_compatibility_digest IS 'Pinned compatibility digest from the runner-binding projection.';
+COMMENT ON COLUMN public.runner_scheduling_request_t.edge_binding_revocation_epoch IS 'Pinned revocation epoch from the runner-binding projection.';
+COMMENT ON COLUMN public.runner_session_t.environment IS 'Environment accepted from the runner operational scope.';
+COMMENT ON COLUMN public.runner_session_t.scope_binding_digest IS 'Digest of the Host and environment binding accepted at registration.';
 
 
 --
@@ -36165,7 +36352,7 @@ ALTER TABLE ONLY public.agent_memory_bank_t
 --
 
 ALTER TABLE ONLY public.agent_memory_directive_t
-    ADD CONSTRAINT agent_memory_directive_t_pkey PRIMARY KEY (host_id, bank_id, directive_id);
+    ADD CONSTRAINT agent_memory_directive_t_pkey PRIMARY KEY (host_id, directive_id);
 
 
 --
@@ -41596,14 +41783,6 @@ ALTER TABLE ONLY public.agent_action_attempt_t
 
 
 --
--- Name: agent_action_attempt_t agent_action_attempt_t_host_id_execution_attempt_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.agent_action_attempt_t
-    ADD CONSTRAINT agent_action_attempt_t_host_id_execution_attempt_id_fkey FOREIGN KEY (host_id, execution_attempt_id) REFERENCES public.execution_attempt_t(host_id, execution_id) ON DELETE RESTRICT;
-
-
---
 -- Name: agent_action_attempt_t agent_action_attempt_t_host_id_superseded_action_attempt_i_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -41625,14 +41804,6 @@ ALTER TABLE ONLY public.agent_action_attempt_t
 
 ALTER TABLE ONLY public.agent_approval_t
     ADD CONSTRAINT agent_approval_t_host_id_consumed_action_attempt_id_fkey FOREIGN KEY (host_id, consumed_action_attempt_id) REFERENCES public.agent_action_attempt_t(host_id, action_attempt_id) ON DELETE RESTRICT;
-
-
---
--- Name: agent_approval_t agent_approval_t_host_id_consumed_execution_attempt_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.agent_approval_t
-    ADD CONSTRAINT agent_approval_t_host_id_consumed_execution_attempt_id_fkey FOREIGN KEY (host_id, consumed_execution_attempt_id) REFERENCES public.execution_attempt_t(host_id, execution_id) ON DELETE RESTRICT;
 
 
 --
@@ -41748,38 +41919,6 @@ ALTER TABLE ONLY public.agent_knowledge_base_t
 
 
 --
--- Name: agent_memory_bank_t agent_memory_bank_t_host_id_agent_def_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.agent_memory_bank_t
-    ADD CONSTRAINT agent_memory_bank_t_host_id_agent_def_id_fkey FOREIGN KEY (host_id, agent_def_id) REFERENCES public.agent_definition_t(host_id, agent_def_id) ON DELETE CASCADE;
-
-
---
--- Name: agent_memory_bank_t agent_memory_bank_t_host_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.agent_memory_bank_t
-    ADD CONSTRAINT agent_memory_bank_t_host_id_fkey FOREIGN KEY (host_id) REFERENCES public.host_t(host_id) ON DELETE CASCADE;
-
-
---
--- Name: agent_memory_bank_t agent_memory_bank_t_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.agent_memory_bank_t
-    ADD CONSTRAINT agent_memory_bank_t_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.user_t(user_id) ON DELETE CASCADE;
-
-
---
--- Name: agent_memory_directive_t agent_memory_directive_t_host_id_bank_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.agent_memory_directive_t
-    ADD CONSTRAINT agent_memory_directive_t_host_id_bank_id_fkey FOREIGN KEY (host_id, bank_id) REFERENCES public.agent_memory_bank_t(host_id, bank_id) ON DELETE CASCADE;
-
-
---
 -- Name: agent_memory_doc_t agent_memory_doc_t_host_id_bank_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -41809,14 +41948,6 @@ ALTER TABLE ONLY public.agent_memory_entity_cooccur_t
 
 ALTER TABLE ONLY public.agent_memory_entity_t
     ADD CONSTRAINT agent_memory_entity_t_host_id_bank_id_fkey FOREIGN KEY (host_id, bank_id) REFERENCES public.agent_memory_bank_t(host_id, bank_id) ON DELETE CASCADE;
-
-
---
--- Name: agent_memory_entity_t agent_memory_entity_t_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.agent_memory_entity_t
-    ADD CONSTRAINT agent_memory_entity_t_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.user_t(user_id) ON DELETE CASCADE;
 
 
 --
@@ -41884,22 +42015,6 @@ ALTER TABLE ONLY public.agent_model_rate_t
 
 
 --
--- Name: agent_policy_snapshot_t agent_policy_snapshot_t_host_id_agent_def_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.agent_policy_snapshot_t
-    ADD CONSTRAINT agent_policy_snapshot_t_host_id_agent_def_id_fkey FOREIGN KEY (host_id, agent_def_id) REFERENCES public.agent_definition_t(host_id, agent_def_id) ON DELETE RESTRICT;
-
-
---
--- Name: agent_policy_snapshot_t agent_policy_snapshot_t_host_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.agent_policy_snapshot_t
-    ADD CONSTRAINT agent_policy_snapshot_t_host_id_fkey FOREIGN KEY (host_id) REFERENCES public.host_t(host_id) ON DELETE RESTRICT;
-
-
---
 -- Name: agent_pool_assignment_t agent_pool_assignment_t_host_id_agent_def_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -41929,14 +42044,6 @@ ALTER TABLE ONLY public.agent_quota_reservation_t
 
 ALTER TABLE ONLY public.agent_quota_reservation_t
     ADD CONSTRAINT agent_quota_reservation_t_host_id_turn_id_fkey FOREIGN KEY (host_id, turn_id) REFERENCES public.agent_turn_t(host_id, turn_id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: agent_quota_usage_t agent_quota_usage_t_host_id_quota_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.agent_quota_usage_t
-    ADD CONSTRAINT agent_quota_usage_t_host_id_quota_id_fkey FOREIGN KEY (host_id, quota_id) REFERENCES public.agent_quota_policy_t(host_id, quota_id) ON DELETE CASCADE;
 
 
 --
@@ -41980,43 +42087,11 @@ ALTER TABLE ONLY public.agent_session_history_t
 
 
 --
--- Name: agent_session_t agent_session_service_pool_fk; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.agent_session_t
-    ADD CONSTRAINT agent_session_service_pool_fk FOREIGN KEY (host_id, service_pool_id) REFERENCES public.agent_service_pool_t(host_id, pool_id) ON DELETE RESTRICT;
-
-
---
--- Name: agent_session_t agent_session_t_host_id_agent_def_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.agent_session_t
-    ADD CONSTRAINT agent_session_t_host_id_agent_def_id_fkey FOREIGN KEY (host_id, agent_def_id) REFERENCES public.agent_definition_t(host_id, agent_def_id) ON DELETE RESTRICT;
-
-
---
 -- Name: agent_session_t agent_session_t_host_id_bank_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.agent_session_t
     ADD CONSTRAINT agent_session_t_host_id_bank_id_fkey FOREIGN KEY (host_id, bank_id) REFERENCES public.agent_memory_bank_t(host_id, bank_id) ON DELETE RESTRICT;
-
-
---
--- Name: agent_session_t agent_session_t_host_id_execution_session_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.agent_session_t
-    ADD CONSTRAINT agent_session_t_host_id_execution_session_id_fkey FOREIGN KEY (host_id, execution_session_id) REFERENCES public.execution_session_t(host_id, execution_session_id) ON DELETE RESTRICT;
-
-
---
--- Name: agent_session_t agent_session_t_host_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.agent_session_t
-    ADD CONSTRAINT agent_session_t_host_id_fkey FOREIGN KEY (host_id) REFERENCES public.host_t(host_id) ON DELETE RESTRICT;
 
 
 --
@@ -42068,27 +42143,11 @@ ALTER TABLE ONLY public.agent_trigger_t
 
 
 --
--- Name: agent_turn_t agent_turn_execution_attempt_fk; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.agent_turn_t
-    ADD CONSTRAINT agent_turn_execution_attempt_fk FOREIGN KEY (host_id, execution_attempt_id) REFERENCES public.execution_attempt_t(host_id, execution_id) ON DELETE RESTRICT;
-
-
---
 -- Name: agent_turn_materialization_t agent_turn_materialization_t_host_id_turn_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.agent_turn_materialization_t
     ADD CONSTRAINT agent_turn_materialization_t_host_id_turn_id_fkey FOREIGN KEY (host_id, turn_id) REFERENCES public.agent_turn_t(host_id, turn_id) ON DELETE CASCADE;
-
-
---
--- Name: agent_turn_t agent_turn_scheduling_request_fk; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.agent_turn_t
-    ADD CONSTRAINT agent_turn_scheduling_request_fk FOREIGN KEY (host_id, scheduling_request_id) REFERENCES public.runner_scheduling_request_t(host_id, request_id) ON DELETE RESTRICT;
 
 
 --
@@ -42932,14 +42991,6 @@ ALTER TABLE ONLY public.event_replay_retention_log_t
 
 
 --
--- Name: execution_attempt_t execution_attempt_t_host_id_process_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.execution_attempt_t
-    ADD CONSTRAINT execution_attempt_t_host_id_process_id_fkey FOREIGN KEY (host_id, process_id) REFERENCES public.process_info_t(host_id, process_id) ON DELETE CASCADE;
-
-
---
 -- Name: execution_attempt_t execution_attempt_t_host_id_request_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -42956,27 +43007,11 @@ ALTER TABLE ONLY public.execution_attempt_t
 
 
 --
--- Name: execution_attempt_t execution_attempt_t_host_id_task_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.execution_attempt_t
-    ADD CONSTRAINT execution_attempt_t_host_id_task_id_fkey FOREIGN KEY (host_id, task_id) REFERENCES public.task_info_t(host_id, task_id) ON DELETE CASCADE;
-
-
---
 -- Name: execution_credential_grant_audit_t execution_credential_grant_audit_t_host_id_execution_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.execution_credential_grant_audit_t
     ADD CONSTRAINT execution_credential_grant_audit_t_host_id_execution_id_fkey FOREIGN KEY (host_id, execution_id) REFERENCES public.execution_attempt_t(host_id, execution_id) ON DELETE RESTRICT;
-
-
---
--- Name: execution_fixed_action_t execution_fixed_action_t_host_id_approval_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.execution_fixed_action_t
-    ADD CONSTRAINT execution_fixed_action_t_host_id_approval_id_fkey FOREIGN KEY (host_id, approval_id) REFERENCES public.workflow_approval_t(host_id, approval_id) ON DELETE RESTRICT;
 
 
 --
@@ -44028,51 +44063,11 @@ ALTER TABLE ONLY public.runner_backend_t
 
 
 --
--- Name: runner_scheduling_request_t runner_request_edge_binding_fk; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.runner_scheduling_request_t
-    ADD CONSTRAINT runner_request_edge_binding_fk FOREIGN KEY (host_id, edge_binding_id) REFERENCES public.agent_edge_runner_binding_t(host_id, edge_binding_id) ON DELETE RESTRICT;
-
-
---
--- Name: runner_scheduling_request_t runner_scheduling_request_approval_fk; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.runner_scheduling_request_t
-    ADD CONSTRAINT runner_scheduling_request_approval_fk FOREIGN KEY (host_id, approval_id) REFERENCES public.workflow_approval_t(host_id, approval_id) ON DELETE RESTRICT;
-
-
---
--- Name: runner_scheduling_request_t runner_scheduling_request_t_host_id_process_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.runner_scheduling_request_t
-    ADD CONSTRAINT runner_scheduling_request_t_host_id_process_id_fkey FOREIGN KEY (host_id, process_id) REFERENCES public.process_info_t(host_id, process_id) ON DELETE CASCADE;
-
-
---
 -- Name: runner_scheduling_request_t runner_scheduling_request_t_host_id_selected_runner_sessio_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.runner_scheduling_request_t
     ADD CONSTRAINT runner_scheduling_request_t_host_id_selected_runner_sessio_fkey FOREIGN KEY (host_id, selected_runner_session_id, selected_backend_id) REFERENCES public.runner_backend_t(host_id, session_id, backend_id) ON DELETE RESTRICT;
-
-
---
--- Name: runner_scheduling_request_t runner_scheduling_request_t_host_id_task_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.runner_scheduling_request_t
-    ADD CONSTRAINT runner_scheduling_request_t_host_id_task_id_fkey FOREIGN KEY (host_id, task_id) REFERENCES public.task_info_t(host_id, task_id) ON DELETE CASCADE;
-
-
---
--- Name: runner_session_t runner_session_t_host_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.runner_session_t
-    ADD CONSTRAINT runner_session_t_host_id_fkey FOREIGN KEY (host_id) REFERENCES public.host_t(host_id) ON DELETE RESTRICT;
 
 
 --
@@ -44684,7 +44679,11 @@ INSERT INTO cascade_relationship_policy_seed_t (
     policy_description
 )
 VALUES
-('public', 'api_endpoint_scope_t', 'public', 'app_api_t', 'app_api_t_host_id_endpoint_id_scope_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+('public', 'access_target_t', 'public', 'access_target_col_filter_t', 'access_target_col_filter_t_host_id_access_target_id_fkey', 'IGNORE', 'NONE', 'Access-target column-filter lifecycle is command-owned until it implements the complete soft-delete audit contract'),
+    ('public', 'access_target_t', 'public', 'access_target_permission_t', 'access_target_permission_t_host_id_access_target_id_fkey', 'IGNORE', 'NONE', 'Access-target permission lifecycle is command-owned until it implements the complete soft-delete audit contract'),
+    ('public', 'access_target_t', 'public', 'access_target_row_filter_t', 'access_target_row_filter_t_host_id_access_target_id_fkey', 'IGNORE', 'NONE', 'Access-target row-filter lifecycle is command-owned until it implements the complete soft-delete audit contract'),
+    ('public', 'access_target_t', 'public', 'access_target_rule_t', 'access_target_rule_t_host_id_access_target_id_fkey', 'IGNORE', 'NONE', 'Access-target rule lifecycle is command-owned until it implements the complete soft-delete audit contract'),
+    ('public', 'api_endpoint_scope_t', 'public', 'app_api_t', 'app_api_t_host_id_endpoint_id_scope_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
     ('public', 'api_endpoint_t', 'public', 'api_endpoint_rule_t', 'endpoint_fk', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
     ('public', 'api_endpoint_t', 'public', 'api_endpoint_scope_t', 'api_ver_fk', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
     ('public', 'api_endpoint_t', 'public', 'attribute_col_filter_t', 'attribute_col_filter_t_host_id_endpoint_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
@@ -44767,10 +44766,7 @@ VALUES
     ('public', 'host_t', 'public', 'auth_provider_t', 'auth_provider_t_host_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
     ('public', 'host_t', 'public', 'auth_ref_token_t', 'auth_ref_token_t_host_id_fkey', 'HARD_DELETE', 'NONE', 'Host deactivation revokes stored bearer JWT reference tokens'),
     ('public', 'host_t', 'public', 'auth_refresh_token_t', 'auth_refresh_token_t_host_id_fkey', 'HARD_DELETE', 'NONE', 'Tenant host deactivation revokes refresh tokens even when auth_host_id differs'),
-    ('public', 'host_t', 'public', 'agent_memory_bank_t', 'agent_memory_bank_t_host_id_fkey', 'IGNORE', 'NONE', 'Memory-bank lifecycle is independently retained and lacks the soft-delete audit contract'),
     ('public', 'host_t', 'public', 'agent_model_rate_t', 'agent_model_rate_t_host_id_fkey', 'IGNORE', 'NONE', 'Immutable agent model rate history is retained independently'),
-    ('public', 'host_t', 'public', 'agent_policy_snapshot_t', 'agent_policy_snapshot_t_host_id_fkey', 'IGNORE', 'NONE', 'Immutable agent policy snapshots are retained independently'),
-    ('public', 'host_t', 'public', 'agent_session_t', 'agent_session_t_host_id_fkey', 'IGNORE', 'NONE', 'Agent session lifecycle is command-owned and status-driven'),
     ('public', 'host_t', 'public', 'auth_session_audit_t', 'auth_session_audit_t_auth_host_id_fkey', 'IGNORE', 'NONE', 'Authentication audit history is retained independently'),
     ('public', 'host_t', 'public', 'auth_session_audit_t', 'auth_session_audit_t_host_id_fkey', 'IGNORE', 'NONE', 'Authentication audit history is retained independently'),
     ('public', 'host_t', 'public', 'auth_session_t', 'auth_session_t_host_id_fkey', 'HARD_DELETE', 'NONE', 'Tenant host deactivation revokes non-restorable authorization sessions'),
@@ -44787,13 +44783,9 @@ VALUES
     ('public', 'host_t', 'public', 'knowledge_base_import_t', 'knowledge_base_import_t_host_id_fkey', 'IGNORE', 'NONE', 'Knowledge import lifecycle is command-owned and status-driven'),
     ('public', 'host_t', 'public', 'knowledge_base_manifest_export_t', 'knowledge_base_manifest_export_t_host_id_fkey', 'IGNORE', 'NONE', 'Knowledge export history is retained independently'),
     ('public', 'host_t', 'public', 'knowledge_base_t', 'knowledge_base_t_host_id_fkey', 'IGNORE', 'NONE', 'Knowledge base lifecycle is command-owned'),
-    ('public', 'host_t', 'public', 'knowledge_embedding_artifact_t', 'knowledge_embedding_artifact_t_owner_host_id_fkey', 'IGNORE', 'NONE', 'Embedding artifacts are immutable and retained independently'),
-    ('public', 'host_t', 'public', 'knowledge_query_audit_t', 'knowledge_query_audit_t_consumer_host_id_fkey', 'IGNORE', 'NONE', 'Knowledge query audit history is retained independently'),
-    ('public', 'host_t', 'public', 'knowledge_consumer_quota_t', 'knowledge_consumer_quota_t_consumer_host_id_fkey', 'IGNORE', 'NONE', 'Quota lifecycle is independently retained and lacks the soft-delete audit contract'),
     ('public', 'host_t', 'public', 'knowledge_embedding_profile_t', 'knowledge_embedding_profile_t_host_id_fkey', 'IGNORE', 'NONE', 'Embedding profile lifecycle is command-owned until it implements the complete soft-delete audit contract'),
     ('public', 'host_t', 'public', 'knowledge_ingestion_policy_t', 'knowledge_ingestion_policy_t_host_id_fkey', 'IGNORE', 'NONE', 'Ingestion policy lifecycle is command-owned until it implements the complete soft-delete audit contract'),
     ('public', 'host_t', 'public', 'knowledge_retrieval_profile_t', 'knowledge_retrieval_profile_t_host_id_fkey', 'IGNORE', 'NONE', 'Retrieval profile lifecycle is command-owned until it implements the complete soft-delete audit contract'),
-    ('public', 'host_t', 'public', 'knowledge_runtime_authorization_t', 'knowledge_runtime_authorization_t_consumer_host_id_fkey', 'IGNORE', 'NONE', 'Runtime authorization lifecycle is independently enforced and lacks the soft-delete audit contract'),
     ('public', 'host_t', 'public', 'llm_gateway_publication_t', 'llm_gateway_publication_t_host_id_fkey', 'IGNORE', 'NONE', 'Publication lifecycle is immutable and command-owned'),
     ('public', 'host_t', 'public', 'llm_model_policy_t', 'llm_model_policy_t_host_id_fkey', 'IGNORE', 'NONE', 'Model policy lifecycle is command-owned until it implements the complete soft-delete audit contract'),
     ('public', 'host_t', 'public', 'llm_model_registration_t', 'llm_model_registration_t_host_id_fkey', 'IGNORE', 'NONE', 'Model registration lifecycle is command-owned until it implements the complete soft-delete audit contract'),
@@ -44807,7 +44799,6 @@ VALUES
     ('public', 'host_t', 'public', 'private_conversation_t', 'private_conversation_t_host_id_fkey', 'IGNORE', 'NONE', 'Conversation history is retained independently'),
     ('public', 'host_t', 'public', 'product_version_t', 'host_id_fk', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
     ('public', 'host_t', 'public', 'role_t', 'role_t_host_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
-    ('public', 'host_t', 'public', 'runner_session_t', 'runner_session_t_host_id_fkey', 'IGNORE', 'NONE', 'Runner session lifecycle is operationally managed'),
     ('public', 'host_t', 'public', 'skill_package_t', 'skill_package_t_host_id_fkey', 'IGNORE', 'NONE', 'Skill package lifecycle is command-owned'),
     ('public', 'host_t', 'public', 'user_host_t', 'user_host_t_host_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
     ('public', 'host_t', 'public', 'workflow_endpoint_target_t', 'workflow_endpoint_target_t_host_id_fkey', 'IGNORE', 'NONE', 'Workflow endpoint lifecycle is command-owned until it implements the complete soft-delete audit contract'),
@@ -44816,10 +44807,12 @@ VALUES
     ('public', 'instance_api_t', 'public', 'instance_api_path_prefix_t', 'instance_api_path_prefix_t_host_id_instance_api_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
     ('public', 'instance_api_t', 'public', 'instance_api_property_t', 'instance_api_property_t_host_id_instance_api_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
     ('public', 'instance_api_t', 'public', 'instance_app_api_t', 'instance_app_api_t_host_id_instance_api_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'instance_api_t', 'public', 'agent_a2a_binding_t', 'agent_a2a_binding_instance_agent_fk', 'IGNORE', 'NONE', 'A2A binding lifecycle is command-owned and independently audited'),
     ('public', 'instance_app_api_t', 'public', 'instance_app_api_property_t', 'instance_app_api_property_fk', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
     ('public', 'instance_app_t', 'public', 'instance_app_api_t', 'instance_app_api_t_host_id_instance_app_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
     ('public', 'instance_app_t', 'public', 'instance_app_property_t', 'instance_app_property_t_host_id_instance_app_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
     ('public', 'instance_t', 'public', 'auth_client_owner_t', 'auth_client_owner_t_host_id_instance_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
+    ('public', 'instance_t', 'public', 'access_target_t', 'access_target_t_host_id_instance_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable access-target relationship'),
     ('public', 'instance_t', 'public', 'config_snapshot_t', 'config_snapshot_t_host_id_instance_id_fkey', 'IGNORE', 'NONE', 'Immutable configuration snapshots are retained independently'),
     ('public', 'instance_t', 'public', 'deployment_instance_t', 'deployment_instance_t_host_id_instance_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
     ('public', 'instance_t', 'public', 'gateway_tool_binding_t', 'gateway_tool_binding_t_host_id_instance_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
@@ -44830,6 +44823,7 @@ VALUES
     ('public', 'instance_t', 'public', 'instance_property_t', 'instance_fkv2', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
     ('public', 'instance_t', 'public', 'llm_gateway_instance_property_ownership_t', 'llm_gateway_instance_property_ownershi_host_id_instance_id_fkey', 'IGNORE', 'NONE', 'Ownership lifecycle is release-managed and lacks the soft-delete audit contract'),
     ('public', 'instance_t', 'public', 'llm_gateway_instance_publication_t', 'llm_gateway_instance_publication_t_host_id_instance_id_fkey', 'IGNORE', 'NONE', 'Instance publication lifecycle is immutable and command-owned'),
+    ('public', 'instance_t', 'public', 'agent_a2a_instance_publication_t', 'agent_a2a_instance_publication_runtime_fk', 'IGNORE', 'NONE', 'A2A instance publication lifecycle is immutable and command-owned'),
     ('public', 'org_t', 'public', 'host_t', 'host_t_domain_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
     ('public', 'pipeline_t', 'public', 'product_version_pipeline_t', 'product_version_pipeline_t_host_id_pipeline_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
     ('public', 'platform_t', 'public', 'pipeline_t', 'pipeline_t_host_id_platform_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
@@ -44859,8 +44853,6 @@ VALUES
     ('public', 'user_host_t', 'public', 'customer_t', 'customer_t_host_id_user_id_fkey', 'IGNORE', 'NONE', 'Preserve recoverable customer identity while host membership is inactive'),
     ('public', 'user_host_t', 'public', 'employee_t', 'employee_t_host_id_user_id_fkey', 'IGNORE', 'NONE', 'Preserve recoverable employee identity while host membership is inactive'),
     ('public', 'user_t', 'public', 'attribute_user_t', 'attribute_user_t_user_id_fkey', 'SOFT_DELETE', 'RESTORE', 'Recoverable projection relationship'),
-    ('public', 'user_t', 'public', 'agent_memory_bank_t', 'agent_memory_bank_t_user_id_fkey', 'IGNORE', 'NONE', 'Memory-bank lifecycle is independently retained and lacks the soft-delete audit contract'),
-    ('public', 'user_t', 'public', 'agent_memory_entity_t', 'agent_memory_entity_t_user_id_fkey', 'IGNORE', 'NONE', 'Memory-entity lifecycle is independently retained and lacks the soft-delete audit contract'),
     ('public', 'user_t', 'public', 'auth_code_t', 'auth_code_t_user_id_fkey', 'HARD_DELETE', 'NONE', 'User deactivation revokes non-restorable authorization codes'),
     ('public', 'user_t', 'public', 'auth_refresh_token_t', 'auth_refresh_token_t_user_id_fkey', 'HARD_DELETE', 'NONE', 'User deactivation revokes non-restorable refresh tokens'),
     ('public', 'user_t', 'public', 'auth_session_t', 'auth_session_t_user_id_fkey', 'HARD_DELETE', 'NONE', 'User deactivation revokes non-restorable authorization sessions'),
@@ -44908,6 +44900,371 @@ SET delete_action = EXCLUDED.delete_action,
     update_ts = CURRENT_TIMESTAMP;
 
 COMMIT;
+
+-- Phase 3 decoupling outbox. This remains Agent-owned operational state until
+-- Phase 4 moves the Agent schema; it never becomes execution authority.
+CREATE TABLE public.agent_execution_outbox_t (
+    host_id uuid NOT NULL,
+    dispatch_id uuid NOT NULL,
+    request_id uuid NOT NULL,
+    command_kind character varying(16) NOT NULL,
+    command_payload jsonb NOT NULL,
+    payload_digest character varying(71) NOT NULL,
+    state character varying(16) DEFAULT 'PENDING'::character varying NOT NULL,
+    attempt_count integer DEFAULT 0 NOT NULL,
+    next_attempt_ts timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    last_error character varying(512),
+    dispatched_ts timestamp with time zone,
+    created_ts timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_ts timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    CONSTRAINT agent_execution_outbox_t_pkey PRIMARY KEY (host_id, dispatch_id),
+    CONSTRAINT agent_execution_outbox_t_request_key UNIQUE (host_id, request_id, command_kind),
+    CONSTRAINT agent_execution_outbox_t_command_check CHECK ((command_kind)::text = ANY (ARRAY['REQUEST'::text, 'CLEANUP'::text])),
+    CONSTRAINT agent_execution_outbox_t_payload_check CHECK (jsonb_typeof(command_payload) = 'object'::text),
+    CONSTRAINT agent_execution_outbox_t_digest_check CHECK ((payload_digest)::text ~ '^sha256:[0-9a-f]{64}$'::text),
+    CONSTRAINT agent_execution_outbox_t_state_check CHECK ((state)::text = ANY (ARRAY['PENDING'::text, 'DISPATCHED'::text, 'DEAD'::text]))
+);
+
+CREATE INDEX agent_execution_outbox_pending_idx
+    ON public.agent_execution_outbox_t (next_attempt_ts, created_ts)
+    WHERE state = 'PENDING';
+
+COMMENT ON TABLE public.agent_execution_outbox_t IS
+    'Agent-owned durable handoff to the Controller execution API; Config Server execution tables are not authoritative.';
+
+-- Phase 5 A2A control-plane publication. Runtime services receive only the
+-- immutable audience-specific projections compiled from these records.
+CREATE UNIQUE INDEX instance_api_agent_runtime_identity_uk
+    ON public.instance_api_t(host_id,instance_api_id,instance_id,api_version_id);
+
+CREATE TABLE public.agent_a2a_binding_t (
+    host_id uuid NOT NULL,
+    a2a_binding_id uuid NOT NULL,
+    agent_def_id uuid NOT NULL,
+    instance_api_id uuid NOT NULL,
+    environment character varying(32) NOT NULL,
+    agent_ref character varying(256) NOT NULL,
+    binding_name character varying(126) NOT NULL,
+    implementation_kind character varying(32) NOT NULL,
+    deployment_mode character varying(16) NOT NULL,
+    public_path character varying(512) NOT NULL,
+    runtime_service_id character varying(256) NOT NULL,
+    runtime_instance_id uuid NOT NULL,
+    inbound_enabled boolean DEFAULT true NOT NULL,
+    outbound_enabled boolean DEFAULT false NOT NULL,
+    profile_config jsonb DEFAULT '{}'::jsonb NOT NULL,
+    access_policy jsonb DEFAULT '{}'::jsonb NOT NULL,
+    backend_config jsonb DEFAULT '{}'::jsonb NOT NULL,
+    policy_digest character varying(71) NOT NULL,
+    aggregate_version bigint DEFAULT 1 NOT NULL,
+    active boolean DEFAULT true NOT NULL,
+    update_user character varying(126) DEFAULT SESSION_USER NOT NULL,
+    update_ts timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    CONSTRAINT agent_a2a_binding_t_pkey PRIMARY KEY (host_id,a2a_binding_id),
+    CONSTRAINT agent_a2a_binding_agent_fk FOREIGN KEY (host_id,agent_def_id)
+        REFERENCES public.agent_definition_t(host_id,agent_def_id) ON DELETE CASCADE,
+    CONSTRAINT agent_a2a_binding_instance_agent_fk FOREIGN KEY (host_id,instance_api_id,runtime_instance_id,agent_def_id)
+        REFERENCES public.instance_api_t(host_id,instance_api_id,instance_id,api_version_id) ON DELETE CASCADE,
+    CONSTRAINT agent_a2a_binding_ref_ck CHECK (agent_ref ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$'),
+    CONSTRAINT agent_a2a_binding_environment_ck CHECK (length(btrim(environment))>0),
+    CONSTRAINT agent_a2a_binding_implementation_ck CHECK (implementation_kind IN ('LIGHT_AGENT','EXTERNAL_SIDECAR','REMOTE_A2A')),
+    CONSTRAINT agent_a2a_binding_mode_ck CHECK (deployment_mode IN ('NATIVE','SIDECAR','SHARED')),
+    CONSTRAINT agent_a2a_binding_mode_kind_ck CHECK ((implementation_kind='LIGHT_AGENT' AND deployment_mode='NATIVE') OR (implementation_kind<>'LIGHT_AGENT' AND deployment_mode IN ('SIDECAR','SHARED'))),
+    CONSTRAINT agent_a2a_binding_path_ck CHECK (public_path ~ '^/[^?#]*$'),
+    CONSTRAINT agent_a2a_binding_profile_ck CHECK (jsonb_typeof(profile_config)='object'),
+    CONSTRAINT agent_a2a_binding_access_ck CHECK (jsonb_typeof(access_policy)='object'),
+    CONSTRAINT agent_a2a_binding_backend_ck CHECK (jsonb_typeof(backend_config)='object'),
+    CONSTRAINT agent_a2a_binding_policy_digest_ck CHECK (policy_digest ~ '^sha256:[0-9a-f]{64}$'),
+    CONSTRAINT agent_a2a_binding_version_ck CHECK (aggregate_version>0)
+);
+CREATE UNIQUE INDEX agent_a2a_binding_ref_active_uk
+    ON public.agent_a2a_binding_t(host_id,environment,agent_ref) WHERE active;
+CREATE UNIQUE INDEX agent_a2a_binding_path_active_uk
+    ON public.agent_a2a_binding_t(host_id,environment,public_path) WHERE active;
+
+CREATE TABLE public.agent_a2a_publication_t (
+    host_id uuid NOT NULL,
+    publication_id uuid NOT NULL,
+    a2a_binding_id uuid NOT NULL,
+    publication_version bigint NOT NULL,
+    publication_state character varying(16) NOT NULL,
+    content_digest character varying(71) NOT NULL,
+    policy_digest character varying(71) NOT NULL,
+    manifest jsonb NOT NULL,
+    runtime_projections jsonb NOT NULL,
+    validation_result jsonb NOT NULL,
+    signed_agent_card jsonb,
+    valid_from timestamp with time zone NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    revocation_epoch bigint DEFAULT 0 NOT NULL,
+    source_aggregate_versions jsonb NOT NULL,
+    aggregate_version bigint DEFAULT 1 NOT NULL,
+    active boolean DEFAULT true NOT NULL,
+    update_user character varying(126) DEFAULT SESSION_USER NOT NULL,
+    update_ts timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    CONSTRAINT agent_a2a_publication_t_pkey PRIMARY KEY(host_id,publication_id),
+    CONSTRAINT agent_a2a_publication_binding_fk FOREIGN KEY(host_id,a2a_binding_id) REFERENCES public.agent_a2a_binding_t(host_id,a2a_binding_id) ON DELETE CASCADE,
+    CONSTRAINT agent_a2a_publication_version_uk UNIQUE(host_id,a2a_binding_id,publication_version),
+    CONSTRAINT agent_a2a_publication_version_ck CHECK(publication_version>0 AND aggregate_version>0),
+    CONSTRAINT agent_a2a_publication_state_ck CHECK(publication_state IN ('STAGED','ACTIVE','REVOKED','EXPIRED','REJECTED')),
+    CONSTRAINT agent_a2a_publication_content_digest_ck CHECK(content_digest ~ '^sha256:[0-9a-f]{64}$'),
+    CONSTRAINT agent_a2a_publication_policy_digest_ck CHECK(policy_digest ~ '^sha256:[0-9a-f]{64}$'),
+    CONSTRAINT agent_a2a_publication_manifest_ck CHECK(jsonb_typeof(manifest)='object'),
+    CONSTRAINT agent_a2a_publication_projection_ck CHECK(jsonb_typeof(runtime_projections)='object'),
+    CONSTRAINT agent_a2a_publication_validation_ck CHECK(jsonb_typeof(validation_result)='object'),
+    CONSTRAINT agent_a2a_publication_card_ck CHECK(signed_agent_card IS NULL OR jsonb_typeof(signed_agent_card)='object'),
+    CONSTRAINT agent_a2a_publication_sources_ck CHECK(jsonb_typeof(source_aggregate_versions)='object'),
+    CONSTRAINT agent_a2a_publication_validity_ck CHECK(expires_at>valid_from),
+    CONSTRAINT agent_a2a_publication_revocation_ck CHECK(revocation_epoch>=0)
+);
+CREATE UNIQUE INDEX agent_a2a_publication_active_uk
+    ON public.agent_a2a_publication_t(host_id,a2a_binding_id) WHERE active AND publication_state='ACTIVE';
+
+CREATE TABLE public.agent_a2a_instance_publication_t (
+    host_id uuid NOT NULL,
+    instance_publication_id uuid NOT NULL,
+    publication_id uuid NOT NULL,
+    runtime_instance_id uuid NOT NULL,
+    audience character varying(32) NOT NULL,
+    property_set_digest character varying(71) NOT NULL,
+    config_snapshot_id uuid,
+    application_version bigint NOT NULL,
+    application_state character varying(16) NOT NULL,
+    acknowledged_digest character varying(71),
+    acknowledged_ts timestamp with time zone,
+    rollback_of_instance_publication_id uuid,
+    aggregate_version bigint DEFAULT 1 NOT NULL,
+    active boolean DEFAULT true NOT NULL,
+    update_user character varying(126) DEFAULT SESSION_USER NOT NULL,
+    update_ts timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    CONSTRAINT agent_a2a_instance_publication_t_pkey PRIMARY KEY(host_id,instance_publication_id),
+    CONSTRAINT agent_a2a_instance_publication_publication_fk FOREIGN KEY(host_id,publication_id) REFERENCES public.agent_a2a_publication_t(host_id,publication_id) ON DELETE CASCADE,
+    CONSTRAINT agent_a2a_instance_publication_runtime_fk FOREIGN KEY(host_id,runtime_instance_id) REFERENCES public.instance_t(host_id,instance_id) ON DELETE CASCADE,
+    CONSTRAINT agent_a2a_instance_publication_rollback_fk FOREIGN KEY(host_id,rollback_of_instance_publication_id) REFERENCES public.agent_a2a_instance_publication_t(host_id,instance_publication_id) ON DELETE SET NULL,
+    CONSTRAINT agent_a2a_instance_publication_version_uk UNIQUE(host_id,publication_id,runtime_instance_id,audience,application_version),
+    CONSTRAINT agent_a2a_instance_publication_audience_ck CHECK(audience IN ('light-gateway','light-agent','light-a2a','light-workflow')),
+    CONSTRAINT agent_a2a_instance_publication_digest_ck CHECK(property_set_digest ~ '^sha256:[0-9a-f]{64}$'),
+    CONSTRAINT agent_a2a_instance_publication_ack_digest_ck CHECK(acknowledged_digest IS NULL OR acknowledged_digest ~ '^sha256:[0-9a-f]{64}$'),
+    CONSTRAINT agent_a2a_instance_publication_state_ck CHECK(application_state IN ('STAGED','ACTIVE','ACKNOWLEDGED','REJECTED','ROLLED_BACK','REVOKED')),
+    CONSTRAINT agent_a2a_instance_publication_version_ck CHECK(application_version>0 AND aggregate_version>0)
+);
+CREATE UNIQUE INDEX agent_a2a_instance_publication_active_uk
+    ON public.agent_a2a_instance_publication_t(host_id,publication_id,runtime_instance_id,audience)
+    WHERE active AND application_state IN ('ACTIVE','ACKNOWLEDGED');
+
+COMMENT ON TABLE public.agent_a2a_binding_t IS 'Structured, editable A2A binding authoring state; never runtime request-path authority.';
+COMMENT ON TABLE public.agent_a2a_publication_t IS 'Immutable digest-bound A2A publication and audience-specific Config Server projections.';
+COMMENT ON TABLE public.agent_a2a_instance_publication_t IS 'Application, acknowledgement, and rollback evidence for one runtime audience.';
+
+--
+-- Phase 7 operational-store provisioning control plane. These tables contain
+-- desired state and redacted lifecycle evidence only. Runtime credentials and
+-- operational application rows never belong in this database.
+--
+
+CREATE TABLE IF NOT EXISTS public.operational_store_profile_t (
+    profile_id character varying(126) NOT NULL,
+    profile_version bigint NOT NULL,
+    deployment_profile character varying(32) NOT NULL,
+    provider character varying(32) NOT NULL,
+    profile_config jsonb DEFAULT '{}'::jsonb NOT NULL,
+    aggregate_version bigint DEFAULT 1 NOT NULL,
+    active boolean DEFAULT true NOT NULL,
+    update_user character varying(126) DEFAULT SESSION_USER NOT NULL,
+    update_ts timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    CONSTRAINT operational_store_profile_t_pkey PRIMARY KEY (profile_id, profile_version),
+    CONSTRAINT operational_store_profile_deployment_ck CHECK (deployment_profile IN ('DEV_DEDICATED','DEV_POOLED','CUSTOMER_MANAGED')),
+    CONSTRAINT operational_store_profile_provider_ck CHECK (provider IN ('POSTGRESQL','CUSTOMER_MANAGED')),
+    CONSTRAINT operational_store_profile_config_ck CHECK (jsonb_typeof(profile_config) = 'object'),
+    CONSTRAINT operational_store_profile_version_ck CHECK (profile_version > 0 AND aggregate_version > 0),
+    CONSTRAINT operational_store_profile_dev_pooled_ck CHECK (deployment_profile <> 'DEV_POOLED' OR active = false)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS operational_store_profile_active_uk
+    ON public.operational_store_profile_t(profile_id) WHERE active;
+
+CREATE TABLE IF NOT EXISTS public.operational_store_binding_t (
+    binding_id uuid NOT NULL,
+    host_id uuid NOT NULL,
+    environment character varying(32) NOT NULL,
+    scope_kind character varying(32) DEFAULT 'HOST_ENVIRONMENT' NOT NULL,
+    scope_id uuid NOT NULL,
+    profile_id character varying(126) NOT NULL,
+    profile_version bigint NOT NULL,
+    deployment_profile character varying(32) NOT NULL,
+    lifecycle_state character varying(32) NOT NULL,
+    desired_generation bigint NOT NULL,
+    observed_generation bigint DEFAULT 0 NOT NULL,
+    expected_database character varying(63) DEFAULT 'operations' NOT NULL,
+    secret_ref character varying(512) NOT NULL,
+    binding_digest character varying(71) NOT NULL,
+    credential_generation bigint DEFAULT 1 NOT NULL,
+    retention_hold boolean DEFAULT false NOT NULL,
+    retention_reason character varying(512),
+    failure_code character varying(126),
+    provider_resource_ref character varying(512),
+    published boolean DEFAULT false NOT NULL,
+    revocation_epoch bigint DEFAULT 0 NOT NULL,
+    aggregate_version bigint DEFAULT 1 NOT NULL,
+    active boolean DEFAULT true NOT NULL,
+    update_user character varying(126) DEFAULT SESSION_USER NOT NULL,
+    update_ts timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    CONSTRAINT operational_store_binding_t_pkey PRIMARY KEY (binding_id),
+    CONSTRAINT operational_store_binding_profile_fk FOREIGN KEY (profile_id, profile_version)
+        REFERENCES public.operational_store_profile_t(profile_id, profile_version),
+    CONSTRAINT operational_store_binding_environment_ck CHECK (environment ~ '^[a-z][a-z0-9_-]{0,31}$'),
+    CONSTRAINT operational_store_binding_scope_ck CHECK (scope_kind = 'HOST_ENVIRONMENT' AND scope_id = host_id),
+    CONSTRAINT operational_store_binding_deployment_ck CHECK (deployment_profile IN ('DEV_DEDICATED','DEV_POOLED','CUSTOMER_MANAGED')),
+    CONSTRAINT operational_store_binding_state_ck CHECK (lifecycle_state IN ('REQUESTED','PROVISIONING','READY','FAILED','ROTATING','DEACTIVATION_REQUESTED','DEACTIVATED','RETENTION_HOLD','DECOMMISSION_REQUESTED','DECOMMISSIONING','DECOMMISSIONED')),
+    CONSTRAINT operational_store_binding_generation_ck CHECK (desired_generation > 0 AND observed_generation >= 0 AND observed_generation <= desired_generation AND credential_generation > 0),
+    CONSTRAINT operational_store_binding_database_ck CHECK (expected_database ~ '^[a-z][a-z0-9_]{0,62}$'),
+    CONSTRAINT operational_store_binding_secret_ck CHECK (secret_ref ~ '^operational-store/[0-9a-f-]{36}/[a-z][a-z0-9_-]{0,31}/runtime$'),
+    CONSTRAINT operational_store_binding_secret_scope_ck CHECK (
+        secret_ref = 'operational-store/' || host_id::text || '/' || environment || '/runtime'
+    ),
+    CONSTRAINT operational_store_binding_digest_ck CHECK (binding_digest ~ '^sha256:[0-9a-f]{64}$'),
+    CONSTRAINT operational_store_binding_publication_ck CHECK (NOT published OR lifecycle_state = 'READY'),
+    CONSTRAINT operational_store_binding_revocation_ck CHECK (revocation_epoch >= 0 AND aggregate_version > 0),
+    CONSTRAINT operational_store_binding_no_secret_ck CHECK (secret_ref !~* '(postgres(ql)?://|password=|pwd=)')
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS operational_store_binding_active_scope_uk
+    ON public.operational_store_binding_t(host_id, environment)
+    WHERE active AND lifecycle_state <> 'DECOMMISSIONED';
+CREATE INDEX IF NOT EXISTS operational_store_binding_state_ix
+    ON public.operational_store_binding_t(lifecycle_state, update_ts);
+
+CREATE TABLE IF NOT EXISTS public.operational_store_provisioning_job_t (
+    job_id uuid NOT NULL,
+    binding_id uuid NOT NULL,
+    desired_generation bigint NOT NULL,
+    operation_kind character varying(32) NOT NULL,
+    job_state character varying(16) DEFAULT 'PENDING' NOT NULL,
+    idempotency_key character varying(256) NOT NULL,
+    attempt_count integer DEFAULT 0 NOT NULL,
+    lease_owner character varying(126),
+    lease_expires_ts timestamp with time zone,
+    fencing_token bigint DEFAULT 0 NOT NULL,
+    next_attempt_ts timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    last_error_code character varying(126),
+    created_ts timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    update_ts timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    CONSTRAINT operational_store_provisioning_job_t_pkey PRIMARY KEY (job_id),
+    CONSTRAINT operational_store_provisioning_job_binding_fk FOREIGN KEY (binding_id)
+        REFERENCES public.operational_store_binding_t(binding_id),
+    CONSTRAINT operational_store_provisioning_job_operation_ck CHECK (operation_kind IN ('PROVISION','RETRY','ROTATE','DEACTIVATE','DECOMMISSION')),
+    CONSTRAINT operational_store_provisioning_job_state_ck CHECK (job_state IN ('PENDING','CLAIMED','COMPLETED','FAILED','CANCELLED')),
+    CONSTRAINT operational_store_provisioning_job_generation_ck CHECK (desired_generation > 0 AND attempt_count >= 0 AND fencing_token >= 0),
+    CONSTRAINT operational_store_provisioning_job_idempotency_uk UNIQUE (idempotency_key)
+);
+
+CREATE INDEX IF NOT EXISTS operational_store_provisioning_job_claim_ix
+    ON public.operational_store_provisioning_job_t(job_state, next_attempt_ts, created_ts);
+
+CREATE OR REPLACE FUNCTION public.operational_store_decommission_guard()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE enforce_hold boolean := false;
+BEGIN
+    IF NEW.operation_kind='DECOMMISSION' AND TG_OP='INSERT' THEN
+        enforce_hold := true;
+    ELSIF NEW.operation_kind='DECOMMISSION'
+          AND (OLD.operation_kind IS DISTINCT FROM NEW.operation_kind
+               OR OLD.binding_id IS DISTINCT FROM NEW.binding_id) THEN
+        enforce_hold := true;
+    END IF;
+    IF enforce_hold AND EXISTS (
+        SELECT 1 FROM public.operational_store_binding_t
+        WHERE binding_id=NEW.binding_id AND retention_hold
+    ) THEN
+        RAISE EXCEPTION 'retention hold blocks operational-store decommission';
+    END IF;
+    RETURN NEW;
+END
+$$;
+DROP TRIGGER IF EXISTS operational_store_decommission_guard_trg ON public.operational_store_provisioning_job_t;
+CREATE TRIGGER operational_store_decommission_guard_trg
+BEFORE INSERT OR UPDATE OF operation_kind, binding_id ON public.operational_store_provisioning_job_t
+FOR EACH ROW EXECUTE FUNCTION public.operational_store_decommission_guard();
+
+CREATE TABLE IF NOT EXISTS public.operational_store_publication_t (
+    binding_id uuid NOT NULL,
+    binding_version bigint NOT NULL,
+    host_id uuid NOT NULL,
+    environment character varying(32) NOT NULL,
+    publication_state character varying(16) NOT NULL,
+    content_digest character varying(71) NOT NULL,
+    projection jsonb NOT NULL,
+    revocation_epoch bigint DEFAULT 0 NOT NULL,
+    valid_from timestamp with time zone NOT NULL,
+    update_ts timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    CONSTRAINT operational_store_publication_t_pkey PRIMARY KEY (binding_id, binding_version),
+    CONSTRAINT operational_store_publication_binding_fk FOREIGN KEY (binding_id)
+        REFERENCES public.operational_store_binding_t(binding_id),
+    CONSTRAINT operational_store_publication_state_ck CHECK (publication_state IN ('ACTIVE','REVOKED')),
+    CONSTRAINT operational_store_publication_digest_ck CHECK (content_digest ~ '^sha256:[0-9a-f]{64}$'),
+    CONSTRAINT operational_store_publication_projection_ck CHECK (jsonb_typeof(projection) = 'object'),
+    CONSTRAINT operational_store_publication_version_ck CHECK (binding_version > 0 AND revocation_epoch >= 0),
+    CONSTRAINT operational_store_publication_no_secret_ck CHECK (projection::text !~* '(postgres(ql)?://|password|credential(material|value|secret|token|url))')
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS operational_store_publication_active_uk
+    ON public.operational_store_publication_t(binding_id) WHERE publication_state = 'ACTIVE';
+
+CREATE TABLE IF NOT EXISTS public.operational_store_instance_property_ownership_t (
+    host_id uuid NOT NULL,
+    instance_id uuid NOT NULL,
+    property_id uuid NOT NULL,
+    binding_id uuid NOT NULL,
+    binding_version bigint NOT NULL,
+    environment character varying(32) NOT NULL,
+    property_value text NOT NULL,
+    active boolean DEFAULT true NOT NULL,
+    update_user character varying(255) DEFAULT SESSION_USER NOT NULL,
+    update_ts timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    CONSTRAINT operational_store_instance_property_ownership_t_pkey
+        PRIMARY KEY (host_id, instance_id, property_id),
+    CONSTRAINT operational_store_instance_property_ownership_binding_fk
+        FOREIGN KEY (binding_id) REFERENCES public.operational_store_binding_t(binding_id),
+    CONSTRAINT operational_store_instance_property_ownership_version_ck
+        CHECK (binding_version > 0),
+    CONSTRAINT operational_store_instance_property_ownership_environment_ck
+        CHECK (environment ~ '^[a-z][a-z0-9_-]{0,31}$'),
+    CONSTRAINT operational_store_instance_property_ownership_no_secret_ck
+        CHECK (property_value !~* '(postgres(ql)?://|password=|pwd=)')
+);
+
+CREATE INDEX IF NOT EXISTS operational_store_instance_property_ownership_binding_ix
+    ON public.operational_store_instance_property_ownership_t(binding_id, active);
+
+CREATE OR REPLACE FUNCTION public.operational_store_publication_guard()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE binding_state varchar(32); binding_published boolean; binding_host uuid; binding_environment varchar(32);
+BEGIN
+    IF NEW.publication_state = 'ACTIVE' THEN
+        SELECT lifecycle_state,published,host_id,environment
+          INTO binding_state,binding_published,binding_host,binding_environment
+          FROM public.operational_store_binding_t WHERE binding_id=NEW.binding_id;
+        IF binding_state IS DISTINCT FROM 'READY' OR binding_published IS DISTINCT FROM true
+           OR binding_host IS DISTINCT FROM NEW.host_id OR binding_environment IS DISTINCT FROM NEW.environment THEN
+            RAISE EXCEPTION 'only an exact READY operational-store binding may publish';
+        END IF;
+    END IF;
+    RETURN NEW;
+END
+$$;
+DROP TRIGGER IF EXISTS operational_store_publication_guard_trg ON public.operational_store_publication_t;
+CREATE TRIGGER operational_store_publication_guard_trg
+BEFORE INSERT OR UPDATE ON public.operational_store_publication_t
+FOR EACH ROW EXECUTE FUNCTION public.operational_store_publication_guard();
+
+INSERT INTO public.operational_store_profile_t (
+    profile_id, profile_version, deployment_profile, provider, profile_config,
+    aggregate_version, active, update_user
+) VALUES (
+    'dev-dedicated-postgres-v1', 1, 'DEV_DEDICATED', 'POSTGRESQL',
+    '{"databaseIdentity":"operations","databasePerHostEnvironment":true,"providerAdapter":"postgres17-pgvector-container","pooled":false}'::jsonb,
+    1, true, 'phase7-bootstrap'
+) ON CONFLICT (profile_id, profile_version) DO NOTHING;
 
 \unrestrict hH5RPVy0DmoyafcyXfCcG4i9sdKgsYSKTzXXVVYP7XpvO7UaT9TIlRIkHZQaYB0
 

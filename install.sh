@@ -522,6 +522,33 @@ ensure_knowledge_runtime() {
   log "Knowledge API, administration, and worker identities and runtime secret files are ready"
 }
 
+validate_operational_store_assets() {
+  local required_file
+  local bundle_dir="postgres-db/operations/bundle"
+
+  for required_file in \
+    postgres-db/operations/bin/bootstrap-operational-store.sh \
+    postgres-db/operations/bin/prepare-operational-secret.sh \
+    postgres-db/operations/bin/reset-empty-operational-store.sh \
+    postgres-db/operations/bin/validate-operational-store.sh \
+    "$bundle_dir/manifest.json" \
+    "$bundle_dir/migration-order.tsv" \
+    "$bundle_dir/bundle.sha256"; do
+    [[ -f "$required_file" ]] || die "required operational-store asset is missing: $required_file"
+  done
+
+  (cd "$bundle_dir" && sha256sum -c bundle.sha256 >/dev/null) ||
+    die "operational-store bundle checksum verification failed"
+}
+
+prepare_operational_database_secret() {
+  local prepare_script="postgres-db/operations/bin/prepare-operational-secret.sh"
+
+  validate_operational_store_assets
+  OPERATIONAL_SECRET_DIR="postgres-db/secrets" "$prepare_script" >/dev/null
+  log "operational database URL file is ready (content redacted)"
+}
+
 validate_compose_config() {
   local required_file
 
@@ -533,6 +560,8 @@ validate_compose_config() {
     [[ -f "$required_file" ]] ||
       die "required llm-gateway config file is missing: $required_file"
   done
+
+  validate_operational_store_assets
 
   log "validating Docker Compose configuration"
   compose config --quiet || die "Docker Compose configuration validation failed"
@@ -1161,6 +1190,7 @@ apply_release_deltas() {
 bootstrap_events() {
   require_command docker
   [[ -f .env ]] || cp .env.example .env
+  prepare_operational_database_secret
   ensure_control_snapshot_signing_key
   validate_compose_config
   compose up -d postgres
