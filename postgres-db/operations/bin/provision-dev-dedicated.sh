@@ -100,7 +100,7 @@ printf '%s\n' "$admin_password" | docker exec -i \
   -e OPERATIONAL_BINDING_ID="$binding_id" -e OPERATIONAL_BINDING_DIGEST="$binding_digest" \
   -e OPERATIONAL_SCOPE_ID="$host_id" -e OPERATIONAL_HOST_ID="$host_id" \
   -e OPERATIONAL_ENVIRONMENT="$environment_name" -e OPERATIONAL_DEPLOYMENT_PROFILE=DEV_DEDICATED \
-  -e OPERATIONAL_CONTRACT_GENERATION=1 -e OPERATIONAL_BUNDLE_VERSION=1.4.0 \
+  -e OPERATIONAL_CONTRACT_GENERATION=1 -e OPERATIONAL_BUNDLE_VERSION=1.7.0 \
   "$container_name" sh -c 'IFS= read -r PGPASSWORD; export PGPASSWORD; exec /opt/operational-store/bin/bootstrap-operational-store.sh' >/dev/null
 unset admin_password
 

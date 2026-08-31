@@ -1,21 +1,22 @@
+startup.host: dev.lightapi.net
+startup.timeout: 3000
+startup.connectTimeout: 3000
+startup.bootstrapCaCertPath: /keystore/ca.pem
+startup.externalConfigDir: /app/config-cache
+light-config-server-uri: https://config-server:8435
+
 server.serviceId: com.networknt.light-a2a-1.0.0
 server.environment: dev
 server.advertisedAddress: light-a2a
 server.httpPort: 8448
 server.enableRegistry: true
 server.startOnRegistryFailure: false
-startup.envTag: dev
-configServer.enabled: true
-configServer.url: https://config-server:8435
-portalRegistry.enabled: true
-portalRegistry.controllerUrl: https://controller:8438
-runtimePolicy.audience: light-a2a
-runtimePolicy.hostId: 01964b05-552a-7c4b-9184-6857e7f3dc5f
-runtimePolicy.environment: dev
-runtimePolicy.serviceId: com.networknt.light-a2a-1.0.0
-runtimePolicy.instanceId: 55555555-5555-4555-8555-555555555503
-runtimePolicy.contentDigest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-runtimePolicy.compatibilityGeneration: 1
+
+portalRegistry.portalUrl: https://controller:8438
+portalQuery.url: https://hybrid-query:8440
+client.verifyHostname: false
+client.caCertPath: /keystore/ca.pem
+
 operationalStore.contractVersion: 1
 operationalStore.bindingId: e741fa85-8a3d-432c-b31c-c41439d23f42
 operationalStore.bindingDigest: sha256:c29d23732e9136115f928ae52172bc73322a8f8700d789ede8c6b9e264ce48c5
@@ -27,5 +28,15 @@ operationalStore.expectedDatabase: operations
 operationalStore.minimumSchemaGeneration: 1
 operationalStore.databaseUrlFile: /run/secrets/operational-database-url
 operationalStore.credentialGeneration: 1
+
+artifactStore.bindingId: e741fa85-8a3d-432c-b31c-c41439d23f42
+artifactStore.bindingDigest: sha256:c29d23732e9136115f928ae52172bc73322a8f8700d789ede8c6b9e264ce48c5
+artifactStore.minimumSchemaGeneration: 1
+artifactStore.databaseUrlFile: /run/secrets/artifact-database-url
+artifactStore.rootDirectory: /var/lib/light-a2a/artifacts
+artifactStore.scanProfileId: light-a2a-static-v1
+
 a2aPolicy.authorizationContextKeyFile: /run/secrets/a2a-authorized-context-key
-a2aPolicy.bindings: [{"agentRef":"external-account","bindingId":"55555555-5555-4555-8555-555555555510","publicationId":"55555555-5555-4555-8555-555555555511","policyDigest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","directions":["INBOUND","OUTBOUND"],"backendKind":"EXTERNAL_SIDECAR","backendBindingId":"55555555-5555-4555-8555-555555555512"}]
+
+# runtimePolicy and a2aPolicy.bindings are immutable Config Server snapshot
+# authority. Local deployment values intentionally cannot invent either.

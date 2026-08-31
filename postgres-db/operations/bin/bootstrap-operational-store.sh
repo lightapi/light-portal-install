@@ -18,7 +18,7 @@ host_id="${OPERATIONAL_HOST_ID:-}"
 environment_name="${OPERATIONAL_ENVIRONMENT:-}"
 deployment_profile="${OPERATIONAL_DEPLOYMENT_PROFILE:-DEV_DEDICATED}"
 contract_generation="${OPERATIONAL_CONTRACT_GENERATION:-1}"
-bundle_version="${OPERATIONAL_BUNDLE_VERSION:-1.4.0}"
+bundle_version="${OPERATIONAL_BUNDLE_VERSION:-1.7.0}"
 
 fail() {
   echo "operational-store-bootstrap: $*" >&2

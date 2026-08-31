@@ -20,3 +20,8 @@ ccac_jwks_url: "https://light-oauth:6881/oauth2/AZZRJE52eXu3t1hseacnGQ/keys"
 ccac_jwks_accept_invalid_certs: true
 ccac_jwt_expected_issuer: "urn:com:networknt:oauth2:v1"
 ccac_jwt_expected_audience: "urn:com.networknt"
+a2a_signing_jwks_url: "https://light-oauth:6881/oauth2/AZZRJE52eXu3t1hseacnGQ/keys"
+a2a_signing_jwks_accept_invalid_certs: true
+a2a_signing_expected_issuer: "urn:com:networknt:oauth2:v1"
+a2a_signing_expected_audience: "urn:com.networknt"
+a2a_signing_key_root: "/run/secrets/a2a-signing"

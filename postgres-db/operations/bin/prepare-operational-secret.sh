@@ -2,6 +2,9 @@
 set -euo pipefail
 
 secret_dir="${OPERATIONAL_SECRET_DIR:-postgres-db/secrets}"
+signing_key_dir="$secret_dir/a2a-signing"
+mkdir -p "$signing_key_dir"
+chmod 700 "$signing_key_dir"
 password_file="$secret_dir/.operations-agent-runtime-password"
 database_url_file="$secret_dir/operational-database-url"
 execution_password_file="$secret_dir/.operations-execution-runtime-password"
