@@ -94,7 +94,7 @@ services:
       OPERATIONAL_ENVIRONMENT: dev
       OPERATIONAL_CONTRACT_GENERATION: 1
       PORTAL_DB_NAME: configserver
-      PORTAL_DB_CONFIGSERVER_SCHEMA: public
+      PORTAL_DB_CONFIGSERVER_SCHEMA: configserver
       CONFIGSERVER_RUNTIME_ROLE: portal_local_runtime
     depends_on:
       operational-store-bootstrap:
