@@ -55,19 +55,13 @@ Production promotion still
 requires the environment-dependent Phase 2 and Phase 3 qualification evidence;
 these local/development feature flags do not waive that gate.
 
-Before starting the stack, populate any environment-specific runtime values
-listed in `light-knowledge/secrets/README.md`. On first start, the installer
-generates the shared Light Agent delegation secret, stores it with mode `0600`
-in `.env`, stores the mounted copy with group-read-only mode `0640` in
-`light-knowledge/secrets/agent-delegation-secret`, and reuses it on later
-starts. Set `LIGHT_AGENT_DELEGATION_SECRET` before starting only to provide an
-explicit secret-manager value; the installer persists that override to keep
-both consumers synchronized. The installer also records its primary group as
-`LIGHT_PORTAL_SECRET_GID`, allowing the non-root Knowledge containers to read
-only their bind-mounted secrets without making those files world-readable. The
-three database URLs must use login
-identities that inherit the API, worker, and Portal-projector roles extended by
-the Phase 2 schema. SharePoint and
+The installer supplies fixed local/demo database identities, delegation values,
+signing keys, and service tokens directly through Compose. Users do not need to
+generate, download, or permission any runtime secret files. Only API keys for
+the selected LLM providers belong in `.env`; the stack starts without them and
+reports an unavailable provider only when that provider is invoked. The three
+Knowledge database identities inherit the API, worker, and Portal-projector
+roles extended by the Phase 2 schema. SharePoint and
 Confluence workers use a source-scoped `enterpriseConnectorPageUrl`, an
 external bearer secret, and the provider `enterpriseConnectorApprovedOrigin`.
 Notifications enqueue independent priority ACL and bulk content reconciliation;
@@ -362,22 +356,20 @@ validates either snapshot transaction without committing it.
 
 ## Operational Database Through Phase 6
 
-The installer now provisions an additive `operations` database alongside
-`configserver` and `knowledge`. Before Compose validation it checks every
-operational bundle digest and creates an ignored, owner-readable
-`postgres-db/secrets/operational-database-url`. The one-shot bootstrap works for
-fresh and retained PostgreSQL volumes, and the separate readiness job validates
-the exact Host/environment binding before Controller and Agent startup.
+The installer provisions an additive `operations` database alongside
+`configserver` and `knowledge`. The local database URLs are fixed evaluation
+configuration in Compose. Each non-root runtime writes its required private
+compatibility file inside its own container before starting, so no host secret
+directory, ownership adjustment, or secret-init container is required. The
+one-shot bootstrap works for fresh and retained PostgreSQL volumes, and the
+separate readiness job validates the exact Host/environment binding before
+Controller and Agent startup.
 
-`light-agent` no longer receives a Config Server `DATABASE_URL`. It validates
-the non-secret binding from its Config Server projection, reads the deployment
-credential from the mounted `0400` file, and writes Agent and embedded-memory
-state to `operations.agent_ops`. No application rows are copied. A direct
-`docker compose up` must first run:
+`light-agent` validates the non-secret binding from its Config Server projection
+and writes Agent and embedded-memory state to `operations.agent_ops`. No
+application rows are copied. Direct Compose startup needs no preparation:
 
 ```bash
-OPERATIONAL_SECRET_DIR=postgres-db/secrets \
-  postgres-db/operations/bin/prepare-operational-secret.sh
 docker compose up -d
 ```
 

@@ -1,12 +1,8 @@
-# Operational Database Secrets
+# Optional Local Key Material
 
-`prepare-operational-secret.sh` creates separate development Agent, execution,
-Workflow, A2A, Gateway, audit-publisher, and artifact-runtime credentials plus
-their database URL files and the private `a2a-authorized-context-key` here with
-owner-only permissions. The Compose stack mounts the URLs under `/run/secrets`;
-their content must not be committed, printed, or stored in Config Server
-values.
+The evaluation installer does not generate or mount operational database URL
+files. Fixed local URLs are defined in `docker-compose.yml`; non-root services
+materialize private compatibility files inside their own containers.
 
-Place Portal-managed A2A Agent Card private keys in `a2a-signing/` as
-`<managedKeyAlias>.pem`. Portal stores only `managed:<alias>`; files must be
-regular, non-symlink files with owner-only permissions.
+The `a2a-signing/` subdirectory remains available only for optional manual A2A
+signing-key experiments. It is not required for normal installation or startup.

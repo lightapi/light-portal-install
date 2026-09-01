@@ -4,13 +4,6 @@ set -euo pipefail
 database_name="${PORTAL_DB_OPERATIONAL_NAME:-operations}"
 database_user="${POSTGRES_USER:-postgres}"
 bundle_root="${OPERATIONAL_BUNDLE_ROOT:-/opt/operational-store/bundle}"
-secret_file="${OPERATIONAL_DATABASE_URL_FILE:-/run/secrets/operational-database-url}"
-execution_secret_file="${EXECUTION_DATABASE_URL_FILE:-/run/secrets/execution-database-url}"
-workflow_secret_file="${WORKFLOW_DATABASE_URL_FILE:-/run/secrets/workflow-database-url}"
-a2a_secret_file="${A2A_DATABASE_URL_FILE:-/run/secrets/a2a-database-url}"
-gateway_secret_file="${GATEWAY_DATABASE_URL_FILE:-/run/secrets/gateway-database-url}"
-audit_secret_file="${AUDIT_DATABASE_URL_FILE:-/run/secrets/audit-database-url}"
-artifact_secret_file="${ARTIFACT_DATABASE_URL_FILE:-/run/secrets/artifact-database-url}"
 binding_id="${OPERATIONAL_BINDING_ID:-}"
 binding_digest="${OPERATIONAL_BINDING_DIGEST:-}"
 scope_id="${OPERATIONAL_SCOPE_ID:-}"
@@ -25,6 +18,19 @@ fail() {
   exit 1
 }
 
+read_private_url_file() {
+  local path="$1"
+  local label="$2"
+  local mode
+  local mode_value
+
+  [[ -f "$path" && ! -L "$path" ]] || fail "$label file is missing or unsafe"
+  mode="$(stat -c '%a' "$path")"
+  mode_value=$((8#$mode))
+  (( (mode_value & 0037) == 0 )) || fail "$label file permissions are too broad"
+  cat "$path"
+}
+
 [[ "$database_name" == "operations" ]] || fail "database identity must be operations"
 [[ "$binding_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || fail "invalid binding ID"
 [[ "$scope_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || fail "invalid scope ID"
@@ -34,18 +40,10 @@ fail() {
 [[ "$deployment_profile" == "DEV_DEDICATED" ]] || fail "unsupported deployment profile"
 [[ "$contract_generation" =~ ^[1-9][0-9]*$ ]] || fail "invalid contract generation"
 [[ "$bundle_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "invalid bundle version"
-[[ -f "$secret_file" && ! -L "$secret_file" ]] || fail "operational database URL file is missing or unsafe"
-[[ -f "$execution_secret_file" && ! -L "$execution_secret_file" ]] || fail "execution database URL file is missing or unsafe"
-[[ -f "$workflow_secret_file" && ! -L "$workflow_secret_file" ]] || fail "Workflow database URL file is missing or unsafe"
-[[ -f "$a2a_secret_file" && ! -L "$a2a_secret_file" ]] || fail "A2A database URL file is missing or unsafe"
-[[ -f "$gateway_secret_file" && ! -L "$gateway_secret_file" ]] || fail "Gateway database URL file is missing or unsafe"
-[[ -f "$audit_secret_file" && ! -L "$audit_secret_file" ]] || fail "audit database URL file is missing or unsafe"
-[[ -f "$artifact_secret_file" && ! -L "$artifact_secret_file" ]] || fail "artifact database URL file is missing or unsafe"
-
-secret_mode="$(stat -c '%a' "$secret_file")"
-secret_mode_value=$((8#$secret_mode))
-(( (secret_mode_value & 0037) == 0 )) || fail "operational database URL file permissions are too broad"
-database_url="$(<"$secret_file")"
+database_url="${OPERATIONAL_DATABASE_URL:-}"
+if [[ -z "$database_url" ]]; then
+  database_url="$(read_private_url_file "${OPERATIONAL_DATABASE_URL_FILE:-/run/secrets/operational-database-url}" "operational database URL")"
+fi
 if [[ "$database_url" =~ ^postgres://operations_agent_runtime:([0-9a-f]{64})@([a-zA-Z0-9._-]+):([0-9]{1,5})/operations$ ]]; then
   runtime_password="${BASH_REMATCH[1]}"
   secret_host="${BASH_REMATCH[2]}"
@@ -55,10 +53,10 @@ fi
 [[ "$secret_host" == "${PGHOST:-postgres}" ]] || fail "operational database URL host does not match bootstrap target"
 unset database_url
 
-execution_secret_mode="$(stat -c '%a' "$execution_secret_file")"
-execution_secret_mode_value=$((8#$execution_secret_mode))
-(( (execution_secret_mode_value & 0037) == 0 )) || fail "execution database URL file permissions are too broad"
-execution_database_url="$(<"$execution_secret_file")"
+execution_database_url="${EXECUTION_DATABASE_URL:-}"
+if [[ -z "$execution_database_url" ]]; then
+  execution_database_url="$(read_private_url_file "${EXECUTION_DATABASE_URL_FILE:-/run/secrets/execution-database-url}" "execution database URL")"
+fi
 if [[ "$execution_database_url" =~ ^postgres://operations_execution_runtime:([0-9a-f]{64})@([a-zA-Z0-9._-]+):([0-9]{1,5})/operations$ ]]; then
   execution_runtime_password="${BASH_REMATCH[1]}"
   execution_secret_host="${BASH_REMATCH[2]}"
@@ -68,10 +66,10 @@ fi
 [[ "$execution_secret_host" == "${PGHOST:-postgres}" ]] || fail "execution database URL host does not match bootstrap target"
 unset execution_database_url
 
-workflow_secret_mode="$(stat -c '%a' "$workflow_secret_file")"
-workflow_secret_mode_value=$((8#$workflow_secret_mode))
-(( (workflow_secret_mode_value & 0037) == 0 )) || fail "Workflow database URL file permissions are too broad"
-workflow_database_url="$(<"$workflow_secret_file")"
+workflow_database_url="${WORKFLOW_DATABASE_URL:-}"
+if [[ -z "$workflow_database_url" ]]; then
+  workflow_database_url="$(read_private_url_file "${WORKFLOW_DATABASE_URL_FILE:-/run/secrets/workflow-database-url}" "Workflow database URL")"
+fi
 if [[ "$workflow_database_url" =~ ^postgres://operations_workflow_runtime:([0-9a-f]{64})@([a-zA-Z0-9._-]+):([0-9]{1,5})/operations$ ]]; then
   workflow_runtime_password="${BASH_REMATCH[1]}"
   workflow_secret_host="${BASH_REMATCH[2]}"
@@ -81,10 +79,10 @@ fi
 [[ "$workflow_secret_host" == "${PGHOST:-postgres}" ]] || fail "Workflow database URL host does not match bootstrap target"
 unset workflow_database_url
 
-a2a_secret_mode="$(stat -c '%a' "$a2a_secret_file")"
-a2a_secret_mode_value=$((8#$a2a_secret_mode))
-(( (a2a_secret_mode_value & 0037) == 0 )) || fail "A2A database URL file permissions are too broad"
-a2a_database_url="$(<"$a2a_secret_file")"
+a2a_database_url="${A2A_DATABASE_URL:-}"
+if [[ -z "$a2a_database_url" ]]; then
+  a2a_database_url="$(read_private_url_file "${A2A_DATABASE_URL_FILE:-/run/secrets/a2a-database-url}" "A2A database URL")"
+fi
 if [[ "$a2a_database_url" =~ ^postgres://operations_a2a_runtime:([0-9a-f]{64})@([a-zA-Z0-9._-]+):([0-9]{1,5})/operations$ ]]; then
   a2a_runtime_password="${BASH_REMATCH[1]}"
   a2a_secret_host="${BASH_REMATCH[2]}"
@@ -94,10 +92,10 @@ fi
 [[ "$a2a_secret_host" == "${PGHOST:-postgres}" ]] || fail "A2A database URL host does not match bootstrap target"
 unset a2a_database_url
 
-gateway_secret_mode="$(stat -c '%a' "$gateway_secret_file")"
-gateway_secret_mode_value=$((8#$gateway_secret_mode))
-(( (gateway_secret_mode_value & 0037) == 0 )) || fail "Gateway database URL file permissions are too broad"
-gateway_database_url="$(<"$gateway_secret_file")"
+gateway_database_url="${GATEWAY_DATABASE_URL:-}"
+if [[ -z "$gateway_database_url" ]]; then
+  gateway_database_url="$(read_private_url_file "${GATEWAY_DATABASE_URL_FILE:-/run/secrets/gateway-database-url}" "Gateway database URL")"
+fi
 if [[ "$gateway_database_url" =~ ^postgres://operations_gateway_runtime:([0-9a-f]{64})@([a-zA-Z0-9._-]+):([0-9]{1,5})/operations$ ]]; then
   gateway_runtime_password="${BASH_REMATCH[1]}"
   gateway_secret_host="${BASH_REMATCH[2]}"
@@ -107,10 +105,10 @@ fi
 [[ "$gateway_secret_host" == "${PGHOST:-postgres}" ]] || fail "Gateway database URL host does not match bootstrap target"
 unset gateway_database_url
 
-audit_secret_mode="$(stat -c '%a' "$audit_secret_file")"
-audit_secret_mode_value=$((8#$audit_secret_mode))
-(( (audit_secret_mode_value & 0037) == 0 )) || fail "audit database URL file permissions are too broad"
-audit_database_url="$(<"$audit_secret_file")"
+audit_database_url="${AUDIT_DATABASE_URL:-}"
+if [[ -z "$audit_database_url" ]]; then
+  audit_database_url="$(read_private_url_file "${AUDIT_DATABASE_URL_FILE:-/run/secrets/audit-database-url}" "audit database URL")"
+fi
 if [[ "$audit_database_url" =~ ^postgres://operations_audit_publisher:([0-9a-f]{64})@([a-zA-Z0-9._-]+):([0-9]{1,5})/operations$ ]]; then
   audit_publisher_password="${BASH_REMATCH[1]}"
   audit_secret_host="${BASH_REMATCH[2]}"
@@ -120,10 +118,10 @@ fi
 [[ "$audit_secret_host" == "${PGHOST:-postgres}" ]] || fail "audit database URL host does not match bootstrap target"
 unset audit_database_url
 
-artifact_secret_mode="$(stat -c '%a' "$artifact_secret_file")"
-artifact_secret_mode_value=$((8#$artifact_secret_mode))
-(( (artifact_secret_mode_value & 0037) == 0 )) || fail "artifact database URL file permissions are too broad"
-artifact_database_url="$(<"$artifact_secret_file")"
+artifact_database_url="${ARTIFACT_DATABASE_URL:-}"
+if [[ -z "$artifact_database_url" ]]; then
+  artifact_database_url="$(read_private_url_file "${ARTIFACT_DATABASE_URL_FILE:-/run/secrets/artifact-database-url}" "artifact database URL")"
+fi
 if [[ "$artifact_database_url" =~ ^postgres://operations_artifact_runtime:([0-9a-f]{64})@([a-zA-Z0-9._-]+):([0-9]{1,5})/operations$ ]]; then
   artifact_runtime_password="${BASH_REMATCH[1]}"
   artifact_secret_host="${BASH_REMATCH[2]}"

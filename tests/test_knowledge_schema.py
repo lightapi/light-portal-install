@@ -169,24 +169,12 @@ class KnowledgeSchemaTest(unittest.TestCase):
         )
         self.assertNotIn('psql_exec < "$source_sql"', helper)
 
-    def test_snapshot_signing_key_exists_before_bootstrap_containers(self):
+    def test_snapshot_signing_key_uses_checked_in_local_compose_value(self):
         install = (ROOT / "install.sh").read_text(encoding="utf-8")
-        helper = install[
-            install.index("ensure_control_snapshot_signing_key() {") :
-            install.index("ensure_knowledge_database() {")
-        ]
-        self.assertIn("rmdir", helper)
-        self.assertIn("write_secret_once", helper)
-
-        bootstrap = install[
-            install.index("bootstrap_events() {") :
-            install.index('case "$command_name" in')
-        ]
-        signing_key = bootstrap.index("ensure_control_snapshot_signing_key")
-        postgres = bootstrap.index("compose up -d postgres")
-        processors = bootstrap.index("start_event_processors")
-        self.assertLess(signing_key, postgres)
-        self.assertLess(signing_key, processors)
+        compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        self.assertNotIn("ensure_control_snapshot_signing_key", install)
+        self.assertIn("LIGHT_KNOWLEDGE_CONTROL_SNAPSHOT_SIGNING_KEY:", compose)
+        self.assertNotIn("control-snapshot-signing-key:/run/secrets", compose)
 
         start_processors = install[
             install.index("start_event_processors() {") :
@@ -197,48 +185,37 @@ class KnowledgeSchemaTest(unittest.TestCase):
             start_processors,
         )
 
-    def test_agent_delegation_secret_is_generated_persisted_and_reused(self):
+    def test_agent_delegation_uses_fixed_local_compose_value(self):
         install = (ROOT / "install.sh").read_text(encoding="utf-8")
-        helper = install[
-            install.index("ensure_agent_delegation_secret() {") :
-            install.index("ensure_control_snapshot_signing_key() {")
-        ]
-        self.assertIn("env_value LIGHT_AGENT_DELEGATION_SECRET", helper)
-        self.assertIn('-s "$secret_file"', helper)
-        self.assertIn("openssl rand -hex 48", helper)
-        self.assertIn(
-            "persist_env_value LIGHT_AGENT_DELEGATION_SECRET", helper
-        )
-        self.assertIn(
-            'export LIGHT_AGENT_DELEGATION_SECRET="$delegation_secret"', helper
-        )
-
-        knowledge_runtime = install[
-            install.index("ensure_knowledge_runtime() {") :
-            install.index("validate_compose_config() {")
-        ]
-        self.assertIn("ensure_agent_delegation_secret", knowledge_runtime)
-        self.assertNotIn(
-            "Knowledge services require LIGHT_AGENT_DELEGATION_SECRET",
-            knowledge_runtime,
-        )
-
-    def test_non_root_knowledge_services_receive_secret_reader_group(self):
-        install = (ROOT / "install.sh").read_text(encoding="utf-8")
-        helper = install[
-            install.index("prepare_knowledge_secret_access() {") :
-            install.index("ensure_control_snapshot_signing_key() {")
-        ]
-        self.assertIn('secret_gid="$(id -g)"', helper)
-        self.assertIn('chmod 640 "$secret_dir/$secret_file"', helper)
-        self.assertIn("light-knowledge/objects light-knowledge/checkouts", helper)
-        self.assertIn('chmod 2770 "$runtime_dir"', helper)
-        self.assertIn("persist_env_value LIGHT_PORTAL_SECRET_GID", helper)
-
         compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
-        self.assertEqual(
-            3, compose.count('- "${LIGHT_PORTAL_SECRET_GID:-1000}"')
+        self.assertNotIn("ensure_agent_delegation_secret", install)
+        self.assertIn(
+            "LIGHT_AGENT_DELEGATION_SECRET: light-portal-install-local-delegation-key",
+            compose,
         )
+
+    def test_knowledge_services_use_local_compose_configuration(self):
+        install = (ROOT / "install.sh").read_text(encoding="utf-8")
+        compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        self.assertNotIn("prepare_knowledge_secret_access", install)
+        self.assertNotIn("LIGHT_PORTAL_SECRET_GID", compose)
+        self.assertNotIn("./light-knowledge/secrets", compose)
+        self.assertIn("LIGHT_KNOWLEDGE_DATABASE_URL:", compose)
+        self.assertIn("LIGHT_KNOWLEDGE_WORKER_DATABASE_URL:", compose)
+
+    def test_operational_runtime_uses_compose_values_not_host_secret_mounts(self):
+        install = (ROOT / "install.sh").read_text(encoding="utf-8")
+        compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        bootstrap = (
+            ROOT / "postgres-db/operations/bin/bootstrap-operational-store.sh"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn("prepare_operational_database_secret", install)
+        self.assertNotIn("./postgres-db/secrets/operational-database-url", compose)
+        self.assertIn("OPERATIONAL_DATABASE_URL:", compose)
+        self.assertIn("GATEWAY_DATABASE_URL:", compose)
+        self.assertIn("gatewayEvidence.databaseUrlFile: /tmp/gateway-database-url", compose)
+        self.assertIn('database_url="${OPERATIONAL_DATABASE_URL:-}"', bootstrap)
 
     def test_shared_bind_mounts_use_shared_selinux_labels(self):
         compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
@@ -248,7 +225,6 @@ class KnowledgeSchemaTest(unittest.TestCase):
             "./postgres-db/validate-environment.sh",
             "./postgres-db/knowledge",
             "./light-controller-rust/ca.pem",
-            "./light-knowledge/secrets",
             "./light-knowledge/objects",
             "./light-knowledge/checkouts",
             "./light-gateway-rust/config",
@@ -260,18 +236,6 @@ class KnowledgeSchemaTest(unittest.TestCase):
                         line.endswith(":z") or line.endswith(",z"),
                         f"shared bind mount must use an SELinux shared label: {line}",
                     )
-
-        signing_mounts = [
-            line
-            for line in compose.splitlines()
-            if line.strip().startswith(
-                "- ./light-knowledge/secrets/control-snapshot-signing-key:"
-            )
-        ]
-        self.assertEqual(2, len(signing_mounts))
-        self.assertTrue(
-            all(line.endswith(":z") or line.endswith(",z") for line in signing_mounts)
-        )
 
     def test_light_knowledge_uses_a_non_root_writable_working_directory(self):
         compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")

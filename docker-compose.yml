@@ -50,14 +50,6 @@ services:
     volumes:
       - ./postgres-db/operations/bin:/opt/operational-store/bin:ro,z
       - ./postgres-db/operations/bundle:/opt/operational-store/bundle:ro,z
-      - ./postgres-db/secrets/operational-database-url:/run/secrets/operational-database-url:ro,z
-      - ./postgres-db/secrets/a2a-authorized-context-key:/run/secrets/a2a-authorized-context-key:ro,z
-      - ./postgres-db/secrets/execution-database-url:/run/secrets/execution-database-url:ro,z
-      - ./postgres-db/secrets/workflow-database-url:/run/secrets/workflow-database-url:ro,z
-      - ./postgres-db/secrets/a2a-database-url:/run/secrets/a2a-database-url:ro,z
-      - ./postgres-db/secrets/gateway-database-url:/run/secrets/gateway-database-url:ro,z
-      - ./postgres-db/secrets/audit-database-url:/run/secrets/audit-database-url:ro,z
-      - ./postgres-db/secrets/artifact-database-url:/run/secrets/artifact-database-url:ro,z
     environment:
       PGHOST: postgres
       POSTGRES_USER: postgres
@@ -71,6 +63,13 @@ services:
       OPERATIONAL_DEPLOYMENT_PROFILE: DEV_DEDICATED
       OPERATIONAL_CONTRACT_GENERATION: 1
       OPERATIONAL_BUNDLE_VERSION: 1.9.0
+      OPERATIONAL_DATABASE_URL: postgres://operations_agent_runtime:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef@postgres:5432/operations
+      EXECUTION_DATABASE_URL: postgres://operations_execution_runtime:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef@postgres:5432/operations
+      WORKFLOW_DATABASE_URL: postgres://operations_workflow_runtime:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef@postgres:5432/operations
+      A2A_DATABASE_URL: postgres://operations_a2a_runtime:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef@postgres:5432/operations
+      GATEWAY_DATABASE_URL: postgres://operations_gateway_runtime:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef@postgres:5432/operations
+      AUDIT_DATABASE_URL: postgres://operations_audit_publisher:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef@postgres:5432/operations
+      ARTIFACT_DATABASE_URL: postgres://operations_artifact_runtime:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef@postgres:5432/operations
     depends_on:
       postgres:
         condition: service_healthy
@@ -104,9 +103,9 @@ services:
   hybrid-command:
     image: ${PORTAL_HYBRID_COMMAND_IMAGE:-networknt/portal-hybrid-command:latest}
     environment:
-      NOREPLAY_EMAIL_PASSWORD: ${NOREPLAY_EMAIL_PASSWORD:-}
-      INSTANCE_CLONE_PLAN_HMAC_KEY: ${INSTANCE_CLONE_PLAN_HMAC_KEY:-light-portal-development-only-instance-clone-hmac-key-v1}
-      INSTANCE_CLONE_PLAN_HMAC_KEY_ID: ${INSTANCE_CLONE_PLAN_HMAC_KEY_ID:-v1}
+      NOREPLAY_EMAIL_PASSWORD: ""
+      INSTANCE_CLONE_PLAN_HMAC_KEY: light-portal-development-only-instance-clone-hmac-key-v1
+      INSTANCE_CLONE_PLAN_HMAC_KEY_ID: v1
       WORKFLOW_TOOL_ACCESS_APPROVAL_WF_DEF_ID: 01a012f0-3ccb-792c-9aba-752269ec0b29
       WORKFLOW_TOOL_ACCESS_APPROVAL_VERSION: 1.0.0
       WORKFLOW_TOOL_ACCESS_APPROVAL_DIGEST: sha256:29167fa1e53a00187685c8d459016fefbf69567dd974fc3a90d0d619ca3a887a
@@ -134,12 +133,12 @@ services:
       - ./hybrid-query/node1:/config:Z
       - ./hybrid-query/service:/service:Z
       - ${PORTAL_DATA_DIR:-./data}:/data:z
-      - ./light-knowledge/secrets/control-snapshot-signing-key:/run/secrets/light-knowledge/control-snapshot-signing-key:ro,z
     ports:
       - "8440:8440"
     environment:
-      INSTANCE_CLONE_PLAN_HMAC_KEY: ${INSTANCE_CLONE_PLAN_HMAC_KEY:-light-portal-development-only-instance-clone-hmac-key-v1}
-      INSTANCE_CLONE_PLAN_HMAC_KEY_ID: ${INSTANCE_CLONE_PLAN_HMAC_KEY_ID:-v1}
+      INSTANCE_CLONE_PLAN_HMAC_KEY: light-portal-development-only-instance-clone-hmac-key-v1
+      INSTANCE_CLONE_PLAN_HMAC_KEY_ID: v1
+      LIGHT_KNOWLEDGE_CONTROL_SNAPSHOT_SIGNING_KEY: light-portal-install-local-control-snapshot-signing-key
       embedding-task.enabled: ${EMBEDDING_TASK_ENABLED:-false}
       embedding-task.provider: ${EMBEDDING_TASK_PROVIDER:-disabled}
       embedding-task.endpoint: ${EMBEDDING_TASK_ENDPOINT:-https://generativelanguage.googleapis.com/v1beta/openai/embeddings}
@@ -160,9 +159,14 @@ services:
 
   controller:
     image: ${CONTROLLER_RS_IMAGE:-networknt/controller-rs:latest}
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        umask 077
+        printf '%s' "$$CONTROLLER_EXECUTION_DATABASE_URL" > /tmp/execution-database-url
+        exec /app/controller-rs
     volumes:
       - ./light-controller-rust:/keystore:ro,z
-      - ./postgres-db/secrets/execution-database-url:/run/secrets/execution-database-url:ro,z
     environment:
       CONTROLLER_ADDR: 0.0.0.0:8438
       CONTROLLER_HOST_ID: 01964b05-552a-7c4b-9184-6857e7f3dc5f
@@ -172,7 +176,8 @@ services:
       CONTROLLER_TLS_TRUST_CERT_PATH: /keystore/server.pem
       DATABASE_URL: postgres://portal_local_runtime:secret@postgres:5432/configserver
       DATABASE_MAXIMUM_POOL_SIZE: 3
-      CONTROLLER_EXECUTION_DATABASE_URL_FILE: /run/secrets/execution-database-url
+      CONTROLLER_EXECUTION_DATABASE_URL: postgres://operations_execution_runtime:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef@postgres:5432/operations
+      CONTROLLER_EXECUTION_DATABASE_URL_FILE: /tmp/execution-database-url
       CONTROLLER_EXECUTION_DATABASE_MAXIMUM_POOL_SIZE: 5
       CONTROLLER_EXECUTION_BINDING_ID: e741fa85-8a3d-432c-b31c-c41439d23f42
       CONTROLLER_EXECUTION_BINDING_DIGEST: sha256:c29d23732e9136115f928ae52172bc73322a8f8700d789ede8c6b9e264ce48c5
@@ -283,6 +288,13 @@ services:
 
   light-workflow:
     image: ${LIGHT_WORKFLOW_IMAGE:-networknt/light-workflow:latest}
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        umask 077
+        printf '%s' "$$LIGHT_WORKFLOW_DATABASE_URL" > /tmp/operational-database-url
+        printf '%s' "$$LIGHT_A2A_AUTHORIZED_CONTEXT_KEY" > /tmp/a2a-authorized-context-key
+        exec /app/light-workflow
     ports:
       - "8436:8436"
     env_file:
@@ -290,11 +302,11 @@ services:
     volumes:
       - ./light-gateway-rust/config/ca.pem:/config/ca.pem:ro,z
       - ./light-workflow-rust/config/startup.yml:/config/startup.yml:ro,z
-      - ./postgres-db/secrets/workflow-database-url:/run/secrets/operational-database-url:ro,z
-      - ./postgres-db/secrets/a2a-authorized-context-key:/run/secrets/a2a-authorized-context-key:ro,z
       - light-workflow-config-cache:/app/config-cache
     environment:
-      workflow.a2a.authorizationContextKeyFile: /run/secrets/a2a-authorized-context-key
+      LIGHT_WORKFLOW_DATABASE_URL: postgres://operations_workflow_runtime:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef@postgres:5432/operations
+      LIGHT_A2A_AUTHORIZED_CONTEXT_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      workflow.a2a.authorizationContextKeyFile: /tmp/a2a-authorized-context-key
       WORKFLOW_IGNORE_USER_JWT_EXPIRY: "true"
       server.enableRegistry: "true"
       server.startOnRegistryFailure: "false"
@@ -309,7 +321,7 @@ services:
       operationalStore.serviceOwner: light-workflow
       operationalStore.schema: workflow_ops
       operationalStore.expectedDatabase: operations
-      operationalStore.databaseUrlFile: /run/secrets/operational-database-url
+      operationalStore.databaseUrlFile: /tmp/operational-database-url
       operationalStore.credentialGeneration: "1"
     hostname: light-workflow
     container_name: light-workflow
@@ -422,17 +434,23 @@ services:
 
   light-gateway:
     image: ${LIGHT_GATEWAY_IMAGE:-networknt/light-gateway:latest}
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        umask 077
+        printf '%s' "$$LIGHT_GATEWAY_EVIDENCE_DATABASE_URL" > /tmp/gateway-database-url
+        exec /app/light-gateway
     ports:
       - "${LIGHT_GATEWAY_HOST_PORT:-443}:8443"
     volumes:
       - ./light-gateway-rust/config:/config:z
       - ./light-gateway-rust/lightapi/dist:/lightapi/dist:Z
       - ./light-gateway-rust/signin/dist:/signin/dist:Z
-      - ./postgres-db/secrets/gateway-database-url:/run/secrets/gateway-database-url:ro,z
     environment:
       LIGHT_RS_CONFIG_DIR: /config
+      LIGHT_GATEWAY_EVIDENCE_DATABASE_URL: postgres://operations_gateway_runtime:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef@postgres:5432/operations
       gatewayEvidence.enabled: "true"
-      gatewayEvidence.databaseUrlFile: /run/secrets/gateway-database-url
+      gatewayEvidence.databaseUrlFile: /tmp/gateway-database-url
       gatewayEvidence.bindingId: e741fa85-8a3d-432c-b31c-c41439d23f42
       gatewayEvidence.bindingDigest: sha256:c29d23732e9136115f928ae52172bc73322a8f8700d789ede8c6b9e264ce48c5
       gatewayEvidence.hostId: 01964b05-552a-7c4b-9184-6857e7f3dc5f
@@ -443,10 +461,10 @@ services:
       # ACCESS_CONTROL_ENABLED: "false"
       CLIENT_VERIFYHOSTNAME: "false"
       CLIENT_CACERTPATH: /config/ca.pem
-      STATELESSAUTH_BOOTSTRAPTOKEN: ${STATELESSAUTH_BOOTSTRAPTOKEN:-}
-      STATELESSAUTH_GITHUBCLIENTSECRET: ${STATELESSAUTH_GITHUBCLIENTSECRET:-}
-      STATELESSAUTH_GOOGLECLIENTSECRET: ${STATELESSAUTH_GOOGLECLIENTSECRET:-}
-      STATELESSAUTH_FACEBOOKCLIENTSECRET: ${STATELESSAUTH_FACEBOOKCLIENTSECRET:-}
+      STATELESSAUTH_BOOTSTRAPTOKEN: ""
+      STATELESSAUTH_GITHUBCLIENTSECRET: ""
+      STATELESSAUTH_GOOGLECLIENTSECRET: ""
+      STATELESSAUTH_FACEBOOKCLIENTSECRET: ""
       GROQ_API_KEY: "${GROQ_API_KEY:-}"
       GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
       LIGHT_PORTAL_AUTHORIZATION: "${LIGHT_GATEWAY_LIGHT_PORTAL_AUTHORIZATION:-Bearer eyJhbGciOiJSUzI1NiIsImtpZCI6IkFacDAyTUN1Y3J1WmZGSmJ5eUZ3dWcifQ.eyJpc3MiOiJ1cm46Y29tOm5ldHdvcmtudDpvYXV0aDI6djEiLCJhdWQiOiJ1cm46Y29tLm5ldHdvcmtudCIsInN1YiI6IjAxOWY2NTgyLWVjMTQtNzM2Mi04ZTlkLTRlYWZkMWU1NzQzNyIsImV4cCI6MjA5OTQ3NDU3NywianRpIjoiTU5SYi0yV1VRRi1oNjFnRy1faU93ZyIsImlhdCI6MTc4NDExNDU3NywibmJmIjoxNzg0MTE0NDU3LCJ2ZXIiOiIxLjAiLCJjaWQiOiIwMTlmNjU4Mi1lYzE0LTczNjItOGU5ZC00ZWFmZDFlNTc0MzciLCJzY3AiOlsicG9ydGFsLnIiLCJwb3J0YWwudyJdLCJjbGllbnRfaWQiOiIwMTlmNjU4Mi1lYzE0LTczNjItOGU5ZC00ZWFmZDFlNTc0MzciLCJzY29wZSI6InBvcnRhbC5yIHBvcnRhbC53IiwiZW52IjoiZGVtbyIsImhvc3QiOiIwMTk2NGIwNS01NTJhLTdjNGItOTE4NC02ODU3ZTdmM2RjNWYiLCJzaWQiOiJjb20ubmV0d29ya250LnBvcnRhbC5nYXRld2F5LTEuMC4wIn0.jKXMXDSQIQf-k2TcOPDMgRU7xp9AT2w42U2v2O1HbyBQIpspA_E8TzjaEfdowYsSJpmKdWLFPSLhsBr79tkkkCiiqaaIS5Wi8xy03fdIof9LcIjhNQm2m3UUzXS5F3GgNnPMvlPFZ4Q2l_3TsWDD8Zv7JXdSZS2M7rHVJZZ2XtkzasfTH2Ki2suG2JVysDjGvwrkdjE6YZcRHd_lp-3p3uoyRFZjoeMoFg1KibVXBhu1UZj3U-CFzkwu9XuuCGWvyCMuJ1abCAgVB0EsO_TLXgZ17-vN8cdnDpVmhL59RWnBl5PHza4fLUJEm84PZt8jxn6m6kHZCbvwCkFh7QHsMA}"
@@ -498,17 +516,28 @@ services:
   light-a2a:
     profiles: ["a2a"]
     image: ${LIGHT_A2A_IMAGE:-networknt/light-a2a:latest}
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        umask 077
+        printf '%s' "$$LIGHT_A2A_DATABASE_URL" > /tmp/operational-database-url
+        printf '%s' "$$LIGHT_A2A_ARTIFACT_DATABASE_URL" > /tmp/artifact-database-url
+        printf '%s' "$$LIGHT_A2A_AUTHORIZED_CONTEXT_KEY" > /tmp/a2a-authorized-context-key
+        exec /app/light-a2a
     ports:
       - "${LIGHT_A2A_PORT:-8448}:8448"
     volumes:
       - ./light-a2a-rust/config:/config:ro,Z
       - ./light-controller-rust/ca.pem:/keystore/ca.pem:ro,z
-      - ./postgres-db/secrets/a2a-database-url:/run/secrets/operational-database-url:ro,z
-      - ./postgres-db/secrets/artifact-database-url:/run/secrets/artifact-database-url:ro,z
-      - ./postgres-db/secrets/a2a-authorized-context-key:/run/secrets/a2a-authorized-context-key:ro,z
       - a2a-artifacts:/var/lib/light-a2a/artifacts
     environment:
       LIGHT_RS_CONFIG_DIR: /config
+      LIGHT_A2A_DATABASE_URL: postgres://operations_a2a_runtime:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef@postgres:5432/operations
+      LIGHT_A2A_ARTIFACT_DATABASE_URL: postgres://operations_artifact_runtime:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef@postgres:5432/operations
+      LIGHT_A2A_AUTHORIZED_CONTEXT_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      operationalStore.databaseUrlFile: /tmp/operational-database-url
+      artifactStore.databaseUrlFile: /tmp/artifact-database-url
+      a2aPolicy.authorizationContextKeyFile: /tmp/a2a-authorized-context-key
       LIGHT_PORTAL_AUTHORIZATION: "${LIGHT_A2A_LIGHT_PORTAL_AUTHORIZATION:-}"
       LIGHT_ENV_TAG: dev
       RUST_LOG: "${LIGHT_A2A_RUST_LOG:-info}"
@@ -531,16 +560,26 @@ services:
 
   light-agent:
     image: ${LIGHT_AGENT_IMAGE:-networknt/light-agent:latest}
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        umask 077
+        printf '%s' "$$LIGHT_AGENT_OPERATIONAL_DATABASE_URL" > /tmp/operational-database-url
+        printf '%s' "$$LIGHT_A2A_AUTHORIZED_CONTEXT_KEY" > /tmp/a2a-authorized-context-key
+        exec /app/light-agent
     ports:
       - "${LIGHT_AGENT_PORT:-8083}:8083"
     volumes:
       - ./light-agent-rust/config:/config:ro,Z
       - ./light-controller-rust/ca.pem:/keystore/ca.pem:ro,z
-      - ./postgres-db/secrets/operational-database-url:/run/secrets/operational-database-url:ro,z
-      - ./postgres-db/secrets/a2a-authorized-context-key:/run/secrets/a2a-authorized-context-key:ro,z
       - agent-a2a-artifacts:/var/lib/light-agent/a2a-artifacts
     environment:
       LIGHT_RS_CONFIG_DIR: /config
+      LIGHT_AGENT_OPERATIONAL_DATABASE_URL: postgres://operations_agent_runtime:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef@postgres:5432/operations
+      LIGHT_A2A_AUTHORIZED_CONTEXT_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      operationalStore.databaseUrlFile: /tmp/operational-database-url
+      a2aPolicy.authorizationContextKeyFile: /tmp/a2a-authorized-context-key
+      a2aOutbound.authorizationContextKeyFile: /tmp/a2a-authorized-context-key
       LIGHT_PORTAL_AUTHORIZATION: "${LIGHT_AGENT_LIGHT_PORTAL_AUTHORIZATION:-Bearer eyJraWQiOiJBWnAwMk1DdWNydVpmRkpieXlGd3VnIiwiYWxnIjoiUlMyNTYifQ.eyJpc3MiOiJ1cm46Y29tOm5ldHdvcmtudDpvYXV0aDI6djEiLCJhdWQiOiJ1cm46Y29tLm5ldHdvcmtudCIsImV4cCI6MjA5MTQwODU2NiwianRpIjoiaEI0bXlkUzBleEQwSjJLSVNSTU5HQSIsImlhdCI6MTc3NjA0ODU2NiwibmJmIjoxNzc2MDQ4NDQ2LCJ2ZXIiOiIxLjAiLCJjaWQiOiIwMTlkODM0OS00MWM2LTcyZWYtOTVjMi00NDI4YTQwZDBlNDkiLCJzY3AiOlsicG9ydGFsLnciLCJwb3J0YWwuciJdLCJob3N0IjoiMDE5NjRiMDUtNTUyYS03YzRiLTkxODQtNjg1N2U3ZjNkYzVmIiwic2lkIjoiY29tLm5ldHdvcmtudC5hZ2VudC5hY2NvdW50LTEuMC4wIn0.XcZEkr_fD1U3IWRYs9BS7aYVlcrj7zlayPjZ8s9_5MCTN2CYwIMuW1t_a7U_eRUTn3UtjRbV0v7tKBZ53sDIKbn3de6RJ4o_Iynf2_WX-yHEoggljkF-blIo8HarF1sn_v4Fp1eEh7V8m6D_lHC9FVkkIFDSvKl5GPAgjd9-dq8AkIkOGJ26IAOeuiKIskpUNkCmu6wahGInDYdsYk0GTydLu2jYIkhcPOoAOgFpQXBIPVXFZ8C1CRpPw39gfPyyATP_1qh2iGXlfSGTJiIp0pb9EXLIVcexPhdGh_LhSkrOMDUqxme5HC94T9do8yPQGzgfNFPcLywVeTgEco4bBQ}"
       LIGHT_AGENT_HOST_ID: ${LIGHT_AGENT_HOST_ID:-01964b05-552a-7c4b-9184-6857e7f3dc5f}
       LIGHT_AGENT_AGENT_DEF_ID: ${LIGHT_AGENT_AGENT_DEF_ID:-}
@@ -549,7 +588,7 @@ services:
       CODEX_REASONING_EFFORT: ${CODEX_REASONING_EFFORT:-low}
       LIGHT_AGENT_MODEL: ${LIGHT_AGENT_MODEL:-gpt-5.5}
       LIGHT_AGENT_TEMPERATURE: ${LIGHT_AGENT_TEMPERATURE:-0.7}
-      LIGHT_AGENT_DELEGATION_SECRET: ${LIGHT_AGENT_DELEGATION_SECRET:-}
+      LIGHT_AGENT_DELEGATION_SECRET: light-portal-install-local-delegation-key
       LIGHT_AGENT_KNOWLEDGE_URL: http://light-knowledge:8092/
       RUST_LOG: ${LIGHT_AGENT_RUST_LOG:-info}
       AGENT_LOG_ANSI: "false"
@@ -580,18 +619,19 @@ services:
   light-knowledge:
     image: ${LIGHT_KNOWLEDGE_IMAGE:-networknt/light-knowledge:latest}
     working_dir: /var/lib/light-knowledge
-    group_add:
-      - "${LIGHT_PORTAL_SECRET_GID:-1000}"
     ports:
       - "${LIGHT_KNOWLEDGE_PORT:-8092}:8092"
     volumes:
       - ./light-controller-rust/ca.pem:/keystore/ca.pem:ro,z
-      - ./light-knowledge/secrets:/run/secrets:ro,z
       - ./light-knowledge/objects:/var/lib/light-knowledge/objects:z
       - ./light-knowledge/checkouts:/var/lib/light-knowledge/checkouts:z
     environment:
       CLIENT_VERIFYHOSTNAME: "false"
       CLIENT_CACERTPATH: /keystore/ca.pem
+      LIGHT_KNOWLEDGE_DATABASE_URL: postgres://light_knowledge_local_api:knowledge-local-api@postgres:5432/knowledge
+      LIGHT_KNOWLEDGE_WORKER_DATABASE_URL: postgres://light_knowledge_local_worker:knowledge-local-worker@postgres:5432/knowledge
+      LIGHT_AGENT_DELEGATION_SECRET: light-portal-install-local-delegation-key
+      LIGHT_KNOWLEDGE_QUERY_CACHE_KEY: light-portal-install-local-query-cache-key-0123456789abcdef
       knowledgeWorker.jobExecutionMode: "external"
       LIGHT_PORTAL_AUTHORIZATION: ${KNOWLEDGE_PORTAL_AUTHORIZATION:-eyJhbGciOiJSUzI1NiIsImtpZCI6IkFacDAyTUN1Y3J1WmZGSmJ5eUZ3dWcifQ.eyJpc3MiOiJ1cm46Y29tOm5ldHdvcmtudDpvYXV0aDI6djEiLCJhdWQiOiJ1cm46Y29tLm5ldHdvcmtudCIsInN1YiI6IjAxOWZmMmY3LWU1NmUtNzU4YS1hMTdiLTQ1YjA1NzU1NjMyNiIsImV4cCI6MjEwMTkyNDg3MCwianRpIjoicGVIWjljTFdRZksxcW9qc3VNS3ZJdyIsImlhdCI6MTc4NjU2NDg3MCwibmJmIjoxNzg2NTY0NzUwLCJ2ZXIiOiIxLjAiLCJjaWQiOiIwMTlmZjJmNy1lNTZlLTc1OGEtYTE3Yi00NWIwNTc1NTYzMjYiLCJzY3AiOlsicG9ydGFsLnIiLCJwb3J0YWwudyJdLCJjbGllbnRfaWQiOiIwMTlmZjJmNy1lNTZlLTc1OGEtYTE3Yi00NWIwNTc1NTYzMjYiLCJzY29wZSI6InBvcnRhbC5yIHBvcnRhbC53IiwiZW52IjoiZGV2IiwiaG9zdCI6IjAxOTY0YjA1LTU1MmEtN2M0Yi05MTg0LTY4NTdlN2YzZGM1ZiIsInNpZCI6ImNvbS5uZXR3b3JrbnQubGlnaHQta25vd2xlZGdlLTEuMC4wIiwidWlkIjoiMDE5NjRiMDUtNTUzMi03Yzc5LThjZGUtMTkxZGNiZDQyMWI4IiwidXR5IjoiRiJ9.d1OdH6yJXSeuVyZJ-TLMzAL3BoTzl7OsugtLU6v_LoMRuMrzT-pG5u7x5Zd_iHyhmFThJM7MuL9sDNYCOj-bqpyxhtq1R9nAKjVOilwRO32hrO5V1HFLvXjSqBPWyeXuHvlFgENxCy1QfdAZXw4g5rXjMGiBwyEYIA-yXrY3up1tkY3HtkfuAYaIWuPSJ8JagiJzaWE-dkpNoz7ofxIyQW3GDjPP1qkREo5lT80cabWOnxwO-8HDWK1rWORP0NoKx9blEomGPMUET0OT5iCxAabJmQC0Vt7Oks83pfml8jTRRJqQMiZMpp8OIv5Jwmt2CUhp3j5T6CzQpVugMgfT9A}
     depends_on:
@@ -608,16 +648,14 @@ services:
 
   light-knowledge-worker:
     image: ${LIGHT_KNOWLEDGE_WORKER_IMAGE:-networknt/light-knowledge-worker:latest}
-    group_add:
-      - "${LIGHT_PORTAL_SECRET_GID:-1000}"
     volumes:
       - ./light-controller-rust/ca.pem:/keystore/ca.pem:ro,z
-      - ./light-knowledge/secrets/knowledge-worker-database-url:/run/secrets/knowledge-worker-database-url:ro,z
-      - ./light-knowledge/secrets/knowledge-index-embedding-authorization:/run/secrets/knowledge-index-embedding-authorization:ro,z
       - ./light-knowledge/objects:/var/lib/light-knowledge/objects:z
       - ./light-knowledge/checkouts:/var/lib/light-knowledge/checkouts:z
     environment:
+      LIGHT_KNOWLEDGE_WORKER_DATABASE_URL: postgres://light_knowledge_local_worker:knowledge-local-worker@postgres:5432/knowledge
       LIGHT_KNOWLEDGE_EXPECTED_DATABASE: knowledge
+      LIGHT_PORTAL_AUTHORIZATION: ${KNOWLEDGE_PORTAL_AUTHORIZATION:-eyJhbGciOiJSUzI1NiIsImtpZCI6IkFacDAyTUN1Y3J1WmZGSmJ5eUZ3dWcifQ.eyJpc3MiOiJ1cm46Y29tOm5ldHdvcmtudDpvYXV0aDI6djEiLCJhdWQiOiJ1cm46Y29tLm5ldHdvcmtudCIsInN1YiI6IjAxOWZmMmY3LWU1NmUtNzU4YS1hMTdiLTQ1YjA1NzU1NjMyNiIsImV4cCI6MjEwMTkyNDg3MCwianRpIjoicGVIWjljTFdRZksxcW9qc3VNS3ZJdyIsImlhdCI6MTc4NjU2NDg3MCwibmJmIjoxNzg2NTY0NzUwLCJ2ZXIiOiIxLjAiLCJjaWQiOiIwMTlmZjJmNy1lNTZlLTc1OGEtYTE3Yi00NWIwNTc1NTYzMjYiLCJzY3AiOlsicG9ydGFsLnIiLCJwb3J0YWwudyJdLCJjbGllbnRfaWQiOiIwMTlmZjJmNy1lNTZlLTc1OGEtYTE3Yi00NWIwNTc1NTYzMjYiLCJzY29wZSI6InBvcnRhbC53IHBvcnRhbC53IiwiZW52IjoiZGV2IiwiaG9zdCI6IjAxOTY0YjA1LTU1MmEtN2M0Yi05MTg0LTY4NTdlN2YzZGM1ZiIsInNpZCI6ImNvbS5uZXR3b3JrbnQubGlnaHQta25vd2xlZGdlLTEuMC4wIiwidWlkIjoiMDE5NjRiMDUtNTUzMi03Yzc5LThjZGUtMTkxZGNiZDQyMWI4IiwidXR5IjoiRiJ9.d1OdH6yJXSeuVyZJ-TLMzAL3BoTzl7OsugtLU6v_LoMRuMrzT-pG5u7x5Zd_iHyhmFThJM7MuL9sDNYCOj-bqpyxhtq1R9nAKjVOilwRO32hrO5V1HFLvXjSqBPWyeXuHvlFgENxCy1QfdAZXw4g5rXjMGiBwyEYIA-yXrY3up1tkY3HtkfuAYaIWuPSJ8JagiJzaWE-dkpNoz7ofxIyQW3GDjPP1qkREo5lT80cabWOnxwO-8HDWK1rWORP0NoKx9blEomGPMUET0OT5iCxAabJmQC0Vt7Oks83pfml8jTRRJqQMiZMpp8OIv5Jwmt2CUhp3j5T6CzQpVugMgfT9A}
     depends_on:
       postgres:
         condition: service_healthy
@@ -630,16 +668,14 @@ services:
 
   light-knowledge-admin:
     image: ${LIGHT_KNOWLEDGE_ADMIN_IMAGE:-networknt/light-knowledge-admin:latest}
-    group_add:
-      - "${LIGHT_PORTAL_SECRET_GID:-1000}"
     expose:
       - "8093"
     volumes:
       - ./light-controller-rust/ca.pem:/keystore/ca.pem:ro,z
-      - ./light-knowledge/secrets/knowledge-admin-database-url:/run/secrets/light-knowledge/knowledge-database-url:ro,z
-      - ./light-knowledge/secrets/knowledge-admin-opaque-actor-key:/run/secrets/light-knowledge-admin/opaque-actor-key:ro,z
-      - ./light-knowledge/secrets/control-snapshot-signing-key:/run/secrets/light-knowledge-admin/control-snapshot-signing-key:ro,z
     environment:
+      LIGHT_KNOWLEDGE_DATABASE_URL: postgres://light_knowledge_local_admin_api:knowledge-local-admin@postgres:5432/knowledge
+      LIGHT_KNOWLEDGE_ADMIN_OPAQUE_ACTOR_KEY: light-portal-install-local-opaque-actor-key
+      LIGHT_KNOWLEDGE_CONTROL_SNAPSHOT_SIGNING_KEY: light-portal-install-local-control-snapshot-signing-key
       CLIENT_VERIFYHOSTNAME: "false"
       CLIENT_CACERTPATH: /keystore/ca.pem
       CLIENT_TOKENKEYSERVERURL: ${KNOWLEDGE_ADMIN_JWKS_SERVER_URL:-https://light-oauth:6881}

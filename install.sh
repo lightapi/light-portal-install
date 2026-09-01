@@ -312,136 +312,6 @@ start_stack() {
   compose up -d
 }
 
-env_value() {
-  local name="$1"
-  local value="${!name:-}"
-  if [[ -z "$value" && -f .env ]]; then
-    value="$(awk -F= -v key="$name" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' .env)"
-  fi
-  printf '%s' "$value"
-}
-
-write_secret_once() {
-  local path="$1"
-  local value="$2"
-  if [[ ! -s "$path" ]]; then
-    printf '%s' "$value" > "$path"
-    chmod 600 "$path"
-  fi
-}
-
-write_secret() {
-  local path="$1"
-  local value="$2"
-  printf '%s' "$value" > "$path"
-  chmod 600 "$path"
-}
-
-persist_env_value() {
-  local name="$1"
-  local value="$2"
-  local env_file="${3:-.env}"
-  local tmp
-  local line
-  local found=false
-
-  [[ "$name" =~ ^[A-Z][A-Z0-9_]*$ ]] || die "invalid environment variable name: $name"
-  [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] ||
-    die "$name must not contain a newline"
-
-  [[ -f "$env_file" ]] || touch "$env_file"
-  tmp="$(mktemp "${TMPDIR:-/tmp}/light-portal-env.XXXXXX")"
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    if [[ "$line" == "$name="* ]]; then
-      if [[ "$found" == false ]]; then
-        printf '%s=%s\n' "$name" "$value" >> "$tmp"
-        found=true
-      fi
-    else
-      printf '%s\n' "$line" >> "$tmp"
-    fi
-  done < "$env_file"
-  if [[ "$found" == false ]]; then
-    printf '%s=%s\n' "$name" "$value" >> "$tmp"
-  fi
-  chmod 600 "$tmp"
-  mv "$tmp" "$env_file"
-}
-
-ensure_agent_delegation_secret() {
-  local secret_dir="light-knowledge/secrets"
-  local secret_file="$secret_dir/agent-delegation-secret"
-  local delegation_secret
-
-  require_command openssl
-  mkdir -p "$secret_dir"
-  if [[ -d "$secret_file" ]]; then
-    rmdir "$secret_file" 2>/dev/null ||
-      die "agent delegation secret path is a non-empty directory: $secret_file"
-  fi
-
-  delegation_secret="$(env_value LIGHT_AGENT_DELEGATION_SECRET)"
-  if [[ -z "$delegation_secret" && -s "$secret_file" ]]; then
-    delegation_secret="$(<"$secret_file")"
-  fi
-  if [[ -z "$delegation_secret" ]]; then
-    delegation_secret="$(openssl rand -hex 48)"
-    log "generated the Light Agent delegation secret for this installation"
-  fi
-
-  write_secret "$secret_file" "$delegation_secret"
-  persist_env_value LIGHT_AGENT_DELEGATION_SECRET "$delegation_secret"
-  export LIGHT_AGENT_DELEGATION_SECRET="$delegation_secret"
-}
-
-prepare_knowledge_secret_access() {
-  local secret_dir="light-knowledge/secrets"
-  local runtime_dir
-  local secret_gid
-  local secret_file
-  local secret_files=(
-    agent-delegation-secret
-    control-snapshot-signing-key
-    knowledge-admin-database-url
-    knowledge-admin-opaque-actor-key
-    knowledge-database-url
-    knowledge-index-embedding-authorization
-    knowledge-portal-authorization
-    knowledge-query-cache-key
-    knowledge-query-embedding-authorization
-    knowledge-worker-database-url
-  )
-
-  secret_gid="$(id -g)"
-  [[ "$secret_gid" =~ ^[0-9]+$ ]] || die "cannot determine the installer group ID"
-  for secret_file in "${secret_files[@]}"; do
-    [[ -f "$secret_dir/$secret_file" ]] ||
-      die "Knowledge runtime secret is missing: $secret_dir/$secret_file"
-    chgrp "$secret_gid" "$secret_dir/$secret_file"
-    chmod 640 "$secret_dir/$secret_file"
-  done
-  for runtime_dir in light-knowledge/objects light-knowledge/checkouts; do
-    mkdir -p "$runtime_dir"
-    chgrp "$secret_gid" "$runtime_dir"
-    chmod 2770 "$runtime_dir"
-  done
-  persist_env_value LIGHT_PORTAL_SECRET_GID "$secret_gid"
-  export LIGHT_PORTAL_SECRET_GID="$secret_gid"
-}
-
-ensure_control_snapshot_signing_key() {
-  local secret_dir="light-knowledge/secrets"
-  local secret_file="$secret_dir/control-snapshot-signing-key"
-
-  require_command openssl
-  mkdir -p "$secret_dir"
-  if [[ -d "$secret_file" ]]; then
-    rmdir "$secret_file" 2>/dev/null ||
-      die "control snapshot signing key path is a non-empty directory: $secret_file"
-  fi
-  write_secret_once "$secret_file" "$(openssl rand -hex 48)"
-}
-
 ensure_knowledge_database() {
   log "validating the local Config Server and Knowledge schema pair"
   compose run --rm --no-deps knowledge-schema-migration
@@ -476,11 +346,6 @@ SQL
 }
 
 ensure_knowledge_runtime() {
-  require_command openssl
-  local secret_dir="light-knowledge/secrets"
-  local api_password worker_password admin_password
-  local portal_token query_embedding_token index_embedding_token
-  mkdir -p "$secret_dir"
   ensure_knowledge_database
 
   # Upgrade existing installations to the same credential boundary as a fresh
@@ -488,38 +353,11 @@ ensure_knowledge_runtime() {
   # authenticate to the Knowledge database.
   ensure_portal_runtime_database_access
 
-  api_password="$(openssl rand -hex 32)"
-  worker_password="$(openssl rand -hex 32)"
-  admin_password="$(openssl rand -hex 32)"
-  [[ -s "$secret_dir/.api-db-password" ]] && api_password="$(<"$secret_dir/.api-db-password")"
-  [[ -s "$secret_dir/.worker-db-password" ]] && worker_password="$(<"$secret_dir/.worker-db-password")"
-  [[ -s "$secret_dir/.admin-db-password" ]] && admin_password="$(<"$secret_dir/.admin-db-password")"
-  write_secret_once "$secret_dir/.api-db-password" "$api_password"
-  write_secret_once "$secret_dir/.worker-db-password" "$worker_password"
-  write_secret_once "$secret_dir/.admin-db-password" "$admin_password"
-
   docker exec postgres psql -U postgres -d knowledge -v ON_ERROR_STOP=1 \
-    -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='light_knowledge_local_api') THEN CREATE ROLE light_knowledge_local_api LOGIN; END IF; IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='light_knowledge_local_worker') THEN CREATE ROLE light_knowledge_local_worker LOGIN; END IF; IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='light_knowledge_local_admin_api') THEN CREATE ROLE light_knowledge_local_admin_api LOGIN; END IF; END \$\$; ALTER ROLE light_knowledge_local_api PASSWORD '$api_password'; ALTER ROLE light_knowledge_local_worker PASSWORD '$worker_password'; ALTER ROLE light_knowledge_local_admin_api PASSWORD '$admin_password'; GRANT light_knowledge_api_role TO light_knowledge_local_api; GRANT light_knowledge_worker_role TO light_knowledge_local_worker; GRANT light_knowledge_admin_api_role,light_knowledge_snapshot_loader_role TO light_knowledge_local_admin_api; REVOKE CONNECT ON DATABASE knowledge FROM PUBLIC; GRANT CONNECT ON DATABASE knowledge TO light_knowledge_local_api,light_knowledge_local_worker,light_knowledge_local_admin_api; ALTER ROLE light_knowledge_local_api IN DATABASE knowledge SET search_path=knowledge,public; ALTER ROLE light_knowledge_local_worker IN DATABASE knowledge SET search_path=knowledge,public; ALTER ROLE light_knowledge_local_admin_api IN DATABASE knowledge SET search_path=knowledge,public;" >/dev/null
+    -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='light_knowledge_local_api') THEN CREATE ROLE light_knowledge_local_api LOGIN; END IF; IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='light_knowledge_local_worker') THEN CREATE ROLE light_knowledge_local_worker LOGIN; END IF; IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='light_knowledge_local_admin_api') THEN CREATE ROLE light_knowledge_local_admin_api LOGIN; END IF; END \$\$; ALTER ROLE light_knowledge_local_api PASSWORD 'knowledge-local-api'; ALTER ROLE light_knowledge_local_worker PASSWORD 'knowledge-local-worker'; ALTER ROLE light_knowledge_local_admin_api PASSWORD 'knowledge-local-admin'; GRANT light_knowledge_api_role TO light_knowledge_local_api; GRANT light_knowledge_worker_role TO light_knowledge_local_worker; GRANT light_knowledge_admin_api_role,light_knowledge_snapshot_loader_role TO light_knowledge_local_admin_api; REVOKE CONNECT ON DATABASE knowledge FROM PUBLIC; GRANT CONNECT ON DATABASE knowledge TO light_knowledge_local_api,light_knowledge_local_worker,light_knowledge_local_admin_api; ALTER ROLE light_knowledge_local_api IN DATABASE knowledge SET search_path=knowledge,public; ALTER ROLE light_knowledge_local_worker IN DATABASE knowledge SET search_path=knowledge,public; ALTER ROLE light_knowledge_local_admin_api IN DATABASE knowledge SET search_path=knowledge,public;" >/dev/null
 
-  write_secret "$secret_dir/knowledge-database-url" "postgres://light_knowledge_local_api:$api_password@postgres:5432/knowledge"
-  write_secret "$secret_dir/knowledge-worker-database-url" "postgres://light_knowledge_local_worker:$worker_password@postgres:5432/knowledge"
-  write_secret "$secret_dir/knowledge-admin-database-url" "postgres://light_knowledge_local_admin_api:$admin_password@postgres:5432/knowledge"
-  write_secret_once "$secret_dir/knowledge-query-cache-key" "$(openssl rand -hex 48)"
-  write_secret_once "$secret_dir/knowledge-admin-opaque-actor-key" "$(openssl rand -hex 48)"
-  ensure_control_snapshot_signing_key
-
-  ensure_agent_delegation_secret
-  portal_token="$(env_value KNOWLEDGE_PORTAL_AUTHORIZATION)"
-  query_embedding_token="$(env_value KNOWLEDGE_QUERY_EMBEDDING_AUTHORIZATION)"
-  index_embedding_token="$(env_value KNOWLEDGE_INDEX_EMBEDDING_AUTHORIZATION)"
-  [[ -n "$portal_token" ]] || die "Knowledge services require KNOWLEDGE_PORTAL_AUTHORIZATION"
-  [[ -n "$query_embedding_token" ]] || die "Knowledge services require KNOWLEDGE_QUERY_EMBEDDING_AUTHORIZATION"
-  [[ -n "$index_embedding_token" ]] || die "Knowledge services require KNOWLEDGE_INDEX_EMBEDDING_AUTHORIZATION"
-  write_secret "$secret_dir/knowledge-portal-authorization" "$portal_token"
-  write_secret "$secret_dir/knowledge-query-embedding-authorization" "$query_embedding_token"
-  write_secret "$secret_dir/knowledge-index-embedding-authorization" "$index_embedding_token"
-  prepare_knowledge_secret_access
-  log "Knowledge API, administration, and worker identities and runtime secret files are ready"
+  mkdir -p light-knowledge/objects light-knowledge/checkouts
+  log "Knowledge API, administration, and worker local runtime identities are ready"
 }
 
 validate_operational_store_assets() {
@@ -528,7 +366,6 @@ validate_operational_store_assets() {
 
   for required_file in \
     postgres-db/operations/bin/bootstrap-operational-store.sh \
-    postgres-db/operations/bin/prepare-operational-secret.sh \
     postgres-db/operations/bin/reset-empty-operational-store.sh \
     postgres-db/operations/bin/validate-operational-store.sh \
     "$bundle_dir/manifest.json" \
@@ -539,14 +376,6 @@ validate_operational_store_assets() {
 
   (cd "$bundle_dir" && sha256sum -c bundle.sha256 >/dev/null) ||
     die "operational-store bundle checksum verification failed"
-}
-
-prepare_operational_database_secret() {
-  local prepare_script="postgres-db/operations/bin/prepare-operational-secret.sh"
-
-  validate_operational_store_assets
-  OPERATIONAL_SECRET_DIR="postgres-db/secrets" "$prepare_script" >/dev/null
-  log "operational database URL file is ready (content redacted)"
 }
 
 validate_compose_config() {
@@ -1190,8 +1019,6 @@ apply_release_deltas() {
 bootstrap_events() {
   require_command docker
   [[ -f .env ]] || cp .env.example .env
-  prepare_operational_database_secret
-  ensure_control_snapshot_signing_key
   validate_compose_config
   compose up -d postgres
   wait_for_postgres || die "postgres did not become ready for TCP connections"
