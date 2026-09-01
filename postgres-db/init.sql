@@ -15852,6 +15852,43 @@ COMMENT ON COLUMN public.event_replay_retention_log_t.created_ts IS 'Timestamp f
 
 
 --
+-- Name: bundle_import_t; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.bundle_import_t (
+    bundle_id uuid NOT NULL,
+    bundle_mode character varying(32) NOT NULL,
+    identity_digest character varying(71) NOT NULL,
+    required_baseline_bundle_id uuid,
+    import_status character varying(16) DEFAULT 'IN_PROGRESS'::character varying NOT NULL,
+    started_ts timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    completed_ts timestamp with time zone,
+    CONSTRAINT bundle_import_t_pkey PRIMARY KEY (bundle_id),
+    CONSTRAINT bundle_import_mode_ck CHECK (((bundle_mode)::text = ANY ((ARRAY['environment'::character varying, 'host-delta'::character varying, 'standalone-host'::character varying])::text[]))),
+    CONSTRAINT bundle_import_digest_ck CHECK (((identity_digest)::text ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT bundle_import_status_ck CHECK (((import_status)::text = ANY ((ARRAY['IN_PROGRESS'::character varying, 'COMPLETE'::character varying])::text[]))),
+    CONSTRAINT bundle_import_completion_ck CHECK ((((import_status)::text = 'COMPLETE'::text) = (completed_ts IS NOT NULL))),
+    CONSTRAINT bundle_import_baseline_ck CHECK (((((bundle_mode)::text = ANY ((ARRAY['environment'::character varying, 'standalone-host'::character varying])::text[])) AND (required_baseline_bundle_id IS NULL)) OR (((bundle_mode)::text = 'host-delta'::text) AND (required_baseline_bundle_id IS NOT NULL)))),
+    CONSTRAINT bundle_import_baseline_fk FOREIGN KEY (required_baseline_bundle_id) REFERENCES public.bundle_import_t(bundle_id)
+);
+
+
+--
+-- Name: TABLE bundle_import_t; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.bundle_import_t IS 'Records signed composable bundle imports so host deltas can prove their required environment baseline before append.';
+
+COMMENT ON COLUMN public.bundle_import_t.bundle_id IS 'Signed bundle identifier from bundle-manifest.json.';
+COMMENT ON COLUMN public.bundle_import_t.bundle_mode IS 'Explicit bundle mode: environment, host-delta, or non-composable standalone-host.';
+COMMENT ON COLUMN public.bundle_import_t.identity_digest IS 'Canonical full baseline identity-set SHA-256 used for composition qualification.';
+COMMENT ON COLUMN public.bundle_import_t.required_baseline_bundle_id IS 'Completed environment bundle required before this host delta may append.';
+COMMENT ON COLUMN public.bundle_import_t.import_status IS 'Importer lifecycle state: IN_PROGRESS or COMPLETE.';
+COMMENT ON COLUMN public.bundle_import_t.started_ts IS 'Timestamp when the coordinated importer registered the signed bundle.';
+COMMENT ON COLUMN public.bundle_import_t.completed_ts IS 'Timestamp when all canonical bundle events became durable.';
+
+
+--
 -- Name: event_store_t; Type: TABLE; Schema: public; Owner: -
 --
 
