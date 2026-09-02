@@ -193,6 +193,10 @@ class KnowledgeSchemaTest(unittest.TestCase):
             "LIGHT_AGENT_DELEGATION_SECRET: light-portal-install-local-delegation-key",
             compose,
         )
+        self.assertIn(
+            "AGENT_OPERATIONALSTORE_DATABASEURLFILE: /tmp/operational-database-url",
+            compose,
+        )
 
     def test_knowledge_services_use_local_compose_configuration(self):
         install = (ROOT / "install.sh").read_text(encoding="utf-8")
@@ -214,8 +218,25 @@ class KnowledgeSchemaTest(unittest.TestCase):
         self.assertNotIn("./postgres-db/secrets/operational-database-url", compose)
         self.assertIn("OPERATIONAL_DATABASE_URL:", compose)
         self.assertIn("GATEWAY_DATABASE_URL:", compose)
-        self.assertIn("gatewayEvidence.databaseUrlFile: /tmp/gateway-database-url", compose)
+        self.assertIn("GATEWAYEVIDENCE_DATABASEURLFILE: /tmp/gateway-database-url", compose)
+        self.assertIn("OPERATIONALSTORE_DATABASEURLFILE: /tmp/operational-database-url", compose)
         self.assertIn('database_url="${OPERATIONAL_DATABASE_URL:-}"', bootstrap)
+
+    def test_bootstrap_rejects_operational_store_only_agent_snapshot(self):
+        install = (ROOT / "install.sh").read_text(encoding="utf-8")
+        bootstrap = install[
+            install.index("bootstrap_events() {") :
+            install.index("case \"$command_name\" in")
+        ]
+
+        self.assertIn('required_agent_policy_property_count="33"', install)
+        self.assertIn("runtimePolicy.publicationId", install)
+        self.assertIn("portalAssociation.runtimeInstanceId", install)
+        self.assertIn("agentPolicy.policySnapshot.dataBoundaryDigest", install)
+        self.assertLess(
+            bootstrap.index("validate_runnable_agent_snapshot"),
+            bootstrap.index("start_light_oauth"),
+        )
 
     def test_shared_bind_mounts_use_shared_selinux_labels(self):
         compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")

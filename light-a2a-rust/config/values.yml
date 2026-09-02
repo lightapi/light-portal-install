@@ -18,8 +18,8 @@ client.verifyHostname: false
 client.caCertPath: /keystore/ca.pem
 
 operationalStore.contractVersion: 1
-operationalStore.bindingId: e741fa85-8a3d-432c-b31c-c41439d23f42
-operationalStore.bindingDigest: sha256:c29d23732e9136115f928ae52172bc73322a8f8700d789ede8c6b9e264ce48c5
+operationalStore.bindingId: f3a3579a-868e-43fa-8d74-33fddab752e3
+operationalStore.bindingDigest: sha256:1fff74fd52bf824b411a535a5e2a990adcf9de5093d11d15bf93c0f10ba6c0c2
 operationalStore.hostId: 01964b05-552a-7c4b-9184-6857e7f3dc5f
 operationalStore.environment: dev
 operationalStore.serviceOwner: light-a2a
@@ -29,8 +29,8 @@ operationalStore.minimumSchemaGeneration: 1
 operationalStore.databaseUrlFile: /run/secrets/operational-database-url
 operationalStore.credentialGeneration: 1
 
-artifactStore.bindingId: e741fa85-8a3d-432c-b31c-c41439d23f42
-artifactStore.bindingDigest: sha256:c29d23732e9136115f928ae52172bc73322a8f8700d789ede8c6b9e264ce48c5
+artifactStore.bindingId: f3a3579a-868e-43fa-8d74-33fddab752e3
+artifactStore.bindingDigest: sha256:1fff74fd52bf824b411a535a5e2a990adcf9de5093d11d15bf93c0f10ba6c0c2
 artifactStore.minimumSchemaGeneration: 1
 artifactStore.databaseUrlFile: /run/secrets/artifact-database-url
 artifactStore.rootDirectory: /var/lib/light-a2a/artifacts

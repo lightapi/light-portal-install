@@ -517,6 +517,22 @@ wait_for_baseline_projection_cursor() {
   die "event projection cursor did not catch up after $max_attempts attempts"
 }
 
+validate_runnable_agent_snapshot() {
+  local required_agent_policy_property_count="33"
+  local runnable_agent_snapshot_count
+  local required_agent_policy_properties="'runtimePolicy.publicationId','runtimePolicy.releaseVersion','runtimePolicy.policySnapshotId','runtimePolicy.policyVersion','runtimePolicy.policyDigest','runtimePolicy.contentDigest','runtimePolicy.audience','runtimePolicy.host','runtimePolicy.serviceId','runtimePolicy.envTag','runtimePolicy.sourceEventSequence','runtimePolicy.schemaVersion','runtimePolicy.createdAt','runtimePolicy.validFrom','runtimePolicy.refreshAfter','runtimePolicy.expiresAt','runtimePolicy.revocationEpoch','runtimePolicy.compatibilityGeneration','portalAssociation.runtimeInstanceId','agentPolicy.agentDefId','agentPolicy.definitionVersion','agentPolicy.prompt.system','agentPolicy.model.alias','agentPolicy.policySnapshot.snapshotId','agentPolicy.policySnapshot.definitionDigest','agentPolicy.policySnapshot.productProfileDigest','agentPolicy.policySnapshot.modelDigest','agentPolicy.policySnapshot.catalogDigest','agentPolicy.policySnapshot.memoryDigest','agentPolicy.policySnapshot.executionDigest','agentPolicy.policySnapshot.channelDigest','agentPolicy.policySnapshot.dataBoundaryDigest','agentPolicy.policySnapshot.tools'"
+
+  runnable_agent_snapshot_count="$(docker exec postgres \
+    psql -h localhost -p 5432 -U postgres -d configserver -tAc \
+    "SELECT count(*) FROM (SELECT s.snapshot_id FROM configserver.config_snapshot_t s JOIN configserver.config_snapshot_property_t p ON p.snapshot_id=s.snapshot_id WHERE s.current AND s.service_id='com.networknt.agent.account-1.0.0' AND p.property_name IN ($required_agent_policy_properties) AND NULLIF(btrim(p.property_value), '') IS NOT NULL GROUP BY s.snapshot_id HAVING count(DISTINCT p.property_name) = $required_agent_policy_property_count) runnable_agent_snapshots;" \
+    2>/dev/null | tr -d '[:space:]' || true)"
+  [[ "$runnable_agent_snapshot_count" =~ ^[0-9]+$ ]] ||
+    die "cannot query mandatory Account Agent policy snapshot properties"
+  [[ "$runnable_agent_snapshot_count" == "1" ]] ||
+    die "the current Account Agent snapshot is operational-store-only and not runnable; publish and activate its complete runtimePolicy, portalAssociation, and agentPolicy projection before creating an installer release"
+  log "validated one runnable Account Agent snapshot"
+}
+
 psql_exec() {
   docker exec -i postgres psql -h localhost -p 5432 -U postgres -d configserver -v ON_ERROR_STOP=1 "$@"
 }
@@ -1032,6 +1048,7 @@ bootstrap_events() {
   fi
   log "waiting for asynchronous baseline projection cursor before OAuth startup"
   wait_for_baseline_projection_cursor
+  validate_runnable_agent_snapshot
   start_light_oauth
 }
 
