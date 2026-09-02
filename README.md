@@ -246,6 +246,14 @@ cursor before starting OAuth because OAuth reads projected key data. This is a
 deployment readiness check, not part of event import, and it does not inspect
 the DLQ.
 
+Before extracting the fallback `events.json`, the installer verifies the
+downloaded v2 `events.zip` signature and member digests with the pinned
+Ed25519 public key in `release-keys/<keyId>.pem`. Verification happens before
+`CLEAN_VOLUMES=true` removes the existing database. A controlled installation
+may set `EVENT_BUNDLE_KEY_DIR` to another independently provisioned trust
+directory. The trusted key must not be downloaded from the same CDN location
+as the bundle it verifies.
+
 Fresh installs prefer a release-matched `portal-bootstrap.dump` when the signed
 release manifest publishes one. Archive restore is fail-closed: the installer
 verifies the detached manifest signature, archive and `events.json` digests,

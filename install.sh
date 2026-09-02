@@ -48,6 +48,8 @@ Environment:
   PORTAL_BOOTSTRAP_ARCHIVE   Default: auto. Use false to bypass archive restore.
   LIGHT_PORTAL_BOOTSTRAP_PUBLIC_KEY
                              Release public key used to verify manifest.sig.
+  EVENT_BUNDLE_KEY_DIR       Trusted event-bundle public keys named
+                             <keyId>.pem. Default: release-keys.
   LIGHT_PORTAL_BOOTSTRAP_CREDENTIAL_ROTATION_HOOK
                              Executable pre-listener credential rotation hook.
   LIGHT_PORTAL_CLIENT_REDIRECT_URI
@@ -173,6 +175,30 @@ cache_busted_url() {
   printf '%s%scachebust=%s\n' "$url" "$separator" "$token"
 }
 
+verify_event_bundle() {
+  local events_bundle="$1"
+  local bundle_key_dir="${EVENT_BUNDLE_KEY_DIR:-release-keys}"
+  local importer_image
+
+  [[ "$events_bundle" == /* ]] || events_bundle="$PWD/$events_bundle"
+  [[ "$bundle_key_dir" == /* ]] || bundle_key_dir="$PWD/$bundle_key_dir"
+  [[ -f "$events_bundle" ]] || die "signed event bundle is missing: $events_bundle"
+  [[ -d "$bundle_key_dir" ]] || die "trusted event-bundle key directory is missing: $bundle_key_dir"
+
+  require_command docker
+  load_env_file_var EVENT_IMPORTER_IMAGE
+  importer_image="${EVENT_IMPORTER_IMAGE:-networknt/event-importer:latest}"
+  log "verifying signed event bundle before extraction"
+  docker run --rm \
+    -v "$(dirname -- "$events_bundle"):/bundle:ro,z" \
+    -v "$bundle_key_dir:/bundle-keys:ro,z" \
+    "$importer_image" \
+    --verify-bundle \
+    --bundle "/bundle/$(basename -- "$events_bundle")" \
+    --bundle-key-dir /bundle-keys ||
+    die "signed event bundle verification failed"
+}
+
 download_archive() {
   local archive_name="$1"
   local target_dir="$2"
@@ -191,11 +217,17 @@ download_archive_file() {
   local dest="$3"
   local archive_file="data/$archive_name"
   local archive_url="$asset_base_url/$archive_name"
+  local download_target="$archive_file"
 
   if [[ "$archive_name" == "events.zip" ]]; then
     archive_url="$(cache_busted_url "$archive_url")"
+    download_target="$archive_file.candidate"
   fi
-  download_file "$archive_url" "$archive_file"
+  download_file "$archive_url" "$download_target"
+  if [[ "$archive_name" == "events.zip" ]]; then
+    verify_event_bundle "$download_target"
+    mv "$download_target" "$archive_file"
+  fi
   log "extracting $member_name from $archive_file to $dest"
   unzip -p "$archive_file" "$member_name" > "$dest.tmp"
   mv "$dest.tmp" "$dest"
