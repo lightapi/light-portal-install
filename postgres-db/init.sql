@@ -45467,7 +45467,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS operational_store_profile_active_uk
 CREATE TABLE IF NOT EXISTS public.operational_store_binding_t (
     binding_id uuid NOT NULL,
     host_id uuid NOT NULL,
-    environment character varying(32) NOT NULL,
+    environment character varying(32),
     scope_kind character varying(32) DEFAULT 'HOST_ENVIRONMENT' NOT NULL,
     scope_id uuid NOT NULL,
     profile_id character varying(126) NOT NULL,
@@ -45490,28 +45490,39 @@ CREATE TABLE IF NOT EXISTS public.operational_store_binding_t (
     active boolean DEFAULT true NOT NULL,
     update_user character varying(126) DEFAULT SESSION_USER NOT NULL,
     update_ts timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    contract_version bigint DEFAULT 1 NOT NULL,
+    engine character varying(32),
+    server_host character varying(253),
+    port integer,
+    tls_mode character varying(32),
+    runtime_username character varying(63),
+    credential_source character varying(32),
+    minimum_schema_generation bigint,
     CONSTRAINT operational_store_binding_t_pkey PRIMARY KEY (binding_id),
     CONSTRAINT operational_store_binding_profile_fk FOREIGN KEY (profile_id, profile_version)
         REFERENCES public.operational_store_profile_t(profile_id, profile_version),
-    CONSTRAINT operational_store_binding_environment_ck CHECK (environment ~ '^[a-z][a-z0-9_-]{0,31}$'),
-    CONSTRAINT operational_store_binding_scope_ck CHECK (scope_kind = 'HOST_ENVIRONMENT' AND scope_id = host_id),
+    CONSTRAINT operational_store_binding_environment_ck CHECK (environment IS NULL OR environment ~ '^[a-z][a-z0-9_-]{0,31}$'),
+    CONSTRAINT operational_store_binding_contract_ck CHECK (contract_version IN (1,2)),
+    CONSTRAINT operational_store_binding_scope_ck CHECK ((contract_version=1 AND scope_kind='HOST_ENVIRONMENT' AND scope_id=host_id AND environment IS NOT NULL) OR (contract_version=2 AND scope_kind='HOST' AND scope_id=host_id AND environment IS NULL)),
     CONSTRAINT operational_store_binding_deployment_ck CHECK (deployment_profile IN ('DEV_DEDICATED','DEV_POOLED','CUSTOMER_MANAGED')),
-    CONSTRAINT operational_store_binding_state_ck CHECK (lifecycle_state IN ('REQUESTED','PROVISIONING','READY','FAILED','ROTATING','DEACTIVATION_REQUESTED','DEACTIVATED','RETENTION_HOLD','DECOMMISSION_REQUESTED','DECOMMISSIONING','DECOMMISSIONED')),
-    CONSTRAINT operational_store_binding_generation_ck CHECK (desired_generation > 0 AND observed_generation >= 0 AND observed_generation <= desired_generation AND credential_generation > 0),
+    CONSTRAINT operational_store_binding_state_ck CHECK ((contract_version=1 AND lifecycle_state IN ('REQUESTED','PROVISIONING','READY','FAILED','ROTATING','DEACTIVATION_REQUESTED','DEACTIVATED','RETENTION_HOLD','DECOMMISSION_REQUESTED','DECOMMISSIONING','DECOMMISSIONED')) OR (contract_version=2 AND lifecycle_state IN ('REGISTERED','DEACTIVATED','UNREGISTERED'))),
+    CONSTRAINT operational_store_binding_generation_ck CHECK (desired_generation>0 AND observed_generation>=0 AND observed_generation<=desired_generation AND credential_generation>0 AND credential_generation<=9007199254740991 AND (contract_version=1 OR (minimum_schema_generation>0 AND minimum_schema_generation<=9007199254740991))),
     CONSTRAINT operational_store_binding_database_ck CHECK (expected_database ~ '^[a-z][a-z0-9_]{0,62}$'),
-    CONSTRAINT operational_store_binding_secret_ck CHECK (secret_ref ~ '^operational-store/[0-9a-f-]{36}/[a-z][a-z0-9_-]{0,31}/runtime$'),
-    CONSTRAINT operational_store_binding_secret_scope_ck CHECK (
-        secret_ref = 'operational-store/' || host_id::text || '/' || environment || '/runtime'
-    ),
+    CONSTRAINT operational_store_binding_secret_ck CHECK ((contract_version=1 AND secret_ref~'^operational-store/[0-9a-f-]{36}/[a-z][a-z0-9_-]{0,31}/runtime$') OR (contract_version=2 AND length(secret_ref) BETWEEN 1 AND 512)),
+    CONSTRAINT operational_store_binding_secret_scope_ck CHECK (contract_version=2 OR secret_ref='operational-store/'||host_id::text||'/'||environment||'/runtime'),
     CONSTRAINT operational_store_binding_digest_ck CHECK (binding_digest ~ '^sha256:[0-9a-f]{64}$'),
-    CONSTRAINT operational_store_binding_publication_ck CHECK (NOT published OR lifecycle_state = 'READY'),
+    CONSTRAINT operational_store_binding_publication_ck CHECK (NOT published OR (contract_version=1 AND lifecycle_state='READY') OR (contract_version=2 AND lifecycle_state='REGISTERED')),
     CONSTRAINT operational_store_binding_revocation_ck CHECK (revocation_epoch >= 0 AND aggregate_version > 0),
-    CONSTRAINT operational_store_binding_no_secret_ck CHECK (secret_ref !~* '(postgres(ql)?://|password=|pwd=)')
+    CONSTRAINT operational_store_binding_no_secret_ck CHECK (secret_ref !~* '(postgres(ql)?://|password=|pwd=)'),
+    CONSTRAINT operational_store_binding_registration_fields_ck CHECK (contract_version=1 OR (engine='POSTGRESQL' AND server_host~'^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,251}[A-Za-z0-9])?$' AND port BETWEEN 1 AND 65535 AND tls_mode IN ('DISABLE','PREFER','REQUIRE','VERIFY_CA','VERIFY_FULL') AND credential_source='MOUNTED_FILE' AND secret_ref LIKE '/%'))
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS operational_store_binding_active_scope_uk
     ON public.operational_store_binding_t(host_id, environment)
     WHERE active AND lifecycle_state <> 'DECOMMISSIONED';
+CREATE UNIQUE INDEX IF NOT EXISTS operational_store_binding_active_host_v2_uk
+    ON public.operational_store_binding_t(host_id)
+    WHERE contract_version=2 AND active AND lifecycle_state<>'UNREGISTERED';
 CREATE INDEX IF NOT EXISTS operational_store_binding_state_ix
     ON public.operational_store_binding_t(lifecycle_state, update_ts);
 
@@ -45571,7 +45582,7 @@ CREATE TABLE IF NOT EXISTS public.operational_store_publication_t (
     binding_id uuid NOT NULL,
     binding_version bigint NOT NULL,
     host_id uuid NOT NULL,
-    environment character varying(32) NOT NULL,
+    environment character varying(32),
     publication_state character varying(16) NOT NULL,
     content_digest character varying(71) NOT NULL,
     projection jsonb NOT NULL,
@@ -45619,15 +45630,19 @@ CREATE INDEX IF NOT EXISTS operational_store_instance_property_ownership_binding
 
 CREATE OR REPLACE FUNCTION public.operational_store_publication_guard()
 RETURNS trigger LANGUAGE plpgsql AS $$
-DECLARE binding_state varchar(32); binding_published boolean; binding_host uuid; binding_environment varchar(32);
+DECLARE binding_state varchar(32); binding_published boolean; binding_host uuid;
+        binding_environment varchar(32); binding_contract bigint;
 BEGIN
     IF NEW.publication_state = 'ACTIVE' THEN
-        SELECT lifecycle_state,published,host_id,environment
-          INTO binding_state,binding_published,binding_host,binding_environment
+        SELECT lifecycle_state,published,host_id,environment,contract_version
+          INTO binding_state,binding_published,binding_host,binding_environment,binding_contract
           FROM public.operational_store_binding_t WHERE binding_id=NEW.binding_id;
-        IF binding_state IS DISTINCT FROM 'READY' OR binding_published IS DISTINCT FROM true
-           OR binding_host IS DISTINCT FROM NEW.host_id OR binding_environment IS DISTINCT FROM NEW.environment THEN
-            RAISE EXCEPTION 'only an exact READY operational-store binding may publish';
+        IF binding_published IS DISTINCT FROM true OR binding_host IS DISTINCT FROM NEW.host_id
+           OR (binding_contract=1 AND (binding_state IS DISTINCT FROM 'READY'
+               OR binding_environment IS DISTINCT FROM NEW.environment))
+           OR (binding_contract=2 AND (binding_state IS DISTINCT FROM 'REGISTERED'
+               OR NEW.environment IS NOT NULL)) THEN
+            RAISE EXCEPTION 'only an exact published operational-store binding may publish';
         END IF;
     END IF;
     RETURN NEW;
@@ -45638,14 +45653,49 @@ CREATE TRIGGER operational_store_publication_guard_trg
 BEFORE INSERT OR UPDATE ON public.operational_store_publication_t
 FOR EACH ROW EXECUTE FUNCTION public.operational_store_publication_guard();
 
+-- A prior run has already installed the read-only guard. Remove it before the
+-- idempotent seed writes and restore it below so this seed section is re-runnable.
+DROP TRIGGER IF EXISTS operational_store_legacy_profile_write_guard_trg
+    ON public.operational_store_profile_t;
+
 INSERT INTO public.operational_store_profile_t (
     profile_id, profile_version, deployment_profile, provider, profile_config,
     aggregate_version, active, update_user
 ) VALUES (
     'dev-dedicated-postgres-v1', 1, 'DEV_DEDICATED', 'POSTGRESQL',
     '{"databaseIdentity":"operations","databasePerHostEnvironment":true,"providerAdapter":"postgres17-pgvector-container","pooled":false}'::jsonb,
-    1, true, 'phase7-bootstrap'
+    1, false, 'p7-compatibility-closure'
 ) ON CONFLICT (profile_id, profile_version) DO NOTHING;
+
+INSERT INTO public.operational_store_profile_t (
+    profile_id, profile_version, deployment_profile, provider, profile_config,
+    aggregate_version, active, update_user
+) VALUES (
+    'customer-managed-registration-v2', 2, 'CUSTOMER_MANAGED', 'CUSTOMER_MANAGED',
+    '{"databaseProvisionedExternally":true,"hostScoped":true,"portalDatabaseAccess":false}'::jsonb,
+    1, true, 'registration-v2-bootstrap'
+) ON CONFLICT (profile_id, profile_version) DO NOTHING;
+
+-- Version-1 provider profiles and jobs are retained only for historical replay
+-- and audit. No application or operator may restart the retired provisioner.
+CREATE OR REPLACE FUNCTION public.operational_store_legacy_write_guard()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'version-1 operational-store provisioning is read-only';
+END
+$$;
+
+DROP TRIGGER IF EXISTS operational_store_legacy_job_write_guard_trg
+    ON public.operational_store_provisioning_job_t;
+CREATE TRIGGER operational_store_legacy_job_write_guard_trg
+BEFORE INSERT OR UPDATE OR DELETE ON public.operational_store_provisioning_job_t
+FOR EACH ROW EXECUTE FUNCTION public.operational_store_legacy_write_guard();
+
+DROP TRIGGER IF EXISTS operational_store_legacy_profile_write_guard_trg
+    ON public.operational_store_profile_t;
+CREATE TRIGGER operational_store_legacy_profile_write_guard_trg
+BEFORE INSERT OR UPDATE OR DELETE ON public.operational_store_profile_t
+FOR EACH ROW EXECUTE FUNCTION public.operational_store_legacy_write_guard();
 
 \unrestrict hH5RPVy0DmoyafcyXfCcG4i9sdKgsYSKTzXXVVYP7XpvO7UaT9TIlRIkHZQaYB0
 

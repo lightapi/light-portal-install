@@ -17,21 +17,24 @@ portalQuery.url: https://hybrid-query:8440
 client.verifyHostname: false
 client.caCertPath: /keystore/ca.pem
 
-operationalStore.contractVersion: 1
-operationalStore.bindingId: f3a3579a-868e-43fa-8d74-33fddab752e3
-operationalStore.bindingDigest: sha256:1fff74fd52bf824b411a535a5e2a990adcf9de5093d11d15bf93c0f10ba6c0c2
+operationalStore.contractVersion: 2
+operationalStore.bindingId: 01a06356-a4aa-7528-838e-dfbbe90ec959
+operationalStore.bindingDigest: sha256:79a39f6ff78c336d6ac9b0dc711115750bf22be954c584fa836930150e3db09e
 operationalStore.hostId: 01964b05-552a-7c4b-9184-6857e7f3dc5f
 operationalStore.environment: dev
+operationalStore.serverHost: postgres
+operationalStore.port: 5432
+operationalStore.tlsMode: DISABLE
 operationalStore.serviceOwner: light-a2a
 operationalStore.schema: a2a_ops
 operationalStore.expectedDatabase: operations
-operationalStore.minimumSchemaGeneration: 1
+operationalStore.minimumSchemaGeneration: 2
 operationalStore.databaseUrlFile: /run/secrets/operational-database-url
 operationalStore.credentialGeneration: 1
 
-artifactStore.bindingId: f3a3579a-868e-43fa-8d74-33fddab752e3
-artifactStore.bindingDigest: sha256:1fff74fd52bf824b411a535a5e2a990adcf9de5093d11d15bf93c0f10ba6c0c2
-artifactStore.minimumSchemaGeneration: 1
+artifactStore.bindingId: 01a06356-a4aa-7528-838e-dfbbe90ec959
+artifactStore.bindingDigest: sha256:79a39f6ff78c336d6ac9b0dc711115750bf22be954c584fa836930150e3db09e
+artifactStore.minimumSchemaGeneration: 2
 artifactStore.databaseUrlFile: /run/secrets/artifact-database-url
 artifactStore.rootDirectory: /var/lib/light-a2a/artifacts
 artifactStore.scanProfileId: light-a2a-static-v1

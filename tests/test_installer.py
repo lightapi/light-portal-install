@@ -136,7 +136,7 @@ class InstallerTest(unittest.TestCase):
 
         compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
         self.assertIn(
-            "AGENT_OPERATIONALSTORE_DATABASEURLFILE: /tmp/operational-database-url",
+            "AGENT_OPERATIONALSTORE_DATABASEURLFILE: /run/secrets/operational-database-url",
             compose,
         )
         self.assertNotIn("AGENTPOLICY_AGENTDEFID:", compose)
@@ -184,6 +184,28 @@ class InstallerTest(unittest.TestCase):
             "light-workflow-config-cache-init:\n        condition: service_completed_successfully",
             workflow,
         )
+
+    def test_all_bootstrap_paths_apply_and_wait_for_operational_registrations(self):
+        function = self.script[
+            self.script.index("bootstrap_events() {") :
+            self.script.index('\ncase "$command_name" in')
+        ]
+        restore_branch_end = function.index("  fi\n  apply_release_deltas")
+        self.assertGreater(restore_branch_end, function.index("try_restore_bootstrap_archive"))
+        self.assertGreater(restore_branch_end, function.index("import_events"))
+        self.assertLess(
+            function.index("apply_release_deltas"),
+            function.index("wait_for_baseline_projection_cursor"),
+        )
+        self.assertLess(
+            function.index("wait_for_baseline_projection_cursor"),
+            function.index("scripts/wait-for-operational-store-registrations.sh"),
+        )
+        assets = self.script[
+            self.script.index("validate_operational_store_assets() {") :
+            self.script.index("validate_compose_config() {")
+        ]
+        self.assertIn("scripts/wait-for-operational-store-registrations.sh", assets)
 
 
 if __name__ == "__main__":

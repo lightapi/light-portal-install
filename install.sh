@@ -397,9 +397,11 @@ validate_operational_store_assets() {
   local bundle_dir="postgres-db/operations/bundle"
 
   for required_file in \
-    postgres-db/operations/bin/bootstrap-operational-store.sh \
+    postgres-db/operations/bin/bootstrap-operational-databases.sh \
     postgres-db/operations/bin/reset-empty-operational-store.sh \
-    postgres-db/operations/bin/validate-operational-store.sh \
+    postgres-db/operations/bin/validate-operational-databases.sh \
+    postgres-db/operations/operational-databases.tsv \
+    scripts/wait-for-operational-store-registrations.sh \
     "$bundle_dir/manifest.json" \
     "$bundle_dir/migration-order.tsv" \
     "$bundle_dir/bundle.sha256"; do
@@ -939,12 +941,18 @@ SQL
 verify_event_delta_applied() {
   local delta="$1"
   local verify_delta_sql="$2"
-  local expected_json
-
-  expected_json="$(<"$delta")"
 
   [[ -f "$verify_delta_sql" ]] || die "event delta verification SQL is missing: $verify_delta_sql"
-  psql_exec -v "expected_json=$expected_json" < "$verify_delta_sql"
+  {
+    printf '%s\n' \
+      'CREATE TEMP TABLE expected_delta_input_t (payload_base64 TEXT NOT NULL);' \
+      'COPY expected_delta_input_t (payload_base64) FROM STDIN;'
+    base64 < "$delta" | tr -d '\n'
+    printf '\n\\.\n'
+    printf '%s\n' \
+      "SELECT convert_from(decode(payload_base64, 'base64'), 'UTF8') AS expected_json FROM expected_delta_input_t \\gset"
+    cat "$verify_delta_sql"
+  } | psql_exec
 }
 
 is_superseded_event_delta() {
@@ -1058,7 +1066,9 @@ apply_release_deltas() {
       ;;
   esac
 
-  [[ -f data/manifest.json ]] || die "release manifest is missing; run ./install.sh update or assets first"
+  if [[ ! -f data/manifest.json ]]; then
+    log "release manifest is absent; applying checked-in development deltas"
+  fi
   apply_db_patches
   compose up -d --no-deps hybrid-command hybrid-query
   import_event_deltas
@@ -1073,13 +1083,21 @@ bootstrap_events() {
   ensure_portal_runtime_database_access
   if try_restore_bootstrap_archive; then
     start_event_processors
-    apply_release_deltas
   else
     start_event_processors
     import_events
   fi
+  apply_release_deltas
   log "waiting for asynchronous baseline projection cursor before OAuth startup"
   wait_for_baseline_projection_cursor
+  case "${APPLY_RELEASE_DELTAS:-true}" in
+    false|FALSE|0|no|NO|n|N)
+      log "operational-store registration readiness skipped with release deltas"
+      ;;
+    *)
+      scripts/wait-for-operational-store-registrations.sh
+      ;;
+  esac
   validate_runnable_agent_snapshot
   start_light_oauth
 }

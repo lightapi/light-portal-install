@@ -169,6 +169,15 @@ class KnowledgeSchemaTest(unittest.TestCase):
         )
         self.assertNotIn('psql_exec < "$source_sql"', helper)
 
+    def test_event_delta_verification_streams_large_payloads(self):
+        install = (ROOT / "install.sh").read_text(encoding="utf-8")
+        helper = install[
+            install.index("verify_event_delta_applied() {") :
+            install.index("is_superseded_event_delta() {")
+        ]
+        self.assertIn("payload_base64 TEXT NOT NULL", helper)
+        self.assertNotIn('-v "expected_json=$expected_json"', helper)
+
     def test_snapshot_signing_key_uses_checked_in_local_compose_value(self):
         install = (ROOT / "install.sh").read_text(encoding="utf-8")
         compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
@@ -194,7 +203,7 @@ class KnowledgeSchemaTest(unittest.TestCase):
             compose,
         )
         self.assertIn(
-            "AGENT_OPERATIONALSTORE_DATABASEURLFILE: /tmp/operational-database-url",
+            "AGENT_OPERATIONALSTORE_DATABASEURLFILE: /run/secrets/operational-database-url",
             compose,
         )
 
@@ -207,20 +216,34 @@ class KnowledgeSchemaTest(unittest.TestCase):
         self.assertIn("LIGHT_KNOWLEDGE_DATABASE_URL:", compose)
         self.assertIn("LIGHT_KNOWLEDGE_WORKER_DATABASE_URL:", compose)
 
-    def test_operational_runtime_uses_compose_values_not_host_secret_mounts(self):
+    def test_operational_runtime_uses_host_specific_secret_volumes(self):
         install = (ROOT / "install.sh").read_text(encoding="utf-8")
         compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
         bootstrap = (
-            ROOT / "postgres-db/operations/bin/bootstrap-operational-store.sh"
+            ROOT / "postgres-db/operations/bin/bootstrap-operational-databases.sh"
         ).read_text(encoding="utf-8")
 
         self.assertNotIn("prepare_operational_database_secret", install)
         self.assertNotIn("./postgres-db/secrets/operational-database-url", compose)
+        self.assertIn("./postgres-db/secrets:/run/secrets:z", compose)
         self.assertIn("OPERATIONAL_DATABASE_URL:", compose)
         self.assertIn("GATEWAY_DATABASE_URL:", compose)
-        self.assertIn("GATEWAYEVIDENCE_DATABASEURLFILE: /tmp/gateway-database-url", compose)
-        self.assertIn("OPERATIONALSTORE_DATABASEURLFILE: /tmp/operational-database-url", compose)
-        self.assertIn('database_url="${OPERATIONAL_DATABASE_URL:-}"', bootstrap)
+        self.assertIn(
+            'host_dir="/source/operational-hosts/$${OPERATIONAL_RUNTIME_HOST:-dev.lightapi.net}"',
+            compose,
+        )
+        self.assertIn(
+            "GATEWAYEVIDENCE_DATABASEURLFILE: /run/secrets/operational-database-url",
+            compose,
+        )
+        self.assertIn(
+            "OPERATIONALSTORE_DATABASEURLFILE: /run/secrets/operational-database-url",
+            compose,
+        )
+        self.assertIn('operations_networknt', (
+            ROOT / "postgres-db/operations/operational-databases.tsv"
+        ).read_text(encoding="utf-8"))
+        self.assertIn('prepare_database_urls()', bootstrap)
 
     def test_bootstrap_rejects_operational_store_only_agent_snapshot(self):
         install = (ROOT / "install.sh").read_text(encoding="utf-8")

@@ -74,6 +74,40 @@ checkpoint requests, restore-verification metadata, and purge evidence. Its
 feature switches remain disabled until live migration, backup/restore,
 large-corpus, and horizontal-worker qualification passes.
 
+## Operational database registrations
+
+The laptop installation runs one PostgreSQL container but keeps the control
+plane and application data in separate databases. `configserver` stores Portal
+state, `knowledge` stores Knowledge data, and these Host registrations select
+three operational databases:
+
+| Host | Operational database |
+| --- | --- |
+| `dev.lightapi.net` | `operations` |
+| `dev.networknt.com` | `operations_networknt` |
+| `dev.taiji.io` | `operations_taiji` |
+
+On fresh and retained volumes, the installer creates or upgrades all five
+databases, imports the three Host registrations, and waits until Config Server
+contains an active registration and publication for every manifest entry. It
+also creates Host-specific URL files below
+`postgres-db/secrets/operational-hosts/<fqdn>/`. A one-shot Compose service
+copies the selected Host's service URLs into protected named volumes; each
+runtime sees its credential only at `/run/secrets/operational-database-url`.
+`OPERATIONAL_RUNTIME_HOST` defaults to `dev.lightapi.net` and may select either
+of the other two local Host mappings.
+
+These three registrations are development defaults, not a production database
+placement model. In production, select the customer's actual Portal Host and
+use the Operational Storage page to register the database endpoint owned by
+that customer. Set the real database DNS name and port, expected database,
+least-privilege runtime username, and an appropriate TLS mode (normally
+`VERIFY_FULL`). Use a mounted-file or external secret reference; store the
+credential in the deployment's secret manager and materialize it at the
+registered path. Do not put a PostgreSQL URL, password, or other credential
+value in Config Server. The Portal records and publishes only connection
+metadata and the credential reference.
+
 Start the Knowledge services with the rest of the installer stack:
 
 ```bash
@@ -382,7 +416,7 @@ docker compose up -d
 ```
 
 `CLEAN_VOLUMES=true ./install.sh start` explicitly removes the Compose volume
-and recreates all three databases. Before any operational application table is
+and recreates all five databases. Before any operational application table is
 created, the narrower Phase 1 fallback removes only `operations`:
 
 ```bash
