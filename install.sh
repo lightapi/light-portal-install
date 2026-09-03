@@ -1088,6 +1088,18 @@ bootstrap_events() {
     import_events
   fi
   apply_release_deltas
+  case "${APPLY_RELEASE_DELTAS:-true}" in
+    false|FALSE|0|no|NO|n|N)
+      log "private instance delta application skipped with release deltas"
+      ;;
+    *)
+      if [[ "${PORTAL_SKIP_INSTANCE_EVENT_DELTAS:-false}" == "true" ]]; then
+        log "private instance delta application skipped"
+      else
+        scripts/import-instance-event-deltas.sh
+      fi
+      ;;
+  esac
   log "waiting for asynchronous baseline projection cursor before OAuth startup"
   wait_for_baseline_projection_cursor
   case "${APPLY_RELEASE_DELTAS:-true}" in

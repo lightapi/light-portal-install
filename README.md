@@ -439,3 +439,9 @@ production must configure an approved external collector. Artifact rows store
 object references, never bytes. Gateway, audit, and artifact development
 resets require `RESET_GATEWAY_OPS`, `RESET_AUDIT_OPS`, and
 `RESET_ARTIFACT_OPS`, and affect only their own schemas.
+
+## Private Host deltas
+
+The signed baseline owns the three canonical Hosts; release deltas remain
+available for older pinned baselines. Keep customer-specific Host exports outside Git in
+`data/private-event-deltas`; see [the private delta guide](events/PRIVATE_INSTANCE_DELTAS.md).
