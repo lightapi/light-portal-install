@@ -4,6 +4,10 @@ Local Light Portal deployment with Docker Compose as the only host dependency.
 The installer also uses standard `curl`, `tar`, and `unzip` utilities to
 bootstrap the repo and extract downloaded asset archives.
 
+The canonical service, environment-variable, secret, port, dependency, and
+operational-storage reference is the
+[light-portal-install operations guide](https://doc.lightapi.net/operations/docker-compose/light-portal-install.html).
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/lightapi/light-portal-install/master/install.sh | bash
 ```
