@@ -398,6 +398,7 @@ validate_operational_store_assets() {
 
   for required_file in \
     postgres-db/operations/bin/bootstrap-operational-databases.sh \
+    postgres-db/operations/bin/publish-workflow-projections.sh \
     postgres-db/operations/bin/reset-empty-operational-store.sh \
     postgres-db/operations/bin/validate-operational-databases.sh \
     postgres-db/operations/operational-databases.tsv \
