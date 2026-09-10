@@ -232,9 +232,8 @@ class KnowledgeSchemaTest(unittest.TestCase):
             'host_dir="/source/operational-hosts/$${OPERATIONAL_RUNTIME_HOST:-dev.lightapi.net}"',
             compose,
         )
-        self.assertIn(
-            "GATEWAYEVIDENCE_DATABASEURLFILE: /run/secrets/operational-database-url",
-            compose,
+        self.assertNotRegex(
+            compose, r"GATEWAYEVIDENCE_|GATEWAY_EVIDENCE_|gatewayEvidence\.|gateway-evidence\."
         )
         self.assertIn(
             "OPERATIONALSTORE_DATABASEURLFILE: /run/secrets/operational-database-url",

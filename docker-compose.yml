@@ -502,7 +502,7 @@ services:
       start_period: 10s
 
   light-gateway:
-    image: ${LIGHT_GATEWAY_IMAGE:-networknt/light-gateway:latest}
+    image: ${LIGHT_GATEWAY_IMAGE:-networknt/light-gateway:2.3.5-dev.20260909.2338}
     ports:
       - "${LIGHT_GATEWAY_HOST_PORT:-443}:8443"
     volumes:
@@ -512,23 +512,6 @@ services:
       - gateway-runtime-secrets:/run/secrets:ro
     environment:
       LIGHT_RS_CONFIG_DIR: /config
-      GATEWAYEVIDENCE_ENABLED: "true"
-      GATEWAYEVIDENCE_CONTRACTVERSION: "2"
-      GATEWAYEVIDENCE_DATABASEURLFILE: /run/secrets/operational-database-url
-      GATEWAYEVIDENCE_BINDINGID: 01a06356-a4aa-7528-838e-dfbbe90ec959
-      GATEWAYEVIDENCE_BINDINGDIGEST: sha256:79a39f6ff78c336d6ac9b0dc711115750bf22be954c584fa836930150e3db09e
-      GATEWAYEVIDENCE_HOSTID: 01964b05-552a-7c4b-9184-6857e7f3dc5f
-      GATEWAYEVIDENCE_ENVIRONMENT: dev
-      GATEWAYEVIDENCE_SERVERHOST: postgres
-      GATEWAYEVIDENCE_PORT: "5432"
-      GATEWAYEVIDENCE_TLSMODE: DISABLE
-      GATEWAYEVIDENCE_SERVICEOWNER: light-gateway
-      GATEWAYEVIDENCE_SCHEMA: gateway_ops
-      GATEWAYEVIDENCE_EXPECTEDDATABASE: operations
-      GATEWAYEVIDENCE_MINIMUMSCHEMAGENERATION: "2"
-      GATEWAYEVIDENCE_CREDENTIALGENERATION: "1"
-      GATEWAYEVIDENCE_GATEWAYINSTANCE: light-gateway-install-1
-      GATEWAYEVIDENCE_SINKENDPOINT: stdout://collector
       # ACCESS_CONTROL_ENABLED: "false"
       CLIENT_VERIFYHOSTNAME: "false"
       CLIENT_CACERTPATH: /config/ca.pem
@@ -559,10 +542,11 @@ services:
         condition: service_completed_successfully
 
   llm-gateway:
-    image: ${LLM_GATEWAY_IMAGE:-${LIGHT_GATEWAY_IMAGE:-networknt/light-gateway:latest}}
+    image: ${LLM_GATEWAY_IMAGE:-${LIGHT_GATEWAY_IMAGE:-networknt/light-gateway:2.3.5-dev.20260909.2338}}
     ports:
       - "${LLM_GATEWAY_HOST_PORT:-8444}:8443"
     volumes:
+      - gateway-runtime-secrets:/run/secrets:ro
       - ./llm-gateway-rust/config:/config:ro,Z
     environment:
       LIGHT_RS_CONFIG_DIR: /config
@@ -577,6 +561,10 @@ services:
     hostname: llm-gateway
     container_name: llm-gateway
     depends_on:
+      operational-runtime-secrets-init:
+        condition: service_completed_successfully
+      operational-schema-validation:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       controller:
