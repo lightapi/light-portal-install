@@ -631,7 +631,7 @@ services:
     ports:
       - "${LIGHT_AGENT_PORT:-8083}:8083"
     volumes:
-      - ./light-agent-rust/config:/config:ro,Z
+      - ./light-agent-account-rust/config:/config:ro,Z
       - ./light-controller-rust/ca.pem:/keystore/ca.pem:ro,z
       - agent-a2a-artifacts:/var/lib/light-agent/a2a-artifacts
       - agent-runtime-secrets:/run/secrets:ro

@@ -449,3 +449,20 @@ resets require `RESET_GATEWAY_OPS`, `RESET_AUDIT_OPS`, and
 The signed baseline owns the three canonical Hosts; release deltas remain
 available for older pinned baselines. Keep customer-specific Host exports outside Git in
 `data/private-event-deltas`; see [the private delta guide](events/PRIVATE_INSTANCE_DELTAS.md).
+
+### Agent bootstrap-only configuration
+
+The installer currently defines the Account Agent service (`light-agent`). It
+mounts `light-agent-account-rust/config`, containing only `startup.yml`, `ca.pem`,
+`cert.pem`, and `key.pem`. Agent module templates come from the image; all instance
+runtime values come from Config Server. There are no mounted `agent.yml`,
+`client.yml`, `portal-registry.yml`, or `values.yml` overrides.
+
+When adding more Agent services, give each one its own startup/config directory
+and matching Portal service identity. Do not share Account's bootstrap folder.
+Before upgrading an older Config Server database to this layout, apply the
+transport migration from `light-portal-event/config/20260910-agent-bootstrap-only/`
+and refresh the affected snapshots. New installer event bundles must include the
+same transport settings: internal controller/query/MCP URLs, listener ports,
+advertised addresses, registry enablement, and client CA/hostname settings.
+Bootstrap authorization remains a private deployment credential.

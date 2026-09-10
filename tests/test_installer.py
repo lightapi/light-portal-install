@@ -124,15 +124,12 @@ class InstallerTest(unittest.TestCase):
             self.assertNotIn("db-provider.username: portal_local_runtime", values)
 
     def test_agent_template_uses_remote_config_namespace(self):
-        template = (ROOT / "light-agent-rust/config/agent.yml").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("${agent.runtimePolicy.publicationId:}", template)
-        self.assertIn("${agent.portalAssociation.runtimeInstanceId:}", template)
-        self.assertIn("${agent.agentPolicy.agentDefId:}", template)
-        self.assertNotIn("${runtimePolicy.publicationId:}", template)
-        self.assertNotIn("${portalAssociation.runtimeInstanceId:}", template)
-        self.assertNotIn("${agentPolicy.agentDefId:}", template)
+        config = ROOT / "light-agent-account-rust/config"
+        self.assertEqual({p.name for p in config.iterdir()},
+                         {"startup.yml", "ca.pem", "cert.pem", "key.pem"})
+        startup = (config / "startup.yml").read_text(encoding="utf-8")
+        self.assertIn("com.networknt.agent.account-1.0.0", startup)
+        self.assertIn("${LIGHT_CONFIG_SERVER_URI:https://config-server:8435}", startup)
 
         compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
         self.assertIn(
@@ -142,15 +139,10 @@ class InstallerTest(unittest.TestCase):
         self.assertNotIn("AGENTPOLICY_AGENTDEFID:", compose)
 
     def test_agent_bootstrap_transport_stays_local_and_policy_stays_remote(self):
-        values = (ROOT / "light-agent-rust/config/values.yml").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn(
-            "server.environment: ${LIGHT_AGENT_ENVIRONMENT:dev}", values
-        )
-        self.assertNotIn("model-provider.", values)
-        self.assertNotIn("codex.", values)
-        self.assertNotIn("\noperationalStore.", values)
+        startup = (ROOT / "light-agent-account-rust/config/startup.yml").read_text(encoding="utf-8")
+        self.assertIn("envTag: ${LIGHT_AGENT_ENVIRONMENT:dev}", startup)
+        self.assertIn("/config/ca.pem", startup)
+        self.assertFalse((ROOT / "light-agent-account-rust/config/values.yml").exists())
 
         compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
         self.assertNotIn("e741fa85-8a3d-432c-b31c-c41439d23f42", compose)
