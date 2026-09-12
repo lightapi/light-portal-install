@@ -1,0 +1,11 @@
+# Automatically included by install.sh after Claude enrollment.
+services:
+  controller:
+    ports:
+      - "127.0.0.1:8438:8438"
+    volumes:
+      - ./light-workflow-runner-personal/.runtime/admission.json:/run/runner-admission.json:ro,z
+    environment:
+      CONTROLLER_RUNNER_ENABLED: "true"
+      CONTROLLER_RUNNER_ADMISSION_PATH: /run/runner-admission.json
+      CONTROLLER_RUNNER_JWT_AUDIENCE: urn:lightapi:runner

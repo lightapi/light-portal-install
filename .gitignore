@@ -25,3 +25,5 @@ light-knowledge/secrets/*
 bootstrap/secrets/*
 __pycache__/
 *.pyc
+
+light-workflow-runner-personal/.runtime/

@@ -16,6 +16,18 @@ class InstallerTest(unittest.TestCase):
     def setUpClass(cls):
         cls.script = INSTALLER.read_text(encoding="utf-8")
 
+    def test_all_services_are_selected_without_compose_profiles(self):
+        import yaml
+        services = yaml.safe_load((ROOT / 'docker-compose.yml').read_text())['services']
+        self.assertTrue(all('profiles' not in service for service in services.values()))
+        self.assertIn('light-agent-claude-personal', services)
+        self.assertIn('light-a2a', services)
+        compose = self.script[self.script.index('compose() {'):self.script.index('\nload_env_file_var()')]
+        self.assertNotIn('--profile', compose)
+        self.assertNotIn('COMPOSE_PROFILES', compose)
+        verifier = (ROOT / 'scripts/verify-agent-image.sh').read_text()
+        self.assertNotIn('VERIFY_AGENT_PROFILES', verifier)
+
     def test_cache_busted_url_supports_plain_and_existing_query_urls(self):
         match = re.search(
             r"^cache_busted_url\(\) \{.*?^\}",

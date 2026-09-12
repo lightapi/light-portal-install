@@ -137,6 +137,14 @@ compose() {
     env_args+=(--env-file "$light_portal_env_file")
   fi
 
+  if [[ -f light-workflow-runner-claude-personal/.runtime/runner.yml ]]; then
+    env_args+=(-f docker-compose.yml -f light-workflow-runner-claude-personal/controller.compose.yml)
+    if [[ "${1:-}" == "up" ]]; then
+      python3 scripts/sync-personal-runner-admission.py light-workflow-runner-personal/.runtime || return 1
+      python3 scripts/personal-runner-lifecycle.py preflight . || return 1
+      bash scripts/verify-agent-image.sh docker docker compose "${env_args[@]}" || return 1
+    fi
+  fi
   docker compose "${env_args[@]}" "$@"
 }
 
@@ -341,7 +349,12 @@ start_stack() {
   require_command docker
   [[ -f .env ]] || cp .env.example .env
   ensure_knowledge_runtime
-  compose up -d
+  compose up -d || return 1
+  # Bootstrap also calls compose up for individual database/OAuth services.
+  # Reconcile runners only after the full Controller stack is available.
+  if [[ -f light-workflow-runner-claude-personal/.runtime/runner.yml ]]; then
+    python3 scripts/personal-runner-lifecycle.py restart . || return 1
+  fi
 }
 
 ensure_knowledge_database() {

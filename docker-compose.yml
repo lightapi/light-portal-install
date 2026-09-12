@@ -575,7 +575,6 @@ services:
         condition: service_healthy
 
   light-a2a:
-    profiles: ["a2a"]
     image: ${LIGHT_A2A_IMAGE:-networknt/light-a2a:latest}
     entrypoint: ["/bin/sh", "-ec"]
     command:
@@ -654,6 +653,67 @@ services:
       AGENT_LOG_ANSI: "false"
     hostname: light-agent
     container_name: light-agent
+    depends_on:
+      operational-runtime-secrets-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      operational-schema-validation:
+        condition: service_completed_successfully
+      light-oauth:
+        condition: service_healthy
+      controller:
+        condition: service_healthy
+      config-server:
+        condition: service_healthy
+      hybrid-query:
+        condition: service_started
+      light-gateway:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8083/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  light-agent-claude-personal:
+    image: ${LIGHT_AGENT_CLAUDE_PERSONAL_IMAGE:-networknt/light-agent:claude-phase3-local}
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        export LIGHT_PORTAL_AUTHORIZATION="Bearer $$(cat /run/claude-personal/service.jwt)"
+        umask 077
+        printf '%s' "$$LIGHT_A2A_AUTHORIZED_CONTEXT_KEY" > /tmp/a2a-authorized-context-key
+        exec /app/light-agent
+    ports:
+      - "127.0.0.1:${LIGHT_AGENT_CLAUDE_PERSONAL_PORT:-8090}:8083"
+    volumes:
+      - ./light-agent-claude-personal-rust/config:/config:ro,Z
+      - ./light-controller-rust/ca.pem:/keystore/ca.pem:ro,z
+      - agent-a2a-artifacts:/var/lib/light-agent/a2a-artifacts
+      - agent-runtime-secrets:/run/secrets:ro
+      - ./light-workflow-runner-claude-personal/.runtime/service.jwt:/run/claude-personal/service.jwt:ro,Z
+    environment:
+      LIGHT_RS_CONFIG_DIR: /config
+      LIGHT_AGENT_SERVICE_ID: com.networknt.agent.claude-personal-1.0.0
+      SERVER_SERVICEID: com.networknt.agent.claude-personal-1.0.0
+      LIGHT_AGENT_ADVERTISED_ADDRESS: light-agent-claude-personal
+      LIGHT_AGENT_STARTUP_HOST: dev.lightapi.net
+      LIGHT_AGENT_ENVIRONMENT: dev
+      LIGHT_ENV_TAG: dev
+      LIGHT_AGENT_HTTP_PORT: "8083"
+      LIGHT_A2A_AUTHORIZED_CONTEXT_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      AGENT_OPERATIONALSTORE_DATABASEURLFILE: /run/secrets/operational-database-url
+      AGENT_A2APOLICY_AUTHORIZATIONCONTEXTKEYFILE: /tmp/a2a-authorized-context-key
+      AGENT_A2AOUTBOUND_AUTHORIZATIONCONTEXTKEYFILE: /tmp/a2a-authorized-context-key
+      LIGHT_AGENT_HOST_ID: ${LIGHT_AGENT_HOST_ID:-01964b05-552a-7c4b-9184-6857e7f3dc5f}
+      LIGHT_AGENT_DELEGATION_SECRET: light-portal-install-local-delegation-key
+      LIGHT_AGENT_KNOWLEDGE_URL: http://light-knowledge:8092/
+      RUST_LOG: ${LIGHT_AGENT_RUST_LOG:-info}
+      AGENT_LOG_ANSI: "false"
+    hostname: light-agent-claude-personal
+    container_name: light-agent-claude-personal
     depends_on:
       operational-runtime-secrets-init:
         condition: service_completed_successfully
