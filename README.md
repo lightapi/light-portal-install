@@ -466,3 +466,10 @@ and refresh the affected snapshots. New installer event bundles must include the
 same transport settings: internal controller/query/MCP URLs, listener ports,
 advertised addresses, registry enablement, and client CA/hostname settings.
 Bootstrap authorization remains a private deployment credential.
+
+## Personal Codex worker policy
+
+For an optional dedicated personal Codex runner, see the
+[policy upgrade guide](light-workflow-runner-personal/codex-policy-upgrade.md)
+and its example. This requires a rebuilt Agent/worker and separate live qualification;
+it does not enable a personal runner in the default Compose deployment.

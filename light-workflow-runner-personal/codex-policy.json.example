@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "permissionSource": "codex-cli",
+  "permissionMode": "inherit",
+  "interaction": "unattended",
+  "allowedModels": [
+    "gpt-6-astra"
+  ]
+}
