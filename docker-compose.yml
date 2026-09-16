@@ -363,6 +363,7 @@ services:
       - ./light-workflow-rust/config/startup.yml:/config/startup.yml:ro,z
       - light-workflow-config-cache:/app/config-cache
       - workflow-runtime-secrets:/run/secrets:ro
+      - light-workflow-evidence:/var/lib/light-workflow/evidence
     environment:
       LIGHT_A2A_AUTHORIZED_CONTEXT_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
       WORKFLOW_A2A_AUTHORIZATIONCONTEXTKEYFILE: /tmp/a2a-authorized-context-key
@@ -832,6 +833,7 @@ volumes:
   postgres-data:
   light-workflow-config-cache:
   a2a-artifacts:
+  light-workflow-evidence:
   agent-a2a-artifacts:
   controller-runtime-secrets:
   workflow-runtime-secrets:

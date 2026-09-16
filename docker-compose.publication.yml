@@ -1,0 +1,51 @@
+# Explicit opt-in override; include after docker-compose.yml only when configured.
+# No GitHub credentials or publication permission are enabled by default.
+services:
+  light-workflow:
+    environment:
+      WORKFLOW_PUBLICATION_PROVIDER_URL: http://localhost:18450/v1/
+      WORKFLOW_PUBLICATION_PROVIDER_TOKEN_FILE: /app/publication-service-token
+    volumes:
+      - type: bind
+        source: ${WORKFLOW_PUBLICATION_SERVICE_TOKEN_FILE:?provide an owner-only service token file}
+        target: /app/publication-service-token
+        read_only: true
+        bind:
+          create_host_path: false
+
+  light-github-action-provider:
+    image: ${LIGHT_GITHUB_ACTION_PROVIDER_IMAGE:-light-github-action-provider:phase1-local}
+    build:
+      context: ${LIGHT_FABRIC_WORKSPACE:?provide the light-fabric checkout build context}
+      dockerfile: apps/light-github-action-provider/docker/Dockerfile
+    restart: unless-stopped
+    network_mode: service:light-workflow
+    depends_on:
+      light-workflow:
+        condition: service_started
+    environment:
+      GITHUB_ACTION_PROVIDER_ADDR: 127.0.0.1:18450
+      GITHUB_ACTION_PROVIDER_DB: /var/lib/light-github-action-provider/journal.sqlite
+      GITHUB_ACTION_PROVIDER_WORK_ROOT: /var/lib/light-github-action-provider/work
+      GITHUB_ACTION_PROVIDER_SERVICE_TOKEN_FILE: /run/publication/service-token
+      GITHUB_ACTION_PROVIDER_TOKEN_FILE: /run/publication/github-token
+      GITHUB_ACTION_PROVIDER_REPOSITORIES: ${WORKFLOW_PUBLICATION_REPOSITORIES:?provide an explicit clone URL allowlist}
+      GITHUB_ACTION_PROVIDER_PUBLICATION_POLICY: ${WORKFLOW_PUBLICATION_POLICY:?provide explicit repository branch path and capability policy}
+      GITHUB_ACTION_PROVIDER_BRANCH_PREFIX: ${WORKFLOW_PUBLICATION_BRANCH_PREFIX:-qualification/}
+    volumes:
+      - github-publication-state:/var/lib/light-github-action-provider
+      - type: bind
+        source: ${WORKFLOW_PUBLICATION_SERVICE_TOKEN_FILE:?provide an owner-only service token file}
+        target: /run/publication/service-token
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${WORKFLOW_PUBLICATION_GITHUB_TOKEN_FILE:?provide an owner-only GitHub token file}
+        target: /run/publication/github-token
+        read_only: true
+        bind:
+          create_host_path: false
+
+volumes:
+  github-publication-state:

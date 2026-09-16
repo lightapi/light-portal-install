@@ -86,6 +86,14 @@ runtime_role_suffixes=(
   deployer_runtime
 )
 for database_name in operations operations_networknt operations_taiji; do
+  action_privileges="$(docker exec "$container_name" psql -U postgres -d "$database_name" -X -tAc \
+    "SELECT bool_and(has_table_privilege('${database_name}_workflow_runtime', 'workflow_ops.' || t, 'SELECT') AND has_table_privilege('${database_name}_workflow_runtime', 'workflow_ops.' || t, 'INSERT') AND has_table_privilege('${database_name}_workflow_runtime', 'workflow_ops.' || t, 'UPDATE') AND NOT has_table_privilege('${database_name}_agent_runtime', 'workflow_ops.' || t, 'INSERT')) FROM unnest(ARRAY['workflow_action_authority_t','workflow_action_permit_t','workflow_action_dispatch_t','workflow_action_audit_t','workflow_gateway_owner_t','workflow_gateway_boot_t']) t")"
+  [[ "$action_privileges" == "t" ]] || {
+    echo "runtime gate: Workflow action privileges or Agent isolation failed for $database_name" >&2
+    exit 1
+  }
+done
+for database_name in operations operations_networknt operations_taiji; do
   for role_suffix in "${runtime_role_suffixes[@]}"; do
     runtime_role="${database_name}_${role_suffix}"
     identity_privileges="$(docker exec "$container_name" psql -U postgres -d "$database_name" -X -tA -F '|' -c \
