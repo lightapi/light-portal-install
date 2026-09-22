@@ -8,6 +8,7 @@ jwt_issuer: "urn:com:networknt:oauth2:v1"
 jwt_audience: "urn:com.networknt"
 oidc_discovery_enabled: true
 public_issuer_base_url: "https://oauth.localhost"
+device_verification_uri: "https://local.localhost/device"
 default_provider_id: "AZZRJE52eXu3t1hseacnGQ"
 oidc_scopes_supported:
   - "portal.r"
