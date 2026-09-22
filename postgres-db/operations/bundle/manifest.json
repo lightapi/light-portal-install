@@ -228,6 +228,15 @@
       "path": "crates/agent-store/migrations/agent-postgres/0005_workflow_job_owner.sql",
       "sha256": "0686196df779bcf7fe57a11b8a4a61472e1ce6353a334376afc80106e26a023b"
     }
+    ,
+    {
+      "order": 29,
+      "owner": "workflow-store",
+      "schema": "workflow_ops",
+      "migrationId": "0011_workflow_human_task_assignment",
+      "path": "crates/workflow-store/migrations/workflow-postgres/0011_workflow_human_task_assignment.sql",
+      "sha256": "7ec51978be73b082faebe81176a1dc2f509023c47ccf14589651dc3e007fe1ba"
+    }
   ],
   "roleProfileVersion": 1,
   "scopeRootVersion": 2,
