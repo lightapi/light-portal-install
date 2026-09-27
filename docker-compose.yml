@@ -125,9 +125,12 @@ services:
       WORKFLOW_TOOL_ACCESS_APPROVAL_DIGEST: sha256:29167fa1e53a00187685c8d459016fefbf69567dd974fc3a90d0d619ca3a887a
       LIGHT_KNOWLEDGE_ADMIN_COMMAND_URL: http://light-knowledge-admin:8093/v1/knowledge/admin/commands
       A2A_SIGNING_SERVICE_URL: ${A2A_SIGNING_SERVICE_URL:-https://light-oauth:6881}
+      LIGHT_GATEWAY_MCP_URL: "https://light-gateway:8443/mcp"
+      LIGHT_GATEWAY_TLS_CA_PATH: /run/secrets/gateway-trust.pem
     volumes:
       - ./hybrid-command/config:/config:Z
       - ./hybrid-command/service:/service:Z
+      - ./light-gateway-rust/config/ca.pem:/run/secrets/gateway-trust.pem:ro,z
       - ${PORTAL_DATA_DIR:-./data}:/data:z
     ports:
       - "8439:8439"
@@ -160,7 +163,6 @@ services:
       embedding-task.model: ${EMBEDDING_TASK_MODEL:-gemini-embedding-001}
       embedding-task.dimension: ${EMBEDDING_TASK_DIMENSION:-384}
       embedding-task.apiKey: ${GEMINI_API_KEY:-}
-      JAVA_TOOL_OPTIONS: "-Djdk.internal.httpclient.disableHostnameVerification=true"
       LIGHT_GATEWAY_MCP_URL: "https://light-gateway:8443/mcp"
       LIGHT_GATEWAY_TLS_CA_PATH: /run/secrets/gateway-trust.pem
     hostname: hybrid-query

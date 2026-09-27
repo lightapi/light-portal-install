@@ -76,6 +76,16 @@ fi
 if grep -q 'publish-workflow-projections' "$repo_root/install.sh"; then
   fail "installer still ships the retired Workflow projection publisher"
 fi
+docker compose -f "$compose_file" config --format json | jq -e '
+  . as $root | all(["hybrid-command", "hybrid-query"][];
+    $root.services[.] as $service |
+    $service.environment.LIGHT_GATEWAY_MCP_URL == "https://light-gateway:8443/mcp" and
+    $service.environment.LIGHT_GATEWAY_TLS_CA_PATH == "/run/secrets/gateway-trust.pem" and
+    (($service.environment.JAVA_TOOL_OPTIONS // "") | contains("disableHostnameVerification") | not) and
+    any($service.volumes[]; .target == "/run/secrets/gateway-trust.pem" and .read_only == true
+      and (.source | endswith("/light-gateway-rust/config/ca.pem")))
+  )
+' >/dev/null || fail "both Portal Workflow MCP consumers need verified Gateway CA trust"
 grep -q 'operational-hosts/\$${OPERATIONAL_RUNTIME_HOST:-dev.lightapi.net}' "$compose_file" ||
   fail "runtime credentials are not selected by Host FQDN"
 grep -q '/run/secrets/operational-database-url' "$compose_file" ||
