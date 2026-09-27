@@ -210,10 +210,7 @@ class InstallerTest(unittest.TestCase):
             self.script.index("validate_compose_config() {")
         ]
         self.assertIn("scripts/wait-for-operational-store-registrations.sh", assets)
-        self.assertIn(
-            "postgres-db/operations/bin/publish-workflow-projections.sh",
-            assets,
-        )
+        self.assertNotIn("publish-workflow-projections.sh", assets)
 
 
 if __name__ == "__main__":
