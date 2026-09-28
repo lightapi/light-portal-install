@@ -31,6 +31,7 @@ services:
       - agent-runtime-secrets:/run/secrets:ro
     environment:
       LIGHT_RS_CONFIG_DIR: /config
+      LIGHT_AGENT_DB_MAX_CONNECTIONS: "${LIGHT_AGENT_DB_MAX_CONNECTIONS:-4}"
       LIGHT_AGENT_SERVICE_ID: com.networknt.agent.codex-personal-workflow-1.0.0
       SERVER_SERVICEID: com.networknt.agent.codex-personal-workflow-1.0.0
       LIGHT_AGENT_ADVERTISED_ADDRESS: light-agent-codex-personal-workflow
@@ -59,6 +60,7 @@ services:
       - agent-runtime-secrets:/run/secrets:ro
     environment:
       LIGHT_RS_CONFIG_DIR: /config
+      LIGHT_AGENT_DB_MAX_CONNECTIONS: "${LIGHT_AGENT_DB_MAX_CONNECTIONS:-4}"
       LIGHT_AGENT_SERVICE_ID: com.networknt.agent.claude-personal-workflow-1.0.0
       SERVER_SERVICEID: com.networknt.agent.claude-personal-workflow-1.0.0
       LIGHT_AGENT_ADVERTISED_ADDRESS: light-agent-claude-personal-workflow

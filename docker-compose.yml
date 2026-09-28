@@ -337,6 +337,8 @@ services:
       LIGHT_A2A_AUTHORIZED_CONTEXT_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
       WORKFLOW_A2A_AUTHORIZATIONCONTEXTKEYFILE: /tmp/a2a-authorized-context-key
       WORKFLOW_IGNORE_USER_JWT_EXPIRY: "true"
+      WORKFLOW_EXECUTION_HOSTEXECUTORCONCURRENCY: "${WORKFLOW_HOST_EXECUTOR_CONCURRENCY:-4}"
+      WORKFLOW_DATABASE_MAXCONNECTIONS: "${WORKFLOW_DB_MAX_CONNECTIONS:-16}"
       SERVER_ENABLEREGISTRY: "true"
       SERVER_STARTONREGISTRYFAILURE: "false"
       PORTALREGISTRY_PORTALURL: "https://controller:8438"
@@ -607,6 +609,7 @@ services:
       - agent-runtime-secrets:/run/secrets:ro
     environment:
       LIGHT_RS_CONFIG_DIR: /config
+      LIGHT_AGENT_DB_MAX_CONNECTIONS: "${LIGHT_AGENT_DB_MAX_CONNECTIONS:-4}"
       LIGHT_A2A_AUTHORIZED_CONTEXT_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
       AGENT_OPERATIONALSTORE_DATABASEURLFILE: /run/secrets/operational-database-url
       AGENT_A2APOLICY_AUTHORIZATIONCONTEXTKEYFILE: /tmp/a2a-authorized-context-key
@@ -667,6 +670,7 @@ services:
       - ./light-workflow-runner-claude-personal/.runtime/service.jwt:/run/claude-personal/service.jwt:ro,Z
     environment:
       LIGHT_RS_CONFIG_DIR: /config
+      LIGHT_AGENT_DB_MAX_CONNECTIONS: "${LIGHT_AGENT_DB_MAX_CONNECTIONS:-4}"
       LIGHT_AGENT_SERVICE_ID: com.networknt.agent.claude-personal-1.0.0
       SERVER_SERVICEID: com.networknt.agent.claude-personal-1.0.0
       LIGHT_AGENT_ADVERTISED_ADDRESS: light-agent-claude-personal
