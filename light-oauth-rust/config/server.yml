@@ -1,4 +1,3 @@
-workflowBroker: ${workflow_broker:null}
 # Server configuration
 dbUrl: ${db_url}
 port: ${server_port}
