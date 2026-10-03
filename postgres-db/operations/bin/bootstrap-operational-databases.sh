@@ -7,7 +7,7 @@ manifest="${OPERATIONAL_DATABASE_MANIFEST:-/opt/operational-store/operational-da
 secret_root="${OPERATIONAL_HOST_SECRET_ROOT:-/run/secrets/operational-hosts}"
 database_host="${OPERATIONAL_DATABASE_HOST:-postgres}"
 database_port="${OPERATIONAL_DATABASE_PORT:-5432}"
-bundle_version="${OPERATIONAL_BUNDLE_VERSION:-2.4.0}"
+bundle_version="${OPERATIONAL_BUNDLE_VERSION:-2.6.0}"
 contract_generation="${OPERATIONAL_CONTRACT_GENERATION:-2}"
 
 fail() {
@@ -16,7 +16,6 @@ fail() {
 }
 
 [[ -f "$manifest" ]] || fail "database manifest is missing"
-[[ -f "$bundle_root/manifest.json" ]] || fail "bundle manifest is missing"
 [[ -f "$bundle_root/migration-order.tsv" ]] || fail "migration order is missing"
 [[ "$database_host" =~ ^[A-Za-z0-9._-]+$ ]] || fail "invalid database host"
 [[ "$database_port" =~ ^[0-9]{1,5}$ ]] || fail "invalid database port"
@@ -25,9 +24,31 @@ fail() {
 if ! (cd "$bundle_root" && sha256sum -c bundle.sha256 >/dev/null); then
   fail "bundle checksum verification failed"
 fi
-manifest_bundle_version="$(awk -F '"' '/"bundleVersion"/ { print $4; exit }' "$bundle_root/manifest.json")"
-[[ "$manifest_bundle_version" == "$bundle_version" ]] ||
-  fail "bundle manifest version does not match OPERATIONAL_BUNDLE_VERSION"
+
+# W7 preparation and startup share this local lock. External placement
+# quiescence is separately owner-enforced; this lock is not distributed proof.
+operations_root="$(cd -- "$bundle_root/.." && pwd)"
+state_dir="$operations_root/.runtime/w7"
+[[ -d "$state_dir" ]] || fail "W7 preparation is missing"
+exec 9>"$state_dir/w7.lock"
+flock -n 9 || fail "W7 preparation or startup is in progress"
+bash "$operations_root/bin/w7-startup-guard.sh" "$operations_root" --lock-held || fail "W7 preparation changed"
+# Preparation must finish in EVERY database before any startup copy/apply,
+# identity update or credential rotation. A stale ready file cannot authorize
+# replay of a missing migration. Normal startup below therefore only skips
+# existing accepted entries; it never enables admission.
+while IFS=$'\t' read -r db_name _host _scope _binding _digest extra; do
+  [[ -n "$db_name" && "$db_name" != \#* ]] || continue
+  [[ "$db_name" =~ ^[a-z][a-z0-9_]{0,62}$ && -z "${extra:-}" ]] || fail "invalid prepared database manifest"
+  while IFS=$'\t' read -r order owner schema migration _path digest; do
+    [[ -n "$order" && "$order" != \#* ]] || continue
+    [[ "$owner" =~ ^[a-z][a-z0-9-]*$ && "$schema" =~ ^[a-z][a-z0-9_]*$ && "$migration" =~ ^[0-9]{4}_[a-z0-9_]+$ ]] || fail "invalid prepared migration"
+    recorded="$(psql -U "$database_user" -d "$db_name" -X -tAc "SELECT migration_digest FROM operational_meta.operational_schema_migration_t WHERE migration_owner='$owner' AND schema_name='$schema' AND migration_id='$migration'")"
+    [[ "$recorded" == "sha256:$digest" ]] || fail "W7 schema preparation incomplete or changed"
+  done < "$bundle_root/migration-order.tsv"
+  ready="$(psql -U "$database_user" -d "$db_name" -X -tAc "SELECT to_regprocedure('workflow_ops.workflow_claim_host_task_v2(uuid,integer,text[])') IS NOT NULL AND to_regclass('workflow_ops.workflow_operation_receipt_t') IS NOT NULL")"
+  [[ "$ready" == t ]] || fail "W7 reactivation requires reviewed schema restoration"
+done < "$manifest"
 
 umask 077
 mkdir -p "$secret_root"
