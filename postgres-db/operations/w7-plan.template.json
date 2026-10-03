@@ -1,0 +1,301 @@
+{
+  "version": 1,
+  "deployment_id": "OWNER_REVIEWED_DEPLOYMENT_ID",
+  "freshness_seconds": 90,
+  "gates": [
+    {
+      "id": "portal",
+      "kind": "portal",
+      "database": "configserver",
+      "schema": "public",
+      "pgservice": "e04_portal",
+      "catalog_fingerprint": "OWNER_QUALIFIED_SHA256_REQUIRED",
+      "rollback_catalog_fingerprint": "OWNER_QUALIFIED_ROLLBACK_SHA256_REQUIRED",
+      "qualification_reference": "OWNER_DISPOSABLE_QUALIFICATION_REFERENCE_REQUIRED"
+    },
+    {
+      "id": "operations",
+      "kind": "operational",
+      "database": "operations",
+      "schema": "workflow_ops",
+      "pgservice": "e04_operations",
+      "scope_root_id": "01964b05-552a-7c4b-9184-6857e7f3dc5f",
+      "catalog_fingerprint": "OWNER_QUALIFIED_SHA256_REQUIRED",
+      "rollback_catalog_fingerprint": "OWNER_QUALIFIED_ROLLBACK_SHA256_REQUIRED",
+      "qualification_reference": "OWNER_DISPOSABLE_QUALIFICATION_REFERENCE_REQUIRED"
+    },
+    {
+      "id": "operations_networknt",
+      "kind": "operational",
+      "database": "operations_networknt",
+      "schema": "workflow_ops",
+      "pgservice": "e04_operations_networknt",
+      "scope_root_id": "01a04864-b507-74dd-962a-d1e26769a3b4",
+      "catalog_fingerprint": "OWNER_QUALIFIED_SHA256_REQUIRED",
+      "rollback_catalog_fingerprint": "OWNER_QUALIFIED_ROLLBACK_SHA256_REQUIRED",
+      "qualification_reference": "OWNER_DISPOSABLE_QUALIFICATION_REFERENCE_REQUIRED"
+    },
+    {
+      "id": "operations_taiji",
+      "kind": "operational",
+      "database": "operations_taiji",
+      "schema": "workflow_ops",
+      "pgservice": "e04_operations_taiji",
+      "scope_root_id": "01a06288-ceec-7de6-85b1-ed12d4dd4732",
+      "catalog_fingerprint": "OWNER_QUALIFIED_SHA256_REQUIRED",
+      "rollback_catalog_fingerprint": "OWNER_QUALIFIED_ROLLBACK_SHA256_REQUIRED",
+      "qualification_reference": "OWNER_DISPOSABLE_QUALIFICATION_REFERENCE_REQUIRED"
+    }
+  ],
+  "placements": [
+    {
+      "id": "local",
+      "adapter": "docker-compose",
+      "project": "OWNER_COMPOSE_PROJECT_REQUIRED",
+      "gate_ids": [
+        "portal",
+        "operations",
+        "operations_networknt",
+        "operations_taiji"
+      ],
+      "services": {
+        "postgres": {
+          "role": "infrastructure",
+          "minimum_instances": 1,
+          "maximum_instances": 1,
+          "images": [
+            "OWNER_REVIEWED_SHA256_REQUIRED"
+          ],
+          "source_image_expression": "timescale/timescaledb:latest-pg17"
+        },
+        "knowledge-schema-migration": {
+          "role": "infrastructure",
+          "minimum_instances": 0,
+          "maximum_instances": 1,
+          "images": [
+            "OWNER_REVIEWED_SHA256_REQUIRED"
+          ],
+          "source_image_expression": "timescale/timescaledb:latest-pg17"
+        },
+        "operational-store-bootstrap": {
+          "role": "infrastructure",
+          "minimum_instances": 0,
+          "maximum_instances": 1,
+          "images": [
+            "OWNER_REVIEWED_SHA256_REQUIRED"
+          ],
+          "source_image_expression": "timescale/timescaledb:latest-pg17"
+        },
+        "operational-schema-validation": {
+          "role": "infrastructure",
+          "minimum_instances": 0,
+          "maximum_instances": 1,
+          "images": [
+            "OWNER_REVIEWED_SHA256_REQUIRED"
+          ],
+          "source_image_expression": "timescale/timescaledb:latest-pg17"
+        },
+        "operational-runtime-secrets-init": {
+          "role": "infrastructure",
+          "minimum_instances": 0,
+          "maximum_instances": 1,
+          "images": [
+            "OWNER_REVIEWED_SHA256_REQUIRED"
+          ],
+          "source_image_expression": "timescale/timescaledb:latest-pg17"
+        },
+        "hybrid-command": {
+          "role": "portal-admission",
+          "minimum_instances": 1,
+          "maximum_instances": 1,
+          "images": [
+            "OWNER_REVIEWED_SHA256_REQUIRED"
+          ],
+          "source_image_expression": "${PORTAL_HYBRID_COMMAND_IMAGE:-networknt/portal-hybrid-command:latest}"
+        },
+        "hybrid-query": {
+          "role": "portal-projection",
+          "minimum_instances": 1,
+          "maximum_instances": 1,
+          "images": [
+            "OWNER_REVIEWED_SHA256_REQUIRED"
+          ],
+          "source_image_expression": "${PORTAL_HYBRID_QUERY_IMAGE:-networknt/portal-hybrid-query:latest}"
+        },
+        "controller": {
+          "role": "controller",
+          "minimum_instances": 1,
+          "maximum_instances": 1,
+          "images": [
+            "OWNER_REVIEWED_SHA256_REQUIRED"
+          ],
+          "source_image_expression": "${CONTROLLER_RS_IMAGE:-networknt/controller-rs:latest}"
+        },
+        "light-oauth": {
+          "role": "infrastructure",
+          "minimum_instances": 1,
+          "maximum_instances": 1,
+          "images": [
+            "OWNER_REVIEWED_SHA256_REQUIRED"
+          ],
+          "source_image_expression": "${LIGHT_OAUTH_IMAGE:-networknt/light-oauth:latest}"
+        },
+        "config-server": {
+          "role": "infrastructure",
+          "minimum_instances": 1,
+          "maximum_instances": 1,
+          "images": [
+            "OWNER_REVIEWED_SHA256_REQUIRED"
+          ],
+          "source_image_expression": "${CONFIG_SERVER_IMAGE:-networknt/config-server:latest}"
+        },
+        "portal-service": {
+          "role": "infrastructure",
+          "minimum_instances": 1,
+          "maximum_instances": 1,
+          "images": [
+            "OWNER_REVIEWED_SHA256_REQUIRED"
+          ],
+          "source_image_expression": "${PORTAL_SERVICE_IMAGE:-networknt/portal-service:latest}"
+        },
+        "w7-controller-page-readiness": {
+          "role": "infrastructure",
+          "minimum_instances": 0,
+          "maximum_instances": 1,
+          "images": [
+            "OWNER_REVIEWED_SHA256_REQUIRED"
+          ],
+          "source_image_expression": "${CONTROLLER_RS_IMAGE:-networknt/controller-rs:latest}"
+        },
+        "light-workflow-config-cache-init": {
+          "role": "infrastructure",
+          "minimum_instances": 0,
+          "maximum_instances": 1,
+          "images": [
+            "OWNER_REVIEWED_SHA256_REQUIRED"
+          ],
+          "source_image_expression": "${LIGHT_WORKFLOW_IMAGE:-networknt/light-workflow:latest}"
+        },
+        "light-workflow": {
+          "role": "workflow",
+          "minimum_instances": 1,
+          "maximum_instances": 1,
+          "images": [
+            "OWNER_REVIEWED_SHA256_REQUIRED"
+          ],
+          "source_image_expression": "${LIGHT_WORKFLOW_IMAGE:-networknt/light-workflow:latest}",
+          "gate_id": "operations",
+          "supported_profiles": [
+            "cel-workflow-v1",
+            "cel-workflow-v2"
+          ],
+          "admits_profiles": [
+            "cel-workflow-v1",
+            "cel-workflow-v2"
+          ],
+          "binary_version": "OWNER_ACCEPTED_BINARY_VERSION_REQUIRED"
+        },
+        "demo-customer-profile-api": {
+          "role": "infrastructure",
+          "minimum_instances": 1,
+          "maximum_instances": 1,
+          "images": [
+            "OWNER_REVIEWED_SHA256_REQUIRED"
+          ],
+          "source_image_expression": "${DEMO_CUSTOMER_PROFILE_API_IMAGE:-networknt/demo-customer-profile-api:latest}"
+        },
+        "demo-offer-decision-api": {
+          "role": "infrastructure",
+          "minimum_instances": 1,
+          "maximum_instances": 1,
+          "images": [
+            "OWNER_REVIEWED_SHA256_REQUIRED"
+          ],
+          "source_image_expression": "${DEMO_OFFER_DECISION_API_IMAGE:-networknt/demo-offer-decision-api:latest}"
+        },
+        "demo-insurance-claim-mcp-server": {
+          "role": "infrastructure",
+          "minimum_instances": 1,
+          "maximum_instances": 1,
+          "images": [
+            "OWNER_REVIEWED_SHA256_REQUIRED"
+          ],
+          "source_image_expression": "${DEMO_INSURANCE_CLAIM_MCP_SERVER_IMAGE:-networknt/demo-insurance-claim-mcp-server:latest}"
+        },
+        "light-gateway": {
+          "role": "gateway",
+          "minimum_instances": 1,
+          "maximum_instances": 1,
+          "images": [
+            "OWNER_REVIEWED_SHA256_REQUIRED"
+          ],
+          "source_image_expression": "${LIGHT_GATEWAY_IMAGE:-networknt/light-gateway:2.3.5-dev.20260909.2338}"
+        },
+        "llm-gateway": {
+          "role": "gateway",
+          "minimum_instances": 1,
+          "maximum_instances": 1,
+          "images": [
+            "OWNER_REVIEWED_SHA256_REQUIRED"
+          ],
+          "source_image_expression": "${LLM_GATEWAY_IMAGE:-${LIGHT_GATEWAY_IMAGE:-networknt/light-gateway:2.3.5-dev.20260909.2338}}"
+        },
+        "light-a2a": {
+          "role": "infrastructure",
+          "minimum_instances": 1,
+          "maximum_instances": 1,
+          "images": [
+            "OWNER_REVIEWED_SHA256_REQUIRED"
+          ],
+          "source_image_expression": "${LIGHT_A2A_IMAGE:-networknt/light-a2a:latest}"
+        },
+        "light-agent": {
+          "role": "agent",
+          "minimum_instances": 1,
+          "maximum_instances": 1,
+          "images": [
+            "OWNER_REVIEWED_SHA256_REQUIRED"
+          ],
+          "source_image_expression": "${LIGHT_AGENT_IMAGE:-networknt/light-agent:latest}"
+        },
+        "light-agent-claude-personal": {
+          "role": "agent",
+          "minimum_instances": 1,
+          "maximum_instances": 1,
+          "images": [
+            "OWNER_REVIEWED_SHA256_REQUIRED"
+          ],
+          "source_image_expression": "${LIGHT_AGENT_CLAUDE_PERSONAL_IMAGE:-networknt/light-agent:claude-phase3-local}"
+        },
+        "light-knowledge": {
+          "role": "infrastructure",
+          "minimum_instances": 1,
+          "maximum_instances": 1,
+          "images": [
+            "OWNER_REVIEWED_SHA256_REQUIRED"
+          ],
+          "source_image_expression": "${LIGHT_KNOWLEDGE_IMAGE:-networknt/light-knowledge:latest}"
+        },
+        "light-knowledge-worker": {
+          "role": "infrastructure",
+          "minimum_instances": 1,
+          "maximum_instances": 1,
+          "images": [
+            "OWNER_REVIEWED_SHA256_REQUIRED"
+          ],
+          "source_image_expression": "${LIGHT_KNOWLEDGE_WORKER_IMAGE:-networknt/light-knowledge-worker:latest}"
+        },
+        "light-knowledge-admin": {
+          "role": "infrastructure",
+          "minimum_instances": 1,
+          "maximum_instances": 1,
+          "images": [
+            "OWNER_REVIEWED_SHA256_REQUIRED"
+          ],
+          "source_image_expression": "${LIGHT_KNOWLEDGE_ADMIN_IMAGE:-networknt/light-knowledge-admin:latest}"
+        }
+      }
+    }
+  ],
+  "owner_obligation": "Add EVERY external placement or authoritative no-external-writers proof. Template is deliberately not runnable."
+}
