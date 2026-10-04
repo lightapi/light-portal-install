@@ -652,6 +652,9 @@ services:
 
   light-agent-claude-personal:
     image: ${LIGHT_AGENT_CLAUDE_PERSONAL_IMAGE:-${LIGHT_AGENT_IMAGE:-networknt/light-agent:latest}}
+    # Enrollment supplies the private service token and enables this instance.
+    deploy:
+      replicas: 0
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |

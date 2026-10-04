@@ -1,5 +1,8 @@
 # Automatically included by install.sh after Claude enrollment.
 services:
+  light-agent-claude-personal:
+    deploy:
+      replicas: 1
   controller:
     ports:
       - "127.0.0.1:8438:8438"

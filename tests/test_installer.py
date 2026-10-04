@@ -67,6 +67,30 @@ class InstallerTest(unittest.TestCase):
                     services = json.loads(result.stdout)['services']
                     self.assertEqual(expected, services['light-agent-claude-personal']['image'])
 
+    def test_claude_agent_starts_only_with_enrollment_overlay(self):
+        env = {key: value for key, value in os.environ.items()
+               if not key.startswith('COMPOSE_')}
+        env['PORTAL_HYBRID_COMMAND_IMAGE'] = 'networknt/portal-hybrid-command:test'
+        env['PORTAL_HYBRID_QUERY_IMAGE'] = 'networknt/portal-hybrid-query:test'
+        with tempfile.NamedTemporaryFile() as selections:
+            for enrolled in (False, True):
+                with self.subTest(enrolled=enrolled):
+                    command = ['docker', 'compose', '--env-file', selections.name,
+                               '-f', 'docker-compose.yml']
+                    if enrolled:
+                        command += ['-f', 'light-workflow-runner-claude-personal/controller.compose.yml']
+                    result = subprocess.run(command + ['config', '--format', 'json'],
+                                            cwd=ROOT, env=env, text=True, capture_output=True)
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    services = json.loads(result.stdout)['services']
+                    self.assertEqual(int(enrolled), services['light-agent-claude-personal']['deploy']['replicas'])
+
+    def test_distribution_does_not_track_private_runner_runtime(self):
+        result = subprocess.run(
+            ['git', 'ls-files', 'light-workflow-runner-claude-personal/.runtime'],
+            cwd=ROOT, text=True, capture_output=True, check=True)
+        self.assertEqual('', result.stdout)
+
     def test_w7_override_preserves_required_identity_and_workflow_gate(self):
         import yaml
         services = yaml.safe_load((ROOT / 'docker-compose.w7.yml').read_text())['services']
