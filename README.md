@@ -36,6 +36,19 @@ For a checked-out repo:
 ./install.sh stop
 ```
 
+Normal installer commands do not require W7 rollout preparation. The owner-run
+W7 Controller page check is available separately in `docker-compose.w7.yml`.
+After preparing W7 state and its private authorization file and selecting the
+reviewed `W7_READINESS_UID` and `W7_READINESS_GID`, include that override explicitly:
+
+```bash
+docker compose --env-file docker-images.env --env-file .env \
+  -f docker-compose.yml -f docker-compose.w7.yml up -d
+```
+
+The override requires both identity variables and makes Workflow wait for the
+authenticated Controller page check to succeed.
+
 The installer downloads refreshed service assets from compressed Cloudflare R2
 archives in the `lightapi` bucket and starts the Rust `all-in-lt` stack with
 `light-agent`, the local demo REST APIs, and the insurance claim MCP server.
