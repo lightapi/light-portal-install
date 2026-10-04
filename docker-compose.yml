@@ -651,7 +651,7 @@ services:
       start_period: 10s
 
   light-agent-claude-personal:
-    image: ${LIGHT_AGENT_CLAUDE_PERSONAL_IMAGE:-networknt/light-agent:claude-phase3-local}
+    image: ${LIGHT_AGENT_CLAUDE_PERSONAL_IMAGE:-${LIGHT_AGENT_IMAGE:-networknt/light-agent:latest}}
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
