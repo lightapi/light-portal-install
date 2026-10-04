@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import tempfile
 import unittest
 
 
@@ -27,6 +28,58 @@ class InstallerTest(unittest.TestCase):
         self.assertNotIn('COMPOSE_PROFILES', compose)
         verifier = (ROOT / 'scripts/verify-agent-image.sh').read_text()
         self.assertNotIn('VERIFY_AGENT_PROFILES', verifier)
+
+    def test_default_compose_does_not_require_private_w7_preparation(self):
+        import yaml
+        services = yaml.safe_load((ROOT / 'docker-compose.yml').read_text())['services']
+        self.assertNotIn('w7-controller-page-readiness', services)
+        self.assertNotIn('w7-controller-page-readiness', services['light-workflow']['depends_on'])
+        self.assertNotIn('W7_READINESS_', (ROOT / 'docker-compose.yml').read_text())
+
+    def test_w7_override_preserves_required_identity_and_workflow_gate(self):
+        import yaml
+        services = yaml.safe_load((ROOT / 'docker-compose.w7.yml').read_text())['services']
+        gate = services['w7-controller-page-readiness']
+        self.assertIn('${W7_READINESS_UID:?', gate['user'])
+        self.assertIn('${W7_READINESS_GID:?', gate['user'])
+        self.assertIn('w7-controller-page-check.sh', gate['entrypoint'][1])
+        self.assertEqual('service_completed_successfully',
+                         services['light-workflow']['depends_on']['w7-controller-page-readiness']['condition'])
+
+    def test_real_compose_accepts_default_and_requires_identity_for_w7(self):
+        helper = re.search(r'^compose\(\) \{.*?^\}', self.script,
+                           flags=re.MULTILINE | re.DOTALL).group(0)
+        env = {key: value for key, value in os.environ.items()
+               if not key.startswith(('W7_', 'COMPOSE_'))}
+        env['LIGHT_PORTAL_ENV_FILE'] = '/nonexistent/portal-test.env'
+        env['PORTAL_HYBRID_COMMAND_IMAGE'] = 'networknt/portal-hybrid-command:test'
+        env['PORTAL_HYBRID_QUERY_IMAGE'] = 'networknt/portal-hybrid-query:test'
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory)
+            for path in ROOT.iterdir():
+                if path.name not in {'.env', 'docker-images.env'}:
+                    (checkout / path.name).symlink_to(path)
+            empty = checkout / '.env'
+            empty.write_text('')
+            # Exercise the installer helper without starting or stopping containers.
+            result = subprocess.run(
+                ['bash', '-c', 'light_portal_env_file="$LIGHT_PORTAL_ENV_FILE"\n' +
+                 helper + '\ncompose config --quiet'],
+                cwd=checkout, env=env, text=True, capture_output=True)
+            self.assertEqual(0, result.returncode, result.stderr)
+            result = subprocess.run(
+                ['docker', 'compose', '--env-file', str(empty),
+                 '-f', 'docker-compose.yml', '-f', 'docker-compose.w7.yml',
+                 'config', '--quiet'], cwd=ROOT, env=env, text=True, capture_output=True)
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn('W7_READINESS_UID', result.stderr)
+            result = subprocess.run(
+                ['docker', 'compose', '--env-file', str(empty),
+                 '-f', 'docker-compose.yml', '-f', 'docker-compose.w7.yml',
+                 'config', '--quiet'], cwd=ROOT,
+                env=env | {'W7_READINESS_UID': '1234', 'W7_READINESS_GID': '2345'},
+                text=True, capture_output=True)
+            self.assertEqual(0, result.returncode, result.stderr)
 
     def test_cache_busted_url_supports_plain_and_existing_query_urls(self):
         match = re.search(
