@@ -74,6 +74,10 @@ class InstallerTest(unittest.TestCase):
         self.assertIn('${W7_READINESS_UID:?', gate['user'])
         self.assertIn('${W7_READINESS_GID:?', gate['user'])
         self.assertIn('w7-controller-page-check.sh', gate['entrypoint'][1])
+        bootstrap = services['operational-store-bootstrap']
+        self.assertEqual('true', bootstrap['environment']['OPERATIONAL_REQUIRE_W7_PREPARATION'])
+        self.assertTrue(any('/opt/operational-store/.runtime/w7' in path
+                            for path in bootstrap['volumes']))
         self.assertEqual('service_completed_successfully',
                          services['light-workflow']['depends_on']['w7-controller-page-readiness']['condition'])
 

@@ -23,6 +23,11 @@ and records an immutable database-local scope root. For these three default
 databases, that scope root is the canonical Portal Host UUID so registration,
 publication audience, and database identity can be checked end to end.
 
+Normal installation applies missing migrations without W7 rollout state.
+The explicit `docker-compose.w7.yml` override sets
+`OPERATIONAL_REQUIRE_W7_PREPARATION=true` and mounts the prepared state so
+the bootstrap verifies it before any database or credential changes.
+
 Each database has its own seven least-privilege login roles. Host-specific URL
 files are generated under
 `postgres-db/secrets/operational-hosts/<host-name>/`; credentials cannot
