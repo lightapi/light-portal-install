@@ -36,6 +36,37 @@ class InstallerTest(unittest.TestCase):
         self.assertNotIn('w7-controller-page-readiness', services['light-workflow']['depends_on'])
         self.assertNotIn('W7_READINESS_', (ROOT / 'docker-compose.yml').read_text())
 
+    def test_claude_agent_uses_published_release_and_honors_override(self):
+        env = {key: value for key, value in os.environ.items()
+               if not key.startswith(('COMPOSE_', 'LIGHT_AGENT_'))}
+        env['PORTAL_HYBRID_COMMAND_IMAGE'] = 'networknt/portal-hybrid-command:test'
+        env['PORTAL_HYBRID_QUERY_IMAGE'] = 'networknt/portal-hybrid-query:test'
+        cases = (
+            ('', {}, 'networknt/light-agent:latest'),
+            ('LIGHT_AGENT_IMAGE=networknt/light-agent:release-test\n', {},
+             'networknt/light-agent:release-test'),
+            ('LIGHT_AGENT_IMAGE=networknt/light-agent:release-test\n'
+             'LIGHT_AGENT_CLAUDE_PERSONAL_IMAGE=networknt/light-agent:claude-test\n', {},
+             'networknt/light-agent:claude-test'),
+            ('LIGHT_AGENT_IMAGE=networknt/light-agent:release-test\n',
+             {'LIGHT_AGENT_CLAUDE_PERSONAL_IMAGE': 'networknt/light-agent:local-test'},
+             'networknt/light-agent:local-test'),
+        )
+        with tempfile.NamedTemporaryFile(mode='w+') as selections:
+            for contents, overrides, expected in cases:
+                with self.subTest(expected=expected):
+                    selections.seek(0)
+                    selections.truncate()
+                    selections.write(contents)
+                    selections.flush()
+                    result = subprocess.run(
+                        ['docker', 'compose', '--env-file', selections.name,
+                         '-f', 'docker-compose.yml', 'config', '--format', 'json'],
+                        cwd=ROOT, env=env | overrides, text=True, capture_output=True)
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    services = json.loads(result.stdout)['services']
+                    self.assertEqual(expected, services['light-agent-claude-personal']['image'])
+
     def test_w7_override_preserves_required_identity_and_workflow_gate(self):
         import yaml
         services = yaml.safe_load((ROOT / 'docker-compose.w7.yml').read_text())['services']

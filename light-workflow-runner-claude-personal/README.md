@@ -16,8 +16,12 @@ compatible images, and activated Portal policies remain full-stack prerequisites
 The standalone A2A image/configuration blocker is tracked in
 [portal-config-loc #351](https://github.com/lightapi/portal-config-loc/issues/351).
 
-Build the native Rust worker, runner, and local Claude Agent image with
-`light-fabric/scripts/build-claude-personal-local.sh`. Build Java publishers through
+The Claude Agent defaults to the published `LIGHT_AGENT_IMAGE` selected by
+`docker-images.env`, with `networknt/light-agent:latest` as the fallback. Set
+`LIGHT_AGENT_CLAUDE_PERSONAL_IMAGE` only to select a separate compatible image.
+For local development, build the native Rust worker, runner, and local Claude
+Agent image with `light-fabric/scripts/build-claude-personal-local.sh`, and select
+that local image explicitly. Build Java publishers through
 their normal build/release pipeline, including the updated `light-portal` dependency,
 and select their images with `PORTAL_HYBRID_COMMAND_IMAGE` and
 `PORTAL_HYBRID_QUERY_IMAGE`.
