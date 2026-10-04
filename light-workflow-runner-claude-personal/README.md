@@ -6,12 +6,14 @@ setup guide with this directory as the working directory and the installer's
 `../light-controller-rust/ca.pem`. Supply the exact published instance identity
 and local issuer credentials. Native Claude login stays on the host.
 
-All services, including `light-agent-claude-personal` (loopback port 8090) and
-standalone `light-a2a`, are selected by the base `docker-compose.yml` without
-Compose profiles. Use normal `install.sh` commands; no profile selection is needed.
+The base `docker-compose.yml` defines `light-agent-claude-personal` (loopback port
+8090) at zero replicas until enrollment supplies its private service token.
+Standalone `light-a2a` starts normally. Use normal `install.sh` commands; no
+profile selection is needed. Private `.runtime` state is never shipped in the
+repository archive.
 After `.runtime/runner.yml` exists, the installer automatically adds the tracked
 Controller admission configuration from `controller.compose.yml`. This overlay
-contains Controller settings only, not optional services. Enrollment credentials,
+enables the Claude Agent and configures Controller admission. Enrollment credentials,
 compatible images, and activated Portal policies remain full-stack prerequisites.
 The standalone A2A image/configuration blocker is tracked in
 [portal-config-loc #351](https://github.com/lightapi/portal-config-loc/issues/351).
