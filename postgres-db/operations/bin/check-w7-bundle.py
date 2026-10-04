@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 from w7_rollout import require, sha, verify_assets, Refusal
+from w7_ownership import verify_companion, OwnershipError
 
 
 def check(root, fabric=None, portal=None, copies=()):
@@ -12,6 +13,7 @@ def check(root, fabric=None, portal=None, copies=()):
     for copy in copies:
         other, _ = verify_assets(copy)
         require(pins == other, 'DEPLOYMENT_COPY_IDENTITY')
+        require(verify_companion(root) == verify_companion(copy), 'OWNERSHIP_COMPANION_COPY_IDENTITY')
     if fabric:
         for _, _, _, _, relative, digest in rows:
             require(sha(Path(fabric) / relative) == digest, 'CANONICAL_SOURCE_MISMATCH')
@@ -44,5 +46,5 @@ if __name__ == '__main__':
     args = parser.parse_args()
     try:
         check(args.assets, args.fabric, args.portal, args.copy)
-    except (Refusal, OSError, ValueError, KeyError):
+    except (Refusal, OwnershipError, OSError, ValueError, KeyError):
         raise SystemExit('W7_STATIC_REFUSED') from None

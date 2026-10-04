@@ -13,6 +13,7 @@ import signal
 import subprocess
 import sys
 import uuid
+from w7_ownership import OwnershipContract, OwnershipError, verify_companion
 
 PROFILE = 'cel-workflow-v2'
 IDENT = re.compile(r'[a-z][a-z0-9_]{0,62}\Z')
@@ -137,6 +138,7 @@ def validate_plan(plan):
 
 def verify_assets(root):
     root = Path(root)
+    verify_companion(root)
     require(sha(root / 'w7-assets.json') == 'aa39a2f81c430dc69c8f95bc7aa25963d17c44570bd3658b4fe274b4be78231e',
             'ACCEPTED_ASSET_DESCRIPTOR_IDENTITY')
     pins = load_json(root / 'w7-assets.json')
@@ -322,6 +324,12 @@ class Coordinator:
             self.backend.preflight(gate, preflight_sql(self.root, gate))
         self.event('VERIFY_DIGESTS')
         verify_assets(self.root)
+        # Validate EVERY gate before the first install transaction. A later
+        # gate's missing qualification, wrong ledger or owner cannot leave an
+        # earlier gate migrated. Repeat per-gate checks before each transaction.
+        for gate in self.gates:
+            self.backend.preinstall(gate)
+        self.event('ALL_GATES_PREINSTALL_VERIFIED')
         # Removing a previously ready marker is deliberate before any install;
         # interrupted preparation cannot leave restart permission behind.
         (self.state_dir / 'startup-ready.sha256').unlink(missing_ok=True)
@@ -337,6 +345,63 @@ class Coordinator:
         atomic_json(self.state_dir / 'prepared.json', ready)
         self.backend.write_startup_marker(self.state_dir)
         self.event('PREPARED')
+
+    def ownership_check(self):
+        verify_assets(self.root)
+        for gate in self.gates:
+            self.backend.preinstall(gate, transition=True)
+        self.event('ALL_GATES_OWNERSHIP_CHECKED')
+
+    def ownership_transition(self):
+        verify_assets(self.root)
+        self.backend.coverage(self.plan, self.evidence)
+        # Preflight and qualification for Portal and ALL operational gates
+        # precede the first explicit administrative owner change.
+        for gate in self.gates:
+            self.backend.preflight(gate, preflight_sql(self.root, gate))
+        for gate in self.gates:
+            self.backend.preinstall(gate, transition=True)
+        for gate in self.operational:
+            before = self.backend.preinstall(gate, transition=True)
+            audit_path = self.state_dir / ('ownership-' + self.record['operation_id'] + '-' + gate['id'] + '.json')
+            audit = {'operation_id': self.record['operation_id'], 'gate': gate['id'],
+                     'plan_sha256': self.backend.plan_digest,
+                     'companion_sha256': verify_companion(self.root),
+                     'database': gate['database'], 'scope_root_id': gate['scope_root_id'],
+                     'sql_assets_sha256': sha(self.root / 'w7-assets.json'),
+                     'expected_after_sha256': before['qualification']['preinstall'].get('0:migrator'),
+                     'server': self.backend.sql(gate, 'SELECT json_build_object(\'address\',inet_server_addr(),\'port\',inet_server_port(),\'version\',current_setting(\'server_version\'));'),
+                     'actor': self.backend.sql(gate, 'SELECT session_user;'),
+                     'before': before['snapshot'], 'status': 'INTENT'}
+            atomic_json(audit_path, audit)
+            if before['owner_class'] == 'migrator':
+                audit['status'] = 'INTENDED_BASELINE_NOOP'
+                prior = []
+                for path in sorted(self.state_dir.glob('ownership-*-'+gate['id']+'.json')):
+                    if path == audit_path:
+                        continue
+                    item = load_json(path)
+                    if (item.get('plan_sha256') == self.backend.plan_digest
+                            and item.get('companion_sha256') == audit['companion_sha256']
+                            and item.get('status') in {'INTENT', 'RESPONSE_LOST_OR_FAILED'}):
+                        prior.append({'path': path.name, 'sha256': sha(path)})
+                if prior:
+                    audit['status'] = 'READBACK_RECOVERY_OBSERVED_CONVERGENCE'
+                    audit['prior_uncertain_attempts'] = prior
+            else:
+                try:
+                    self.backend.sql(gate, OwnershipContract(self.backend).transition_sql(gate, before))
+                except Exception:
+                    # Preserve uncertainty. A later readback can establish
+                    # convergence, but cannot manufacture commit acknowledgement.
+                    audit['status'] = 'RESPONSE_LOST_OR_FAILED'
+                    atomic_json(audit_path, audit)
+                    raise
+                audit['status'] = 'COMMITTED_AND_READ_BACK'
+            after = self.backend.preinstall(gate)
+            audit['after'] = after['snapshot']
+            atomic_json(audit_path, audit)
+            self.event('OWNERSHIP_VERIFIED', gate)
 
     def activate(self):
         states = self.states()
@@ -499,10 +564,12 @@ COMMIT;""")
     def install(self, gate):
         self.identity(gate)
         require(self.state(gate) in {'OFF', 'ABSENT'}, 'PREPARATION_NOT_OFF')
+        self.preinstall(gate)
         for migration, path, digest, owner, schema in self.migrations(gate):
             recorded = self.ledger(gate, migration, owner, schema)
             if not migration_needed(recorded, digest, gate['kind'], migration):
                 continue
+            self.preinstall(gate)
             # Baseline setup is an owner qualification prerequisite, not an
             # implicit role/database provisioning operation in rollout-prepare.
             text = path.read_text()
@@ -517,12 +584,17 @@ COMMIT;""")
                 ledger = f"INSERT INTO public.portal_schema_patch_t(patch_id,checksum) VALUES('{migration}','{digest}');"
             self.sql(gate, 'BEGIN;\n' + body + '\n' + ledger + '\nCOMMIT;')
             require(self.ledger(gate, migration, owner, schema) == digest, 'MIGRATION_READBACK_FAILED')
+            self.preinstall(gate)
+
+    def preinstall(self, gate, transition=False):
+        return OwnershipContract(self).validate(gate, transition)
 
     def claim_present(self, gate):
         return self.sql(gate, f"SELECT to_regprocedure('{gate['schema']}.workflow_claim_host_task_v2(uuid,integer,text[])') IS NOT NULL;") == 't'
 
     def schema(self, gate, claim_required):
         self.identity(gate)
+        OwnershipContract(self).reference(gate)
         s = gate['schema']
         for migration, _, digest, owner, schema in self.migrations(gate):
             require(self.ledger(gate, migration, owner, schema) == digest, 'SCHEMA_LEDGER_MISMATCH')
@@ -654,6 +726,8 @@ COMMIT;""")
         content = sha(self.root / 'w7-assets.json') + '  w7-assets.json\n'
         content += sha(self.root / 'bundle/bundle.sha256') + '  bundle/bundle.sha256\n'
         content += sha(Path(state_dir) / 'prepared.json') + '  .runtime/w7/prepared.json\n'
+        for relative in ('w7-ownership-v1.json', 'bin/w7_rollout.py', 'bin/w7_ownership.py'):
+            content += sha(self.root / relative) + '  ' + relative + '\n'
         for path in self.pins['files']:
             if path.startswith('portal/'):
                 content += sha(self.root / path) + '  ' + path + '\n'
@@ -667,7 +741,7 @@ COMMIT;""")
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['prepare', 'activate', 'rollback', 'status', 'catalog', 'recover-off', 'restart-check', 'verify-assets'])
+    parser.add_argument('action', choices=['prepare', 'activate', 'rollback', 'status', 'catalog', 'recover-off', 'restart-check', 'verify-assets', 'ownership-check', 'ownership-transition'])
     parser.add_argument('--assets', required=True)
     parser.add_argument('--plan')
     parser.add_argument('--evidence')
@@ -704,7 +778,7 @@ def main(argv=None):
 def cli(argv=None):
     try:
         return main(argv)
-    except Refusal as error:
+    except (Refusal, OwnershipError) as error:
         print('W7_REFUSED:' + str(error), file=sys.stderr)
         return 2
     except Exception:
