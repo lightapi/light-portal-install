@@ -115,7 +115,7 @@ services:
     restart: "no"
 
   hybrid-command:
-    image: ${PORTAL_HYBRID_COMMAND_IMAGE:-networknt/portal-hybrid-command:latest}
+    image: ${PORTAL_HYBRID_COMMAND_IMAGE:?Set PORTAL_HYBRID_COMMAND_IMAGE to a packaged hybrid image}
     environment:
       NOREPLAY_EMAIL_PASSWORD: ""
       INSTANCE_CLONE_PLAN_HMAC_KEY: light-portal-development-only-instance-clone-hmac-key-v1
@@ -129,7 +129,6 @@ services:
       LIGHT_GATEWAY_TLS_CA_PATH: /run/secrets/gateway-trust.pem
     volumes:
       - ./hybrid-command/config:/config:Z
-      - ./hybrid-command/service:/service:Z
       - ./light-gateway-rust/config/ca.pem:/run/secrets/gateway-trust.pem:ro,z
       - ${PORTAL_DATA_DIR:-./data}:/data:z
     ports:
@@ -145,10 +144,9 @@ services:
         condition: service_healthy
 
   hybrid-query:
-    image: ${PORTAL_HYBRID_QUERY_IMAGE:-networknt/portal-hybrid-query:latest}
+    image: ${PORTAL_HYBRID_QUERY_IMAGE:?Set PORTAL_HYBRID_QUERY_IMAGE to a packaged hybrid image}
     volumes:
       - ./hybrid-query/node1:/config:Z
-      - ./hybrid-query/service:/service:Z
       - ./light-gateway-rust/config/ca.pem:/run/secrets/gateway-trust.pem:ro,z
       - ${PORTAL_DATA_DIR:-./data}:/data:z
     ports:

@@ -194,9 +194,9 @@ cd "$HOME/.light-portal"
 
 ## Refresh runtime assets
 
-To replace the installed hybrid service JARs, portal UI, signin UI, and
-`events.json` with the current assets from the CDN, stop the stack, refresh the
-assets, and start it again:
+To refresh the image selections, portal UI, signin UI, and `events.json`
+from the CDN, stop the stack, refresh the assets, and start it again.
+Command/query service JARs are included in the selected hybrid images:
 
 ```bash
 cd "$HOME/.light-portal"
@@ -209,8 +209,6 @@ The `assets` command downloads and replaces these release archives regardless
 of whether the destination directories already contain files:
 
 ```text
-hybrid-command.zip
-hybrid-query.zip
 lightapi.zip
 signin.zip
 events.zip
@@ -327,8 +325,6 @@ The demo service images can be overridden with `DEMO_CUSTOMER_PROFILE_API_IMAGE`
 The asset archive names are:
 
 ```text
-hybrid-command.zip
-hybrid-query.zip
 lightapi.zip
 signin.zip
 events.zip
@@ -473,3 +469,16 @@ For an optional dedicated personal Codex runner, see the
 [policy upgrade guide](light-workflow-runner-personal/codex-policy-upgrade.md)
 and its example. This requires a rebuilt Agent/worker and separate live qualification;
 it does not enable a personal runner in the default Compose deployment.
+
+## Packaged Portal services
+
+Command/query JARs are included in the hybrid images. Set
+`PORTAL_HYBRID_COMMAND_IMAGE` and `PORTAL_HYBRID_QUERY_IMAGE` to packaged image
+references in the deployment environment file. Existing 2.2.1 wrapper images
+that depended on host JARs are unsuitable. Compose requires both selections and
+mounts configuration directories only; there are no host service-JAR folders.
+Asset synchronization retains UI assets and does not download hybrid ZIPs.
+
+For direct Compose use, pass the selected environment file with `--env-file`.
+Use the existing deployment entry point for the complete environment and startup
+ordering; updating source files does not restart already-created containers.

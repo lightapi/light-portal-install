@@ -326,8 +326,7 @@ download_assets() {
   require_command curl
   require_command unzip
 
-  mkdir -p hybrid-command/service hybrid-query/service \
-    light-gateway-rust/lightapi/dist light-gateway-rust/signin/dist data
+  mkdir -p light-gateway-rust/lightapi/dist light-gateway-rust/signin/dist data
 
   docker_env_url="$release_base_url/$version/docker-images.env"
   download_file "$docker_env_url" docker-images.env
@@ -336,8 +335,6 @@ download_assets() {
     cp .env.example .env
   fi
 
-  download_archive hybrid-command.zip hybrid-command/service
-  download_archive hybrid-query.zip hybrid-query/service
   download_archive lightapi.zip light-gateway-rust/lightapi
   normalize_portal_assets light-gateway-rust/lightapi
   download_archive signin.zip light-gateway-rust/signin
