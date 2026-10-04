@@ -46,6 +46,21 @@ run_bootstrap() {
   docker exec     -e PGHOST=/var/run/postgresql     -e POSTGRES_USER=postgres     -e OPERATIONAL_DATABASE_HOST=postgres     -e OPERATIONAL_DATABASE_PORT=5432     "$container_name" /bin/bash /opt/operational-store/bin/bootstrap-operational-databases.sh
 }
 
+# The explicit rollout path must refuse unprepared state before creating a DB.
+if docker exec -e PGHOST=/var/run/postgresql -e POSTGRES_USER=postgres \
+    -e OPERATIONAL_REQUIRE_W7_PREPARATION=true "$container_name" \
+    /bin/bash /opt/operational-store/bin/bootstrap-operational-databases.sh \
+    >/dev/null 2>&1; then
+  echo "runtime gate: unprepared W7 bootstrap was accepted" >&2
+  exit 1
+fi
+unprepared_databases="$(docker exec "$container_name" psql -U postgres -d postgres -X -tAc \
+  "SELECT count(*) FROM pg_database WHERE datname IN ('operations','operations_networknt','operations_taiji')")"
+[[ "$unprepared_databases" == 0 ]] || {
+  echo "runtime gate: refused W7 bootstrap created operational databases" >&2
+  exit 1
+}
+
 run_bootstrap
 docker exec "$container_name" psql -U postgres -d operations_networknt -X --set=ON_ERROR_STOP=1 \
   -c "UPDATE operational_meta.operational_database_identity_t SET scope_root_id='6b1c2a42-b8dc-4d5f-8c94-188b58559001';" >/dev/null

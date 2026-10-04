@@ -1,5 +1,13 @@
 # Explicit owner-prepared W7 rollout gate; not required by normal installs.
 services:
+  operational-store-bootstrap:
+    environment:
+      OPERATIONAL_REQUIRE_W7_PREPARATION: "true"
+    volumes:
+      - ./postgres-db/operations/.runtime/w7:/opt/operational-store/.runtime/w7:Z
+      - ./postgres-db/operations/w7-assets.json:/opt/operational-store/w7-assets.json:ro,Z
+      - ./postgres-db/operations/portal:/opt/operational-store/portal:ro,Z
+
   w7-controller-page-readiness:
     # Distinct non-root UID, dedicated owner-reviewed private state group.
     user: "${W7_READINESS_UID:?owner-reviewed non-root readiness UID required}:${W7_READINESS_GID:?dedicated private readiness GID required}"
