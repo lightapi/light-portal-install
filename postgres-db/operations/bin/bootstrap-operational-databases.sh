@@ -7,8 +7,11 @@ manifest="${OPERATIONAL_DATABASE_MANIFEST:-/opt/operational-store/operational-da
 secret_root="${OPERATIONAL_HOST_SECRET_ROOT:-/run/secrets/operational-hosts}"
 database_host="${OPERATIONAL_DATABASE_HOST:-postgres}"
 database_port="${OPERATIONAL_DATABASE_PORT:-5432}"
-bundle_version="${OPERATIONAL_BUNDLE_VERSION:-2.6.0}"
+bundle_version="${OPERATIONAL_BUNDLE_VERSION:-2.7.0}"
 contract_generation="${OPERATIONAL_CONTRACT_GENERATION:-2}"
+python3 "$(dirname "$bundle_root")/bin/bundle_contract.py" "$bundle_root" >/dev/null
+actual_bundle_version="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["bundleVersion"])' "$bundle_root/manifest.json")"
+[[ "$bundle_version" == "$actual_bundle_version" ]] || { echo "operational-databases-bootstrap: bundle version mismatch" >&2; exit 1; }
 
 fail() {
   echo "operational-databases-bootstrap: $*" >&2
@@ -25,38 +28,44 @@ if ! (cd "$bundle_root" && sha256sum -c bundle.sha256 >/dev/null); then
   fail "bundle checksum verification failed"
 fi
 
-# Fresh installs apply the checked bundle normally. Owner-prepared W7 rollouts
-# explicitly require the read-only preparation barrier before any mutation.
-case "${OPERATIONAL_REQUIRE_W7_PREPARATION:-false}" in
-  true)
-    # W7 preparation and startup share this local lock. External placement
-    # quiescence is separately owner-enforced; this lock is not distributed proof.
-    operations_root="$(cd -- "$bundle_root/.." && pwd)"
-    state_dir="$operations_root/.runtime/w7"
-    [[ -d "$state_dir" ]] || fail "W7 preparation is missing"
-    exec 9>"$state_dir/w7.lock"
-    flock -n 9 || fail "W7 preparation or startup is in progress"
-    bash "$operations_root/bin/w7-startup-guard.sh" "$operations_root" --lock-held || fail "W7 preparation changed"
-    # Preparation must finish in EVERY database before any startup copy/apply,
-    # identity update or credential rotation. A stale ready file cannot authorize
-    # replay of a missing migration. Normal startup below therefore only skips
-    # existing accepted entries; it never enables admission.
-    while IFS=$'\t' read -r db_name _host _scope _binding _digest extra; do
-      [[ -n "$db_name" && "$db_name" != \#* ]] || continue
-      [[ "$db_name" =~ ^[a-z][a-z0-9_]{0,62}$ && -z "${extra:-}" ]] || fail "invalid prepared database manifest"
-      while IFS=$'\t' read -r order owner schema migration _path digest; do
-        [[ -n "$order" && "$order" != \#* ]] || continue
-        [[ "$owner" =~ ^[a-z][a-z0-9-]*$ && "$schema" =~ ^[a-z][a-z0-9_]*$ && "$migration" =~ ^[0-9]{4}_[a-z0-9_]+$ ]] || fail "invalid prepared migration"
-        recorded="$(psql -U "$database_user" -d "$db_name" -X -tAc "SELECT migration_digest FROM operational_meta.operational_schema_migration_t WHERE migration_owner='$owner' AND schema_name='$schema' AND migration_id='$migration'")"
-        [[ "$recorded" == "sha256:$digest" ]] || fail "W7 schema preparation incomplete or changed"
-      done < "$bundle_root/migration-order.tsv"
-      ready="$(psql -U "$database_user" -d "$db_name" -X -tAc "SELECT to_regprocedure('workflow_ops.workflow_claim_host_task_v2(uuid,integer,text[])') IS NOT NULL AND to_regclass('workflow_ops.workflow_operation_receipt_t') IS NOT NULL")"
-      [[ "$ready" == t ]] || fail "W7 reactivation requires reviewed schema restoration"
-    done < "$manifest"
-    ;;
-  false) ;;
-  *) fail "invalid W7 preparation selection" ;;
-esac
+# W7 preparation and startup share this local lock. External placement
+# quiescence is separately owner-enforced; this lock is not distributed proof.
+operations_root="$(cd -- "$bundle_root/.." && pwd)"
+state_dir="$operations_root/.runtime/w7"
+[[ -d "$state_dir" ]] || fail "W7 preparation is missing"
+exec 9>"$state_dir/w7.lock"
+flock -n 9 || fail "W7 preparation or startup is in progress"
+local_fresh_init="${E04_LOCAL_FRESH_INIT:-false}"
+if [[ "$local_fresh_init" == true ]]; then
+  # Local owner-authorized fresh databases only. Never initialize configserver,
+  # another deployment, a populated database, or a partially installed schema.
+  [[ "$operations_root" == /opt/operational-store && "${PORTAL_DB_TOPOLOGY:-}" == separate ]] || fail "fresh init is local separate topology only"
+  [[ "$(awk -F '\t' 'NF && $1 !~ /^#/ {print $1}' "$manifest" | sort | paste -sd , -)" == operations,operations_networknt,operations_taiji ]] || fail "fresh init database allowlist mismatch"
+  for fresh_database in operations operations_networknt operations_taiji; do
+    fresh_empty="$(psql -U "$database_user" -d "$fresh_database" -X -tAc "SELECT NOT EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT IN ('pg_catalog','information_schema') AND n.nspname NOT LIKE 'pg_%' AND c.relkind IN ('r','p','v','m','f','S') AND NOT EXISTS(SELECT 1 FROM pg_depend d JOIN pg_extension e ON e.oid=d.refobjid WHERE d.classid='pg_class'::regclass AND d.objid=c.oid AND d.refclassid='pg_extension'::regclass AND d.deptype='e'))")"
+    [[ "$fresh_empty" == t ]] || fail "fresh init requires all operational databases empty"
+  done
+else
+  bash "$operations_root/bin/w7-startup-guard.sh" "$operations_root" --lock-held || fail "W7 preparation changed"
+fi
+# Preparation must finish in EVERY database before any startup copy/apply,
+# identity update or credential rotation. A stale ready file cannot authorize
+# replay of a missing migration. Normal startup below therefore only skips
+# existing accepted entries; it never enables admission.
+if [[ "$local_fresh_init" != true ]]; then
+while IFS=$'\t' read -r db_name _host _scope _binding _digest extra; do
+  [[ -n "$db_name" && "$db_name" != \#* ]] || continue
+  [[ "$db_name" =~ ^[a-z][a-z0-9_]{0,62}$ && -z "${extra:-}" ]] || fail "invalid prepared database manifest"
+  while IFS=$'\t' read -r order owner schema migration _path digest; do
+    [[ -n "$order" && "$order" != \#* ]] || continue
+    [[ "$owner" =~ ^[a-z][a-z0-9-]*$ && "$schema" =~ ^[a-z][a-z0-9_]*$ && "$migration" =~ ^[0-9]{4}_[a-z0-9_]+$ ]] || fail "invalid prepared migration"
+    recorded="$(psql -U "$database_user" -d "$db_name" -X -tAc "SELECT migration_digest FROM operational_meta.operational_schema_migration_t WHERE migration_owner='$owner' AND schema_name='$schema' AND migration_id='$migration'")"
+    [[ "$recorded" == "sha256:$digest" ]] || fail "W7 schema preparation incomplete or changed"
+  done < "$bundle_root/migration-order.tsv"
+  ready="$(psql -U "$database_user" -d "$db_name" -X -tAc "SELECT to_regprocedure('workflow_ops.workflow_claim_host_task_v2(uuid,integer,text[])') IS NOT NULL AND to_regclass('workflow_ops.workflow_operation_receipt_t') IS NOT NULL")"
+  [[ "$ready" == t ]] || fail "W7 reactivation requires reviewed schema restoration"
+done < "$manifest"
+fi
 
 umask 077
 mkdir -p "$secret_root"
@@ -172,7 +181,13 @@ apply_database() {
       sed         -e "s/operations_/${database_name}_/g"         -e "s/ON DATABASE operations/ON DATABASE ${database_name}/g"         -e "s/IN DATABASE operations/IN DATABASE ${database_name}/g"         -e "s/database_identity = 'operations'/database_identity = '${database_name}'/g"         "$bundle_root/$migration_path" >"$rendered_migration"
       {
         printf 'BEGIN;\n'
+        if [[ "$local_fresh_init" == true && "$migration_owner" == workflow-store ]]; then
+          printf 'SET LOCAL ROLE %s_workflow_migrator;\n' "$database_name"
+        fi
         sed -e '/^BEGIN;$/d' -e '/^COMMIT;$/d' "$rendered_migration"
+        if [[ "$local_fresh_init" == true && "$migration_owner" == workflow-store ]]; then
+          printf '\nRESET ROLE;\n'
+        fi
         printf "\nINSERT INTO operational_meta.operational_schema_migration_t (migration_owner, schema_name, migration_id, migration_digest, bundle_version, contract_generation) VALUES ('%s', '%s', '%s', 'sha256:%s', '%s', %s);\n"           "$migration_owner" "$schema_name" "$migration_id" "$migration_sha256" "$bundle_version" "$contract_generation"
         printf 'COMMIT;\n'
       } | psql -U "$database_user" -d "$database_name" -X --quiet --set=ON_ERROR_STOP=1 >/dev/null

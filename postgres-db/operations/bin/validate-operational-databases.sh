@@ -15,6 +15,7 @@ fail() {
 }
 
 [[ -f "$manifest" && -f "$bundle_root/migration-order.tsv" ]] || fail "manifest or migration order is missing"
+python3 -B "$(dirname "$bundle_root")/bin/bundle_contract.py" "$bundle_root" || fail "reviewed bundle identity mismatch"
 expected_migration_count="$(awk -F '\t' 'NF && $1 !~ /^#/ { count++ } END { print count + 0 }' "$bundle_root/migration-order.tsv")"
 [[ "$expected_migration_count" -gt 0 ]] || fail "migration order is empty"
 

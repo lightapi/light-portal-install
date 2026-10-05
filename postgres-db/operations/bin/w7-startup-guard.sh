@@ -10,10 +10,11 @@ if [[ "${2:-}" != '--lock-held' ]]; then
   flock -n 8 || fail
 fi
 [[ -s "$state_dir/prepared.json" && -f "$operations_root/w7-assets.json" ]] || fail
+python3 -B "$operations_root/bin/w7_rollout.py" verify-assets --assets "$operations_root" >/dev/null || fail
 (
   cd -- "$operations_root"
-  sha256sum --check "$state_dir/startup-ready.sha256" >/dev/null 2>&1 || exit 2
+  sha256sum -c "$state_dir/startup-ready.sha256" >/dev/null 2>&1 || exit 2
   cd bundle
-  sha256sum --check bundle.sha256 >/dev/null 2>&1 || exit 2
+  sha256sum -c bundle.sha256 >/dev/null 2>&1 || exit 2
 ) || fail
 echo 'W7_STARTUP_PREPARATION_VERIFIED'
