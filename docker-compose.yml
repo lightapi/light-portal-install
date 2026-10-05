@@ -57,7 +57,7 @@ services:
       POSTGRES_USER: postgres
       PGPASSWORD: secret
       OPERATIONAL_CONTRACT_GENERATION: 2
-      OPERATIONAL_BUNDLE_VERSION: 2.6.0
+      OPERATIONAL_BUNDLE_VERSION: 2.7.0
       OPERATIONAL_DATABASE_URL: postgres://operations_agent_runtime:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef@postgres:5432/operations
       EXECUTION_DATABASE_URL: postgres://operations_execution_runtime:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef@postgres:5432/operations
       WORKFLOW_DATABASE_URL: postgres://operations_workflow_runtime:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef@postgres:5432/operations
