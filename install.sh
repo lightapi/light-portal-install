@@ -8,7 +8,7 @@ Usage: ./install.sh [command]
 Commands:
   install    Download R2 assets and start the local stack. Default.
   update     Refresh R2 assets and docker-images.env, then restart.
-  assets     Download R2 assets and docker-images.env only.
+  assets     Download assets; prepare a signed UI if published (may pull its image).
   start      Start Docker Compose.
   stop       Stop Docker Compose.
   status     Show Docker Compose status.
@@ -213,6 +213,10 @@ download_archive() {
   local archive_file="data/$archive_name"
 
   download_file "$asset_base_url/$archive_name" "$archive_file"
+  if [[ "$archive_name" == "lightapi.zip" ]]; then
+    python3 -B scripts/portal-view-release.py legacy-dist --archive "$archive_file" --root "$target_dir"
+    return
+  fi
   rm -rf "$target_dir"
   mkdir -p "$target_dir"
   log "extracting $archive_file to $target_dir"
@@ -306,25 +310,12 @@ normalize_events_json() {
   fi
 }
 
-normalize_portal_assets() {
-  local asset_dir="${1:-light-gateway-rust/lightapi}"
-  local file
-
-  [[ -d "$asset_dir" ]] || return 0
-
-  while IFS= read -r file; do
-    if grep -Fq "user_type=C" "$file"; then
-      log "normalizing portal signin user_type in $file"
-      replace_literal_in_file "$file" "user_type=C" "user_type=E"
-    fi
-  done < <(find "$asset_dir" -type f \( -name '*.js' -o -name '*.html' \))
-}
-
 download_assets() {
   local docker_env_url
 
   require_command curl
   require_command unzip
+  require_command python3
 
   mkdir -p light-gateway-rust/lightapi/dist light-gateway-rust/signin/dist data
 
@@ -336,10 +327,11 @@ download_assets() {
   fi
 
   download_archive lightapi.zip light-gateway-rust/lightapi
-  normalize_portal_assets light-gateway-rust/lightapi
   download_archive signin.zip light-gateway-rust/signin
   download_archive_file events.zip events.json events.json
   normalize_events_json events.json
+  python3 -B scripts/portal-view-release.py installer-config
+  python3 -B scripts/portal-view-release.py prepare --enclosing-version "$version" --release-base "$release_base_url"
 }
 
 start_stack() {

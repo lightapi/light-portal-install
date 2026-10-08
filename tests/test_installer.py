@@ -13,6 +13,20 @@ INSTALLER = ROOT / "install.sh"
 
 
 class InstallerTest(unittest.TestCase):
+    def test_portal_payload_is_never_normalized_after_extraction(self):
+        source = INSTALLER.read_text()
+        self.assertNotIn('normalize_portal_assets', source)
+        self.assertIn('download_archive lightapi.zip light-gateway-rust/lightapi', source)
+        self.assertIn('portal-view-release.py legacy-dist', source)
+
+    def test_signed_preparation_is_part_of_downloads_before_stack_effects(self):
+        source = INSTALLER.read_text()
+        downloads = source[source.index('download_assets() {'):source.index('start_stack() {')]
+        self.assertLess(downloads.index('download_archive lightapi.zip'), downloads.index('portal-view-release.py prepare'))
+        self.assertNotIn('recreate', downloads)
+        self.assertNotIn('rollback', downloads)
+        self.assertIn('--enclosing-version "$version" --release-base "$release_base_url"', downloads)
+
     @classmethod
     def setUpClass(cls):
         cls.script = INSTALLER.read_text(encoding="utf-8")

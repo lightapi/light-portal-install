@@ -272,3 +272,12 @@ signin/dist/assets/react-vendor-l0sNRNKZ.js
 signin/dist/assets/react-vendor-l0sNRNKZ.js.map
 signin/dist/index.html
 signin/dist/vite.svg
+# Migration artifact layout (legacy archive contents below remain unchanged):
+# lightapi.zip -> light-gateway-rust/lightapi/dist/
+# <enclosing-release>/portal-view/portal-view-release.env selects PORTAL_VIEW_VERSION.
+# portal-view-<artifact-version>.zip + release-manifest.json + release-manifest.sig
+#   -> light-gateway-rust/lightapi/releases/<artifact-version>/ (verified, immutable)
+# Public trust keys: portal-view-release-keys/<keyId>.pem (owner provisioned).
+# Runtime config: light-gateway-rust/config/portal-config.json (preserve existing).
+# Serving cutover/recreation and different-version activation are explicit owner actions:
+# python3 -B scripts/portal-view-release.py activate --version <artifact-version>
