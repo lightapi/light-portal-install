@@ -1,7 +1,7 @@
 # light-portal-install
 
 Local Light Portal deployment with Docker Compose as the only host dependency.
-The installer also uses standard `curl`, `tar`, and `unzip` utilities to
+The installer also uses standard `curl`, `tar`, `unzip`, Python 3, and OpenSSL to
 bootstrap the repo and extract downloaded asset archives.
 
 The canonical service, environment-variable, secret, port, dependency, and
@@ -495,3 +495,68 @@ Asset synchronization retains UI assets and does not download hybrid ZIPs.
 For direct Compose use, pass the selected environment file with `--env-file`.
 Use the existing deployment entry point for the complete environment and startup
 ordering; updating source files does not restart already-created containers.
+# Signed Portal View preparation
+
+The installer retains the legacy `lightapi.zip` payload at
+`light-gateway-rust/lightapi/dist` byte-for-byte. It validates the archive in an
+owned temporary directory and replaces only `dist`; it never deletes the
+`lightapi` parent, signed releases, `current`, state, transition journal, lock,
+or unrelated files. Failed download, extraction or layout validation leaves the
+previous legacy directory intact. Extracted UI members are never normalized.
+
+`install`, `update`, and `assets` also look for the selected enclosing release's
+`portal-view/portal-view-release.env`. The file is parsed as data, never sourced.
+`LIGHT_PORTAL_VERSION` selects the enclosing release (default `VERSION`, then
+`latest`); the independent `PORTAL_VIEW_VERSION` selects the signed archive and
+`lightapi/releases/<artifact-version>`. Only HTTP 404 of the env file means
+`portal-view signed release not published for <version>; serving legacy UI`.
+Authentication, transport, metadata, signature and verification failures stop.
+
+Provision independently approved **public** Ed25519 keys in
+`portal-view-release-keys/<keyId>.pem`. Only placeholders ship. Installation copies
+them to `light-gateway-rust/config/portal-view-release-keys`, refusing conflicting
+existing key bytes. It creates `config/portal-config.json` from
+`portal-config.oauth2.template.json` only when absent; operator bytes are preserved.
+The template uses the existing local sign-in host and registered client ID.
+
+A present release is verified and staged, then preparation resolves the target
+image from the same supported Compose files/env selection as the installer.
+It inspects that exact image, pulls it only if absent, confirms availability,
+and validates offline with `--network none --pull never` and read-only inputs.
+Thus **assets mode may download a gateway image** for signed preparation, but
+does not start/recreate a container. A failed pull leaves a verified staged but
+not prepared release, with current/state/journal unchanged. Signed absence
+causes no new image acquisition. A different active version is refused before
+image acquisition; use the explicit owner command below instead.
+
+First preparation sets only the signed pointer/state. Legacy serving remains
+unchanged. Repeating the same version validates offline and requires the
+mandatory served digest readback. Before UI cutover, legacy serving normally
+causes refusal; this preserves state and is not idempotent success.
+
+Owner lifecycle commands (replace placeholders; never automatic installer steps):
+
+```sh
+export LIGHT_PORTAL_VERSION='<enclosing-release>'
+python3 -B scripts/portal-view-release.py stage --version '<artifact-version>'
+python3 -B scripts/portal-view-release.py activate --version '<artifact-version>' --pointer-only
+# Adopt parent mounts on existing containers while still serving legacy:
+python3 -B scripts/portal-view-release.py recreate --expect-legacy
+# After an explicit Portal UI/snapshot serving cutover:
+python3 -B scripts/portal-view-release.py recreate
+# Subsequent signed upgrade, after staging, is an explicit owner action:
+python3 -B scripts/portal-view-release.py activate --version '<next-artifact-version>'
+python3 -B scripts/portal-view-release.py status
+python3 -B scripts/portal-view-release.py rollback
+python3 -B scripts/portal-view-release.py recover
+```
+
+The gateway mounts the read-only `lightapi` parent, exposing both legacy `dist`
+and signed releases. Editing Compose does **not** update existing containers;
+the owner must explicitly recreate them to adopt the mount. Installer preparation
+never performs recreation, rollback, recovery, pruning or serving cutover. First
+cutover and its rollback remain Portal UI/snapshot owner actions. An unresolved
+transition is refused; preserve its journal and recover explicitly. The shared
+WP11 library records/restores the complete prior state; exit 3 retains recovery
+evidence. Readback uses HTTPS, the existing gateway CA where present, and refuses
+redirects or failed requests rather than treating them as absent legacy digests.

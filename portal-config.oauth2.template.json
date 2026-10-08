@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "routing": {
+    "publicBasePath": "/",
+    "apiBasePath": ""
+  },
+  "authentication": {
+    "mode": "oauth2",
+    "signInUrl": "https://signin.localhost?client_id=f7d42348-c647-4efb-a52d-4c5787421e72"
+  },
+  "features": {},
+  "externalLinks": {}
+}
