@@ -526,13 +526,18 @@ and validates offline with `--network none --pull never` and read-only inputs.
 Thus **assets mode may download a gateway image** for signed preparation, but
 does not start/recreate a container. A failed pull leaves a verified staged but
 not prepared release, with current/state/journal unchanged. Signed absence
-causes no new image acquisition. A different active version is refused before
-image acquisition; use the explicit owner command below instead.
+causes no new image acquisition. When a different version is already active,
+the new release is staged and validated offline, then preparation warns and
+succeeds with active/rollback state unchanged; activate it with the explicit
+owner command below.
 
 First preparation sets only the signed pointer/state. Legacy serving remains
-unchanged. Repeating the same version validates offline and requires the
-mandatory served digest readback. Before UI cutover, legacy serving normally
-causes refusal; this preserves state and is not idempotent success.
+unchanged. Repeating the same version re-verifies the staged tree and validates
+offline without reading back the gateway, so installs succeed while the gateway
+is stopped or still serving legacy UI. Serving digest readback stays mandatory
+for activate, recreate and rollback. An interrupted run's leftover
+`.downloads/<version>` or `releases/<version>.staging` directory is never
+removed automatically; staging refuses with its path until the owner removes it.
 
 Owner lifecycle commands (replace placeholders; never automatic installer steps):
 
@@ -558,5 +563,7 @@ never performs recreation, rollback, recovery, pruning or serving cutover. First
 cutover and its rollback remain Portal UI/snapshot owner actions. An unresolved
 transition is refused; preserve its journal and recover explicitly. The shared
 WP11 library records/restores the complete prior state; exit 3 retains recovery
-evidence. Readback uses HTTPS, the existing gateway CA where present, and refuses
+evidence. Readback targets `https://local.localhost[:port]<--mount-path>/` unless
+an explicit `--readback-url` is given (use it when the ingress path differs from
+the internal mount). It uses HTTPS, the existing gateway CA where present, and refuses
 redirects or failed requests rather than treating them as absent legacy digests.
