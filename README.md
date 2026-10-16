@@ -229,11 +229,11 @@ events.zip
 
 This procedure preserves the existing Docker volumes and database. For a
 checked-out repository, run the same commands from the repository root. To use
-a different asset host, set `LIGHT_PORTAL_ASSET_BASE_URL` on the `assets`
+a different release host, set `LIGHT_PORTAL_RELEASE_BASE_URL` on the `assets`
 command:
 
 ```bash
-LIGHT_PORTAL_ASSET_BASE_URL=https://example.com ./install.sh assets
+LIGHT_PORTAL_RELEASE_BASE_URL=https://example.com/light-portal/releases ./install.sh assets
 ```
 
 ## Reinstall from scratch
@@ -365,10 +365,13 @@ a later version. Release packages can also list an immutable broken delta in
 replacement must reproduce the complete intended effect so preserved
 installations and fresh rebuilds converge.
 
-Override these if the public R2 custom domain changes:
+Use this explicit override if the public R2 custom domain changes. The installer
+fetches compatibility UI/sign-in assets and the event baseline from
+`<release-base>/<resolved-version>/assets/`; `LIGHT_PORTAL_ASSET_BASE_URL` only
+derives the default release base when `LIGHT_PORTAL_RELEASE_BASE_URL` is unset,
+and cannot select a separate legacy asset location:
 
 ```bash
-LIGHT_PORTAL_ASSET_BASE_URL=https://example.com ./install.sh assets
 LIGHT_PORTAL_RELEASE_BASE_URL=https://example.com/light-portal/releases ./install.sh assets
 ```
 
@@ -495,7 +498,28 @@ Asset synchronization retains UI assets and does not download hybrid ZIPs.
 For direct Compose use, pass the selected environment file with `--env-file`.
 Use the existing deployment entry point for the complete environment and startup
 ordering; updating source files does not restart already-created containers.
-# Signed Portal View preparation
+## Signed Portal View packages
+
+Portal View is built once by the release publisher. Deployment configuration lives
+in `config/portal-config.json`; changing customer authentication or URLs does not
+require Node.js, npm, a Portal View checkout, or rebuilding the SPA.
+
+The default selection is `latest` (the `VERSION` file remains a supported default). Preparation reads
+`https://cdn.networknt.com/light-portal/releases/latest/portal-view/release-pointer.env`
+once before any downloads and resolves a versioned release directory. Images,
+release manifests, DB patches, signed SPA, compatibility UI/sign-in assets, and
+the signed event baseline all use that same resolved version. It then verifies the signed
+archive using independently provisioned public Ed25519 keys. The local release
+state records the artifact version and manifest digest. A moving CDN pointer never
+changes an already running service.
+
+Set `LIGHT_PORTAL_VERSION=<enclosing-release>` to pin a release. Override
+`LIGHT_PORTAL_RELEASE_BASE_URL` only for another CDN/release root; daily releases
+require no repository URL edits. Metadata, pointer, signature, configuration and
+image-validation errors (including HTTP 404) stop preparation. Do not obtain
+trust keys from the same download location as the package.
+
+
 
 The installer retains the legacy `lightapi.zip` payload at
 `light-gateway-rust/lightapi/dist` byte-for-byte. It validates the archive in an
@@ -505,15 +529,15 @@ or unrelated files. Failed download, extraction or layout validation leaves the
 previous legacy directory intact. Extracted UI members are never normalized.
 
 `install`, `update`, and `assets` also look for the selected enclosing release's
-`portal-view/portal-view-release.env`. The file is parsed as data, never sourced.
-`LIGHT_PORTAL_VERSION` selects the enclosing release (default `VERSION`, then
-`latest`); the independent `PORTAL_VIEW_VERSION` selects the signed archive and
-`lightapi/releases/<artifact-version>`. Only HTTP 404 of the env file means
-`portal-view signed release not published for <version>; serving legacy UI`.
-Authentication, transport, metadata, signature and verification failures stop.
+`portal-view/portal-view-release.env` after resolving the latest pointer when
+selected. Metadata is parsed as data, never sourced.
+`LIGHT_PORTAL_VERSION` selects the enclosing release (default `latest`); the independent `PORTAL_VIEW_VERSION` selects the signed archive and
+`lightapi/releases/<artifact-version>`. Missing signed metadata (HTTP 404), authentication, transport, metadata, signature
+and verification failures stop preparation.
 
 Provision independently approved **public** Ed25519 keys in
-`portal-view-release-keys/<keyId>.pem`. Only placeholders ship. Installation copies
+`portal-view-release-keys/<keyId>.pem`. The enrolled
+`portal-view-release-2026-10.pem` public key ships in Git. Installation copies
 them to `light-gateway-rust/config/portal-view-release-keys`, refusing conflicting
 existing key bytes. It creates `config/portal-config.json` from
 `portal-config.oauth2.template.json` only when absent; operator bytes are preserved.
@@ -525,8 +549,7 @@ It inspects that exact image, pulls it only if absent, confirms availability,
 and validates offline with `--network none --pull never` and read-only inputs.
 Thus **assets mode may download a gateway image** for signed preparation, but
 does not start/recreate a container. A failed pull leaves a verified staged but
-not prepared release, with current/state/journal unchanged. Signed absence
-causes no new image acquisition. When a different version is already active,
+not prepared release, with current/state/journal unchanged. Missing signed metadata stops before image acquisition. When a different version is already active,
 the new release is staged and validated offline, then preparation warns and
 succeeds with active/rollback state unchanged; activate it with the explicit
 owner command below.
@@ -567,3 +590,10 @@ evidence. Readback targets `https://local.localhost[:port]<--mount-path>/` unles
 an explicit `--readback-url` is given (use it when the ingress path differs from
 the internal mount). It uses HTTPS, the existing gateway CA where present, and refuses
 redirects or failed requests rather than treating them as absent legacy digests.
+
+Consumer rollout is blocked until a complete versioned release plus latest pointer has
+been published. The approved public key `portal-view-release-2026-10.pem` is
+enrolled in the source trust directory for Git distribution.
+Releases published before this change lack the required versioned `assets/` and
+`portal-view/` directories and cannot be selected, even with
+`LIGHT_PORTAL_VERSION=<old-tag>`; pin a newly published complete release instead.

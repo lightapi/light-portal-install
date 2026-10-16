@@ -213,24 +213,44 @@ def metadata_version(data):
     return release.component(values[0].split('=', 1)[1])
 
 
+def resolve_source(base, enclosing, transport):
+    """Resolve latest once; all payloads then come from a versioned directory."""
+    source = base.rstrip('/') + '/' + enclosing + '/portal-view'
+    if enclosing == 'latest':
+        with transport.open(source + '/release-pointer.env', timeout=60) as response:
+            release.require(response.status == 200, 'release pointer did not return HTTP 200')
+            data = response.read(4097)
+        release.require(len(data) <= 4096, 'release pointer is too large')
+        try:
+            text = data.decode('ascii')
+        except UnicodeError as error:
+            raise release.ActivationError('release pointer must be ASCII') from error
+        release.require(text.startswith('LIGHT_PORTAL_VERSION=') and text.count('\n') == 1
+                        and text.endswith('\n'), 'malformed release pointer')
+        enclosing = release.component(text.strip().split('=', 1)[1])
+        release.require(enclosing != 'latest', 'release pointer must select a versioned release')
+        source = base.rstrip('/') + '/' + enclosing + '/portal-view'
+    return source
+
+
 def prepare(enclosing, release_base=None, runner_factory=RealRunner, opener=None):
-    """Optional signed discovery; only HTTP 404 means genuinely absent."""
+    """Resolve and prepare a verified signed package; missing publication fails closed."""
     release.component(enclosing)
     base = release_base or os.environ.get('LIGHT_PORTAL_RELEASE_BASE_URL', os.environ.get('LIGHT_PORTAL_ASSET_BASE_URL', 'https://cdn.networknt.com').rstrip('/') + '/light-portal/releases')
     parsed = urllib.parse.urlsplit(base)
     release.require(parsed.scheme == 'https' and parsed.hostname and not parsed.username and not parsed.password
                     and not parsed.query and not parsed.fragment, 'release base must be HTTPS without credentials/query/fragment')
-    source = base.rstrip('/') + '/' + enclosing + '/portal-view'
     transport = opener or urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
     try:
+        source = resolve_source(base, enclosing, transport)
         with transport.open(source + '/portal-view-release.env', timeout=60) as response:
             release.require(response.status == 200, 'release env did not return HTTP 200')
             version = metadata_version(response.read(4097))
     except urllib.error.HTTPError as error:
         if error.code != 404:
             raise release.ActivationError('signed release metadata download failed: HTTP ' + str(error.code)) from error
-        print('portal-view signed release not published for ' + enclosing + '; serving legacy UI')
-        return
+        raise release.ActivationError('signed Portal View release not published for ' + enclosing
+                                      + '; publication is required before preparation') from error
     ROOT.mkdir(parents=True, exist_ok=True)
     with release.locked(ROOT):
         release.consistent(ROOT)  # Refuse a retained journal before any download.
@@ -304,8 +324,11 @@ def parser():
         if name == 'recreate':
             command.add_argument('--expect-legacy', action='store_true')
     commands.add_parser('status')
+    resolve = commands.add_parser('resolve')
+    resolve.add_argument('--enclosing-version', default='latest')
+    resolve.add_argument('--release-base', required=True)
     prep = commands.add_parser('prepare')
-    prep.add_argument('--enclosing-version', required=True)
+    prep.add_argument('--enclosing-version', default=os.environ.get('LIGHT_PORTAL_VERSION', 'latest'))
     prep.add_argument('--release-base')
     legacy = commands.add_parser('legacy-dist')
     legacy.add_argument('--archive', required=True, type=Path)
@@ -320,6 +343,7 @@ def source_for(args, env):
     enclosing = env.get('LIGHT_PORTAL_VERSION')
     release.require(enclosing is not None and enclosing != '', 'remote stage requires explicit LIGHT_PORTAL_VERSION (enclosing release), separate from --version')
     release.component(enclosing)
+    release.require(enclosing != 'latest', 'stage requires a pinned LIGHT_PORTAL_VERSION; use prepare to resolve latest, then pin the enclosing release and artifact version')
     base = env.get('LIGHT_PORTAL_ASSET_BASE_URL', 'https://cdn.networknt.com').rstrip('/')
     parsed = urllib.parse.urlsplit(base)
     release.require(parsed.scheme == 'https' and parsed.hostname and not parsed.username
@@ -328,13 +352,23 @@ def source_for(args, env):
     parsed = urllib.parse.urlsplit(release_base)
     release.require(parsed.scheme == 'https' and parsed.hostname and not parsed.username
                     and not parsed.password and not parsed.query and not parsed.fragment, 'release base must be HTTPS without credentials/query/fragment')
-    return release_base + '/' + enclosing + '/portal-view'
+    transport = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    return resolve_source(release_base, enclosing, transport)
 
 
 def main(argv=None, runner_factory=RealRunner):
     try:
         args = parser().parse_args(argv)
-        if args.command == 'prepare':
+        if args.command == 'resolve':
+            release.component(args.enclosing_version)
+            parsed = urllib.parse.urlsplit(args.release_base)
+            release.require(parsed.scheme == 'https' and parsed.hostname and not parsed.username
+                            and not parsed.password and not parsed.query and not parsed.fragment,
+                            'release base must be HTTPS without credentials/query/fragment')
+            transport = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+            source = resolve_source(args.release_base, args.enclosing_version, transport)
+            print(source.rsplit('/', 2)[1])
+        elif args.command == 'prepare':
             prepare(args.enclosing_version, args.release_base, runner_factory)
         elif args.command == 'legacy-dist':
             legacy_dist(args.archive, args.root)

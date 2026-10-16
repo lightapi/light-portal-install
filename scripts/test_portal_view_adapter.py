@@ -128,7 +128,8 @@ class AdapterTests(unittest.TestCase):
 
     def test_absent_signed_release_has_no_pointer_runner_or_pull(self):
         self.transport.open.side_effect = urllib.error.HTTPError('https://example', 404, 'absent', {}, None)
-        self.prepare()
+        with self.assertRaisesRegex(r.ActivationError, 'not published'):
+            self.prepare()
         self.factory.assert_not_called()
         self.assertFalse((self.root / 'current').exists())
         self.fake.ensure_image.assert_not_called()
@@ -392,6 +393,45 @@ class AdapterTests(unittest.TestCase):
             self.assertIn('./portal-bff-sso/lightapi:/lightapi:ro,Z', data['services']['portal-bff-sso']['volumes'])
 
 
+    def test_latest_resolves_once_and_downloads_only_pinned_payloads(self):
+        folder = self.serve()
+        urls = []
+        def fetch(url, timeout):
+            urls.append(url)
+            if url.endswith('/latest/portal-view/release-pointer.env'):
+                return response(b'LIGHT_PORTAL_VERSION=2.6.0\n')
+            self.assertIn('/2.6.0/portal-view/', url)
+            if url.endswith('portal-view-release.env'):
+                return response(('PORTAL_VIEW_VERSION=' + portable.A + '\n').encode())
+            return response((folder / url.rsplit('/', 1)[1]).read_bytes())
+        self.transport.open.side_effect = fetch
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli.prepare('latest', 'https://cdn.example/releases', self.factory, self.transport)
+        self.assertEqual(sum('/latest/' in u for u in urls), 1)
+        self.assertEqual(r.target(self.root), 'releases/' + portable.A)
+
+    def test_missing_latest_pointer_refuses_before_payload_or_image(self):
+        self.transport.open.side_effect = urllib.error.HTTPError('https://example', 404, 'missing pointer', {}, None)
+        with self.assertRaisesRegex(r.ActivationError, 'not published'):
+            cli.prepare('latest', 'https://cdn.example/releases', self.factory, self.transport)
+        self.factory.assert_not_called()
+        self.assertEqual(self.transport.open.call_count, 1)
+        self.assertFalse((self.root / 'current').exists())
+
+    def test_stage_latest_requires_pinning_before_manual_artifact_selection(self):
+        with self.assertRaisesRegex(r.ActivationError, 'stage requires a pinned'):
+            cli.source_for(types.SimpleNamespace(from_dir=None), {'LIGHT_PORTAL_VERSION': 'latest'})
+
+    def test_invalid_latest_pointer_refuses_before_payload_or_image(self):
+        for data in (b'', b'LIGHT_PORTAL_VERSION=latest\n', b'LIGHT_PORTAL_VERSION=../x\n',
+                     b'LIGHT_PORTAL_VERSION=x\nBAD=1\n', b'\xff', b'x' * 4097):
+            self.transport.open.return_value = response(data)
+            with self.assertRaises(r.ActivationError):
+                cli.resolve_source('https://cdn.example/releases', 'latest', self.transport)
+        self.factory.assert_not_called()
+
+
+
 class ShellDispatchTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='wp12-shell-')
@@ -422,7 +462,7 @@ class ShellDispatchTests(unittest.TestCase):
         # Preparation's external operations are mocked at the entry-point boundary;
         # library/Runner behavior is tested above with signed fixtures.
         python = self.bin / 'python3'
-        python.write_text('#!/bin/sh\nprintf "python %s\\n" "$*" >> "$WP12_LOG"\ncase "$*" in *" prepare "*) exit "${WP12_PREPARE_EXIT:-0}";; *" installer-config"*) exit 0;; esac\nexec ' + shutil.which('python3') + ' "$@"\n')
+        python.write_text('#!/bin/sh\nprintf "python %s\\n" "$*" >> "$WP12_LOG"\ncase "$*" in *" resolve "*) echo 2.6.0; exit "${WP12_RESOLVE_EXIT:-0}";; *" prepare "*) exit "${WP12_PREPARE_EXIT:-0}";; *" installer-config"*) exit 0;; esac\nexec ' + shutil.which('python3') + ' "$@"\n')
         python.chmod(0o700)
         self.root = self.checkout / 'light-gateway-rust/lightapi'
         (self.root / 'dist').mkdir(parents=True)
@@ -457,8 +497,47 @@ class ShellDispatchTests(unittest.TestCase):
                 self.assertEqual((self.root / 'dist/index.html').read_bytes(), b'legacy user_type=C')
                 calls = self.log.read_text()
                 self.assertNotIn('UNEXPECTED', calls)
-                self.assertEqual(' prepare ' in calls, signed or cli.MODE == 'installer')
+                self.assertIn(' prepare ', calls)
                 self.log.unlink()
+
+    def test_installer_resolves_one_release_for_every_download(self):
+        source = (REPO / 'install.sh').read_text()
+        helpers = '\n'.join(re.findall(r'^(?:download_assets|download_release_artifacts)\(\) \{.*?^\}', source, re.M | re.S))
+        stubs = r"""
+require_command() { :; }
+log() { :; }
+download_file() { printf 'DOWNLOAD %s\n' "$1"; }
+download_archive() { printf 'DOWNLOAD %s/%s\n' "$asset_base_url" "$1"; }
+download_archive_file() { printf 'DOWNLOAD %s/%s\n' "$asset_base_url" "$1"; }
+normalize_events_json() { :; }
+unzip() { :; }
+python3() {
+  case "$*" in
+    *" resolve "*) printf 'RESOLVE\n' >&2; echo release-N-minus-1 ;;
+    *" prepare "*) printf 'PREPARE %s\n' "$*" ;;
+    *) : ;;
+  esac
+}
+"""
+        script = 'set -euo pipefail\n' + helpers + stubs + '\nversion=latest\nasset_base_url=https://cdn.example\nrelease_base_url=https://cdn.example/releases\ndownload_assets\ndownload_release_artifacts\n'
+        (self.checkout / '.env').write_text('')
+        result = ORIGINAL_RUN(['bash', '-c', script], cwd=self.checkout, env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr.count('RESOLVE'), 1)
+        downloads = [line for line in result.stdout.splitlines() if line.startswith('DOWNLOAD ')]
+        self.assertEqual(len(downloads), 7)
+        self.assertTrue(all('/releases/release-N-minus-1/' in line for line in downloads), downloads)
+        self.assertIn('--enclosing-version release-N-minus-1', result.stdout)
+        self.assertNotIn('/latest/', result.stdout)
+
+    def test_installer_pointer_failure_precedes_all_downloads(self):
+        self.env['WP12_RESOLVE_EXIT'] = '2'
+        result = self.run_shell()
+        self.assertNotEqual(result.returncode, 0)
+        calls = self.log.read_text()
+        self.assertIn(' resolve ', calls)
+        self.assertNotIn('curl ', calls)
+        self.assertNotIn(' prepare ', calls)
 
     def test_failed_download_and_invalid_extraction_preserve_all_contents(self):
         before = snapshot(self.root)

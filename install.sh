@@ -8,7 +8,7 @@ Usage: ./install.sh [command]
 Commands:
   install    Download R2 assets and start the local stack. Default.
   update     Refresh R2 assets and docker-images.env, then restart.
-  assets     Download assets; prepare a signed UI if published (may pull its image).
+  assets     Download assets; require and prepare the signed UI (may pull its image).
   start      Start Docker Compose.
   stop       Stop Docker Compose.
   status     Show Docker Compose status.
@@ -16,8 +16,10 @@ Commands:
   uninstall  Stop the stack and optionally delete volumes.
 
 Environment:
-  LIGHT_PORTAL_VERSION       Default: VERSION file, usually latest.
+  LIGHT_PORTAL_VERSION       Default: VERSION file, usually latest; override to pin.
   LIGHT_PORTAL_ASSET_BASE_URL
+                             CDN root used to derive the default release base.
+                             Legacy assets use <release-base>/<version>/assets.
                              Default: https://cdn.networknt.com
   LIGHT_PORTAL_RELEASE_BASE_URL
                              Default: $LIGHT_PORTAL_ASSET_BASE_URL/light-portal/releases
@@ -317,6 +319,10 @@ download_assets() {
   require_command unzip
   require_command python3
 
+  # Resolve the moving pointer once, before any release-dependent download.
+  version="$(python3 -B scripts/portal-view-release.py resolve --enclosing-version "$version" --release-base "$release_base_url")"
+  asset_base_url="$release_base_url/$version/assets"
+  log "using coherent release $version"
   mkdir -p light-gateway-rust/lightapi/dist light-gateway-rust/signin/dist data
 
   docker_env_url="$release_base_url/$version/docker-images.env"
