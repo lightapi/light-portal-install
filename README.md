@@ -500,6 +500,12 @@ Use the existing deployment entry point for the complete environment and startup
 ordering; updating source files does not restart already-created containers.
 ## Signed Portal View packages
 
+Release downloads identify as `portal-view-release/1.0` to avoid CDN rules that
+reject Python's default User-Agent. Set `PORTAL_VIEW_USER_AGENT` to a nonempty
+printable ASCII value to override the download identity. This does not change
+signature verification or gateway readback requests. Caller-injected transports
+retain their configured headers.
+
 Portal View is built once by the release publisher. Deployment configuration lives
 in `config/portal-config.json`; changing customer authentication or URLs does not
 require Node.js, npm, a Portal View checkout, or rebuilding the SPA.
