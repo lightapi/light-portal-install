@@ -500,15 +500,20 @@ Use the existing deployment entry point for the complete environment and startup
 ordering; updating source files does not restart already-created containers.
 ## Signed Portal View packages
 
-Release downloads identify as `portal-view-release/1.0` to avoid CDN rules that
-reject Python's default User-Agent. Set `PORTAL_VIEW_USER_AGENT` to a nonempty
-printable ASCII value to override the download identity. This does not change
-signature verification or gateway readback requests. Caller-injected transports
-retain their configured headers.
-
 Portal View is built once by the release publisher. Deployment configuration lives
 in `config/portal-config.json`; changing customer authentication or URLs does not
 require Node.js, npm, a Portal View checkout, or rebuilding the SPA.
+
+Release downloads identify as `portal-view-release/1.0`. Set
+`PORTAL_VIEW_USER_AGENT` to printable ASCII text to override it; an unset or
+empty value uses the default. Invalid nonempty values are refused before remote
+staging creates directories, and one transport serves each stage batch.
+Injected preparation transports retain their headers. Signature verification
+and gateway readback requests are unchanged.
+
+Maintainers synchronize download helpers and contract test support from
+`portal-config-loc` using its `scripts/sync-portal-view-downloads.py --check`
+(or `--write` after a canonical change) with sibling checkouts present.
 
 The default selection is `latest` (the `VERSION` file remains a supported default). Preparation reads
 `https://cdn.networknt.com/light-portal/releases/latest/portal-view/release-pointer.env`
